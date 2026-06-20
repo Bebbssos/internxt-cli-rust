@@ -10,6 +10,11 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
 use crate::auth;
 use crate::config;
 use crate::crypto::{self, Ctr};
@@ -20,6 +25,9 @@ const MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
 const PART_SIZE: usize = 15 * 1024 * 1024; // 15MB
 const READ_CHUNK: usize = 1024 * 1024; // 1MB stream granularity
 const UPLOAD_CONCURRENCY: usize = 10;
+const MAX_CONCURRENT_FILE_UPLOADS: usize = 10;
+const FOLDER_CREATE_RETRIES: usize = 2;
+const RETRY_DELAYS_MS: [u64; 3] = [500, 1000, 2000];
 
 fn to_rfc3339(t: SystemTime) -> String {
     let dt: DateTime<Utc> = t.into();
@@ -58,18 +66,8 @@ pub async fn upload_file(file_path: &str, destination: Option<&str>) -> Result<(
 
     if size > 0 {
         let net = NetworkApi::new(&user.bridge_user, &user.user_id);
-
-        let mut index = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut index);
-        let iv = index[0..16].to_vec();
-        let key = crypto::generate_file_key(&user.mnemonic, &user.bucket, &index)?;
-
-        println!("Preparing network...");
-        file_id = if size > MULTIPART_THRESHOLD {
-            upload_multipart(&net, &user.bucket, size, path, &key, &iv, &index).await?
-        } else {
-            upload_single(&net, &user.bucket, size, path, &key, &iv, &index).await?
-        };
+        crate::output::status("Preparing network...");
+        file_id = upload_file_to_network(&net, &user.bucket, &user.mnemonic, path, size).await?;
     }
 
     let creation = to_rfc3339(meta.created().unwrap_or_else(|_| SystemTime::now()));
@@ -90,12 +88,36 @@ pub async fn upload_file(file_path: &str, destination: Option<&str>) -> Result<(
         )
         .await?;
 
-    println!(
-        "File uploaded successfully, view it at {}/file/{}",
-        config::drive_web_url(),
-        drive_file.uuid
+    crate::output::emit(
+        &format!(
+            "File uploaded successfully, view it at {}/file/{}",
+            config::drive_web_url(),
+            drive_file.uuid
+        ),
+        serde_json::json!({ "success": true, "file": { "uuid": drive_file.uuid } }),
     );
     Ok(())
+}
+
+/// Encrypt + upload a file's bytes to the network, returning the network file id.
+/// Picks single-part or multipart based on size. Shared by upload-file / upload-folder.
+pub async fn upload_file_to_network(
+    net: &NetworkApi,
+    bucket: &str,
+    mnemonic: &str,
+    path: &Path,
+    size: u64,
+) -> Result<String> {
+    let mut index = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut index);
+    let iv = index[0..16].to_vec();
+    let key = crypto::generate_file_key(mnemonic, bucket, &index)?;
+
+    if size > MULTIPART_THRESHOLD {
+        upload_multipart(net, bucket, size, path, &key, &iv, &index).await
+    } else {
+        upload_single(net, bucket, size, path, &key, &iv, &index).await
+    }
 }
 
 /// Single presigned-URL upload, body streamed straight from disk through CTR.
@@ -145,7 +167,7 @@ async fn upload_single(
         }
     });
 
-    println!("Uploading {} bytes...", size);
+    crate::output::status(&format!("Uploading {} bytes...", size));
     net.put_stream(&url, size, body).await?;
 
     let digest = hasher.lock().unwrap().clone().finalize();
@@ -247,7 +269,7 @@ async fn dispatch_part(
     handles.push(tokio::spawn(async move {
         let _permit = permit;
         let etag = net.put_part(&url, body).await?;
-        println!("Uploaded part {part_number}");
+        crate::output::status(&format!("Uploaded part {part_number}"));
         Ok(PartRef { part_number, etag })
     }));
     Ok(())
@@ -259,7 +281,7 @@ pub async fn download_file(uuid: &str, directory: Option<&str>, overwrite: bool)
     let user = &creds.user;
 
     let api = DriveApi::new();
-    println!("Getting file metadata...");
+    crate::output::status("Getting file metadata...");
     let meta: DriveFileData = api.get_file_meta(&creds.token, uuid).await?;
 
     let name = meta
@@ -285,7 +307,10 @@ pub async fn download_file(uuid: &str, directory: Option<&str>, overwrite: bool)
     let size = meta.size.0;
     if size == 0 {
         std::fs::write(&out_path, b"")?;
-        println!("File downloaded successfully to {}", out_path.display());
+        crate::output::emit(
+            &format!("File downloaded successfully to {}", out_path.display()),
+            serde_json::json!({ "success": true, "path": out_path.display().to_string() }),
+        );
         return Ok(());
     }
 
@@ -299,7 +324,7 @@ pub async fn download_file(uuid: &str, directory: Option<&str>, overwrite: bool)
         meta.bucket.clone()
     };
 
-    println!("Preparing network...");
+    crate::output::status("Preparing network...");
     let net = NetworkApi::new(&user.bridge_user, &user.user_id);
     let links = net.get_download_links(&bucket, &file_id).await?;
     if matches!(links.version, None | Some(1)) {
@@ -325,7 +350,7 @@ pub async fn download_file(uuid: &str, directory: Option<&str>, overwrite: bool)
             ctr.apply(&mut bytes);
             out.write_all(&bytes).await?;
             written += bytes.len() as u64;
-            if size > 0 {
+            if size > 0 && !crate::output::is_json() {
                 let pct = (written as f64 / size as f64 * 100.0).min(100.0);
                 print!("\rDownloading {pct:.0}%");
                 use std::io::Write;
@@ -334,6 +359,281 @@ pub async fn download_file(uuid: &str, directory: Option<&str>, overwrite: bool)
         }
     }
     out.flush().await?;
-    println!("\rFile downloaded successfully to {}", out_path.display());
+    if !crate::output::is_json() {
+        print!("\r");
+    }
+    crate::output::emit(
+        &format!("File downloaded successfully to {}", out_path.display()),
+        serde_json::json!({ "success": true, "path": out_path.display().to_string() }),
+    );
+    Ok(())
+}
+
+// ---- upload-folder ----
+
+/// One scanned filesystem entry. `rel` is relative to the parent of the upload root,
+/// so the upload root itself has `rel == <root basename>` (mirrors node's `relative`).
+struct ScanNode {
+    /// File stem (files) or directory basename (folders) — used as the Drive name.
+    name: String,
+    abs: PathBuf,
+    rel: PathBuf,
+    size: u64,
+}
+
+/// Node's `path.dirname` semantics: a single-component path → "root level" (None here),
+/// otherwise the parent path. Used to map an item to its parent folder.
+fn parent_key(rel: &Path) -> Option<PathBuf> {
+    match rel.parent() {
+        Some(p) if !p.as_os_str().is_empty() => Some(p.to_path_buf()),
+        _ => None,
+    }
+}
+
+/// Recursively scan a directory (pre-order: parent folder pushed before its children),
+/// skipping symlinks and zero-byte files. Returns total bytes.
+fn scan_dir(
+    current: &Path,
+    parent: &Path,
+    folders: &mut Vec<ScanNode>,
+    files: &mut Vec<ScanNode>,
+) -> u64 {
+    let meta = match std::fs::symlink_metadata(current) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+    if meta.file_type().is_symlink() {
+        return 0;
+    }
+    let rel = current.strip_prefix(parent).unwrap_or(current).to_path_buf();
+
+    if meta.is_file() {
+        if meta.len() == 0 {
+            return 0;
+        }
+        let name = current
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("file")
+            .to_string();
+        files.push(ScanNode {
+            name,
+            abs: current.to_path_buf(),
+            rel,
+            size: meta.len(),
+        });
+        return meta.len();
+    }
+
+    if meta.is_dir() {
+        let name = current
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("folder")
+            .to_string();
+        folders.push(ScanNode {
+            name,
+            abs: current.to_path_buf(),
+            rel,
+            size: 0,
+        });
+        let mut total = 0;
+        if let Ok(entries) = std::fs::read_dir(current) {
+            for entry in entries.flatten() {
+                total += scan_dir(&entry.path(), parent, folders, files);
+            }
+        }
+        return total;
+    }
+    0
+}
+
+/// Create a folder, retrying transient failures; returns None if it already exists.
+async fn create_folder_with_retry(
+    api: &DriveApi,
+    token: &str,
+    name: &str,
+    parent_uuid: &str,
+) -> Result<Option<String>> {
+    for attempt in 0..=FOLDER_CREATE_RETRIES {
+        match api.create_folder(token, name, parent_uuid).await {
+            Ok(v) => {
+                let uuid = v["uuid"].as_str().unwrap_or_default().to_string();
+                return Ok(Some(uuid));
+            }
+            Err(e) => {
+                if e.to_string().to_lowercase().contains("already exists") {
+                    return Ok(None);
+                }
+                if attempt < FOLDER_CREATE_RETRIES {
+                    tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAYS_MS[attempt]))
+                        .await;
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Network-upload + create-entry for a single scanned file.
+async fn upload_one_file(
+    net: &NetworkApi,
+    api: &DriveApi,
+    token: &str,
+    user: &crate::models::UserInfo,
+    file: &ScanNode,
+    parent_uuid: &str,
+) -> Result<()> {
+    let meta = std::fs::metadata(&file.abs)?;
+    let size = meta.len();
+    let file_type = file
+        .abs
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    let mut file_id = String::new();
+    if size > 0 {
+        file_id = upload_file_to_network(net, &user.bucket, &user.mnemonic, &file.abs, size).await?;
+    }
+
+    let creation = to_rfc3339(meta.created().unwrap_or_else(|_| SystemTime::now()));
+    let modification = to_rfc3339(meta.modified().unwrap_or_else(|_| SystemTime::now()));
+    api.create_file_entry(
+        token,
+        &file.name,
+        &file_type,
+        size,
+        parent_uuid,
+        &file_id,
+        &user.bucket,
+        &creation,
+        &modification,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Recursively upload a local folder tree to Internxt Drive.
+pub async fn upload_folder(local_path: &str, destination: Option<&str>) -> Result<()> {
+    let creds = auth::read_credentials()?;
+    let user = creds.user.clone();
+
+    let root = Path::new(local_path);
+    let md = std::fs::metadata(root).map_err(|_| anyhow!("Not a directory: {local_path}"))?;
+    if !md.is_dir() {
+        return Err(anyhow!("Not a directory: {local_path}"));
+    }
+    let dest = match destination {
+        Some(d) if !d.trim().is_empty() => d.to_string(),
+        _ => user.root_folder_id.clone(),
+    };
+
+    let parent = root.parent().unwrap_or_else(|| Path::new(""));
+    let mut folders = Vec::new();
+    let mut files = Vec::new();
+    let total_bytes = scan_dir(root, parent, &mut folders, &mut files);
+
+    let timer = Instant::now();
+    crate::output::status("Preparing network...");
+    let net = NetworkApi::new(&user.bridge_user, &user.user_id);
+    let api = DriveApi::new();
+
+    // 1. Recreate the folder tree (sequential — children need their parent's uuid).
+    let mut folder_map: HashMap<PathBuf, String> = HashMap::new();
+    for f in &folders {
+        let parent_uuid = match parent_key(&f.rel) {
+            None => dest.clone(),
+            Some(p) => match folder_map.get(&p) {
+                Some(u) => u.clone(),
+                None => {
+                    crate::output::status(&format!(
+                        "Parent folder not found for {}, skipping...",
+                        f.rel.display()
+                    ));
+                    continue;
+                }
+            },
+        };
+        if let Some(uuid) =
+            create_folder_with_retry(&api, &creds.token, &f.name, &parent_uuid).await?
+        {
+            crate::output::status(&format!("Created folder {}", f.name));
+            folder_map.insert(f.rel.clone(), uuid);
+        }
+    }
+    if folder_map.is_empty() {
+        return Err(anyhow!("Failed to create folders, cannot upload files"));
+    }
+    // Mitigates upstream PB-1446 (folder not immediately consistent after creation).
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // 2. Upload files with bounded concurrency.
+    let uploaded = Arc::new(AtomicU64::new(0));
+    let folder_map = Arc::new(folder_map);
+    let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FILE_UPLOADS));
+    let mut handles = Vec::new();
+
+    for file in files {
+        let parent_uuid = match parent_key(&file.rel) {
+            None => dest.clone(),
+            Some(p) => match folder_map.get(&p) {
+                Some(u) => u.clone(),
+                None => {
+                    crate::output::status(&format!(
+                        "Parent folder not found for {}, skipping...",
+                        file.rel.display()
+                    ));
+                    continue;
+                }
+            },
+        };
+        let permit = sem.clone().acquire_owned().await.unwrap();
+        let net = net.clone();
+        let api = DriveApi::new();
+        let token = creds.token.clone();
+        let user = user.clone();
+        let uploaded = uploaded.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = permit;
+            match upload_one_file(&net, &api, &token, &user, &file, &parent_uuid).await {
+                Ok(()) => {
+                    uploaded.fetch_add(file.size, Ordering::Relaxed);
+                    crate::output::status(&format!("Uploaded {}", file.name));
+                }
+                Err(e) => {
+                    crate::output::status(&format!("Failed to upload {}: {e}", file.name));
+                }
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.await;
+    }
+
+    let root_name = root
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(local_path));
+    let root_folder_id = folder_map.get(&root_name).cloned().unwrap_or_default();
+    let elapsed_ms = timer.elapsed().as_millis();
+    let total_uploaded = uploaded.load(Ordering::Relaxed);
+    let _ = total_bytes;
+
+    let folder_url = format!("{}/folder/{}", config::drive_web_url(), root_folder_id);
+    crate::output::emit(
+        &format!(
+            "Folder uploaded in {elapsed_ms}ms, view it at {folder_url} ({total_uploaded} bytes)"
+        ),
+        serde_json::json!({
+            "success": true,
+            "folder": { "uuid": root_folder_id },
+            "totalBytes": total_uploaded,
+            "uploadTimeMs": elapsed_ms,
+        }),
+    );
     Ok(())
 }

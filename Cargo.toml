@@ -3,7 +3,7 @@ name = "internxt"
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
-description = "Unofficial Rust port of the Internxt CLI (login, streaming upload/download)"
+description = "Unofficial Rust port of the Internxt CLI"
 repository = "https://github.com/Bebbssos/internxt-cli-rust"
 
 [[bin]]

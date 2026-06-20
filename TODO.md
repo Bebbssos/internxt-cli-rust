@@ -35,12 +35,13 @@ diff upstream against them to find changes worth pulling in.
 - [x] `trash-file`, `trash-folder`, `trash-list`, `trash-restore-file`, `trash-restore-folder`, `trash-clear`
 - [x] `delete-permanently-file`, `delete-permanently-folder`
 
-> All of the above live in `src/drive_ops.rs` (REST helpers in `src/api.rs`).
+> Most of the above live in `src/drive_ops.rs` (REST helpers in `src/api.rs`).
 > Verified end-to-end against a real account (full file + folder lifecycles).
+- [x] `upload-folder` — recursive folder upload (tree created sequentially, files
+      uploaded with bounded concurrency; in `src/commands.rs`)
 
 ### Missing commands
 - [ ] `login` (SSO) — node `login.ts` web-based flow (local callback server + browser)
-- [ ] `upload-folder` — recursive folder upload (folder tree + concurrent files)
 - [ ] `config` — show/set config
 - [ ] `logs`
 - [ ] `webdav`, `webdav-config`, `add-cert` — WebDAV server mode (big; express + sqlite + TLS)
@@ -78,11 +79,6 @@ diff upstream against them to find changes worth pulling in.
       overridable via env vars. Decide if a `.env` file should be supported.
 - [ ] SDK-style request retry layer (node `SdkManager` maxRetries: 3).
 - [ ] Local drive cache (node uses better-sqlite3 / typeorm `internxt-cli-drive.db`).
-- [ ] JSON output mode (`--json`) for scripting parity.
+- [x] JSON output mode (`--json`) for scripting parity — global flag; each command
+      emits a single JSON object on success/error (`src/output.rs`).
 - [ ] `--non-interactive` flag semantics.
-
-## Nice-to-have / ideas
-- [ ] Benchmarks vs node CLI (throughput, RAM, cold-start).
-- [ ] Resumable uploads (persist UploadId + completed parts).
-- [ ] Tune multipart part size / concurrency for throughput.
-- [ ] Integration test harness against a test account (currently only crypto unit tests).

@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use crate::api::DriveApi;
 use crate::auth;
 use crate::config;
+use crate::output;
 
 /// Resolve a folder uuid flag, falling back to the user's root folder when empty.
 fn fallback_root(uuid: Option<&str>, root: &str) -> String {
@@ -80,7 +81,10 @@ pub async fn logout() -> Result<()> {
     let creds = match auth::read_credentials() {
         Ok(c) => c,
         Err(_) => {
-            println!("No user is currently logged in.");
+            output::emit(
+                "No user is currently logged in.",
+                json!({ "success": false, "message": "No user is currently logged in." }),
+            );
             return Ok(());
         }
     };
@@ -90,18 +94,27 @@ pub async fn logout() -> Result<()> {
     if path.exists() {
         std::fs::remove_file(&path)?;
     }
-    println!("✓ User logged out successfully.");
+    output::emit(
+        "✓ User logged out successfully.",
+        json!({ "success": true, "message": "User logged out successfully." }),
+    );
     Ok(())
 }
 
 pub async fn whoami() -> Result<()> {
     match auth::read_credentials() {
         Ok(creds) => {
-            println!("✓ You are logged in as: {}.", creds.user.email);
+            output::emit(
+                &format!("✓ You are logged in as: {}.", creds.user.email),
+                json!({ "success": true, "login": { "email": creds.user.email } }),
+            );
             Ok(())
         }
         Err(_) => {
-            println!("You are not logged in.");
+            output::emit(
+                "You are not logged in.",
+                json!({ "success": false, "message": "You are not logged in." }),
+            );
             Ok(())
         }
     }
@@ -117,7 +130,11 @@ pub async fn list(folder_id: Option<&str>, extended: bool) -> Result<()> {
     let folders = collect_all(&api, &creds.token, &folder_uuid, true).await?;
     let files = collect_all(&api, &creds.token, &folder_uuid, false).await?;
 
-    render_items(&folders, &files, extended);
+    if output::is_json() {
+        output::emit("", json!({ "success": true, "list": { "folders": folders, "files": files } }));
+    } else {
+        render_items(&folders, &files, extended);
+    }
     Ok(())
 }
 
@@ -206,15 +223,18 @@ pub async fn create_folder(name: &str, parent_id: Option<&str>) -> Result<()> {
     let api = DriveApi::new();
     let parent = fallback_root(parent_id, &creds.user.root_folder_id);
 
-    println!("Creating folder...");
+    output::status("Creating folder...");
     let folder = api.create_folder(&creds.token, name, &parent).await?;
     let uuid = str_field(&folder, "uuid");
     let plain = str_field(&folder, "plainName");
-    println!(
-        "✓ Folder {} created successfully, view it at {}/folder/{}",
-        plain,
-        config::drive_web_url(),
-        uuid
+    output::emit(
+        &format!(
+            "✓ Folder {} created successfully, view it at {}/folder/{}",
+            plain,
+            config::drive_web_url(),
+            uuid
+        ),
+        json!({ "success": true, "folder": folder }),
     );
     Ok(())
 }
@@ -223,8 +243,11 @@ pub async fn move_file(file_id: &str, destination: Option<&str>) -> Result<()> {
     let creds = auth::read_credentials()?;
     let api = DriveApi::new();
     let dest = fallback_root(destination, &creds.user.root_folder_id);
-    api.move_file(&creds.token, file_id, &dest).await?;
-    println!("✓ File moved successfully to: {dest}");
+    let file = api.move_file(&creds.token, file_id, &dest).await?;
+    output::emit(
+        &format!("✓ File moved successfully to: {dest}"),
+        json!({ "success": true, "file": file }),
+    );
     Ok(())
 }
 
@@ -232,8 +255,11 @@ pub async fn move_folder(folder_id: &str, destination: Option<&str>) -> Result<(
     let creds = auth::read_credentials()?;
     let api = DriveApi::new();
     let dest = fallback_root(destination, &creds.user.root_folder_id);
-    api.move_folder(&creds.token, folder_id, &dest).await?;
-    println!("✓ Folder moved successfully to: {dest}");
+    let folder = api.move_folder(&creds.token, folder_id, &dest).await?;
+    output::emit(
+        &format!("✓ Folder moved successfully to: {dest}"),
+        json!({ "success": true, "folder": folder }),
+    );
     Ok(())
 }
 
@@ -250,7 +276,10 @@ pub async fn rename_file(file_id: &str, new_name: &str) -> Result<()> {
     } else {
         format!("{name}.{ext}")
     };
-    println!("✓ File renamed successfully with: {shown}");
+    output::emit(
+        &format!("✓ File renamed successfully with: {shown}"),
+        json!({ "success": true, "file": { "uuid": file_id, "plainName": name, "type": ext } }),
+    );
     Ok(())
 }
 
@@ -258,7 +287,10 @@ pub async fn rename_folder(folder_id: &str, new_name: &str) -> Result<()> {
     let creds = auth::read_credentials()?;
     let api = DriveApi::new();
     api.rename_folder(&creds.token, folder_id, new_name).await?;
-    println!("✓ Folder renamed successfully with: {new_name}");
+    output::emit(
+        &format!("✓ Folder renamed successfully with: {new_name}"),
+        json!({ "success": true, "folder": { "uuid": folder_id, "plainName": new_name } }),
+    );
     Ok(())
 }
 
@@ -269,7 +301,10 @@ pub async fn trash_file(file_id: &str) -> Result<()> {
     let api = DriveApi::new();
     api.trash_items(&creds.token, json!([{ "uuid": file_id, "type": "file" }]))
         .await?;
-    println!("✓ File trashed successfully.");
+    output::emit(
+        "✓ File trashed successfully.",
+        json!({ "success": true, "file": { "uuid": file_id } }),
+    );
     Ok(())
 }
 
@@ -278,7 +313,10 @@ pub async fn trash_folder(folder_id: &str) -> Result<()> {
     let api = DriveApi::new();
     api.trash_items(&creds.token, json!([{ "uuid": folder_id, "type": "folder" }]))
         .await?;
-    println!("✓ Folder trashed successfully.");
+    output::emit(
+        "✓ Folder trashed successfully.",
+        json!({ "success": true, "folder": { "uuid": folder_id } }),
+    );
     Ok(())
 }
 
@@ -288,7 +326,11 @@ pub async fn trash_list(extended: bool) -> Result<()> {
 
     let folders = collect_trash(&api, &creds.token, "folders").await?;
     let files = collect_trash(&api, &creds.token, "files").await?;
-    render_items(&folders, &files, extended);
+    if output::is_json() {
+        output::emit("", json!({ "success": true, "list": { "folders": folders, "files": files } }));
+    } else {
+        render_items(&folders, &files, extended);
+    }
     Ok(())
 }
 
@@ -316,8 +358,11 @@ pub async fn trash_restore_file(file_id: &str, destination: Option<&str>) -> Res
     let creds = auth::read_credentials()?;
     let api = DriveApi::new();
     let dest = fallback_root(destination, &creds.user.root_folder_id);
-    api.move_file(&creds.token, file_id, &dest).await?;
-    println!("✓ File restored successfully to: {dest}");
+    let file = api.move_file(&creds.token, file_id, &dest).await?;
+    output::emit(
+        &format!("✓ File restored successfully to: {dest}"),
+        json!({ "success": true, "file": file }),
+    );
     Ok(())
 }
 
@@ -325,14 +370,22 @@ pub async fn trash_restore_folder(folder_id: &str, destination: Option<&str>) ->
     let creds = auth::read_credentials()?;
     let api = DriveApi::new();
     let dest = fallback_root(destination, &creds.user.root_folder_id);
-    api.move_folder(&creds.token, folder_id, &dest).await?;
-    println!("✓ Folder restored successfully to: {dest}");
+    let folder = api.move_folder(&creds.token, folder_id, &dest).await?;
+    output::emit(
+        &format!("✓ Folder restored successfully to: {dest}"),
+        json!({ "success": true, "folder": folder }),
+    );
     Ok(())
 }
 
 pub async fn trash_clear(force: bool) -> Result<()> {
     let creds = auth::read_credentials()?;
     if !force {
+        if output::is_json() {
+            return Err(anyhow!(
+                "The \"--force\" flag is required to empty the trash in JSON mode."
+            ));
+        }
         use std::io::Write;
         print!("Empty trash? All items in the Drive Trash will be permanently deleted. This action cannot be undone. (y/N) ");
         std::io::stdout().flush().ok();
@@ -346,7 +399,10 @@ pub async fn trash_clear(force: bool) -> Result<()> {
         }
     }
     DriveApi::new().clear_trash(&creds.token).await?;
-    println!("✓ Trash emptied successfully.");
+    output::emit(
+        "✓ Trash emptied successfully.",
+        json!({ "success": true, "message": "Trash emptied successfully." }),
+    );
     Ok(())
 }
 
@@ -358,7 +414,10 @@ pub async fn delete_permanently_file(file_id: &str) -> Result<()> {
         .await
         .map_err(|_| anyhow!("File not found"))?;
     api.delete_file(&creds.token, file_id).await?;
-    println!("✓ File permanently deleted successfully");
+    output::emit(
+        "✓ File permanently deleted successfully",
+        json!({ "success": true, "message": "File permanently deleted successfully" }),
+    );
     Ok(())
 }
 
@@ -369,6 +428,9 @@ pub async fn delete_permanently_folder(folder_id: &str) -> Result<()> {
         .await
         .map_err(|_| anyhow!("Folder not found"))?;
     api.delete_folder(&creds.token, folder_id).await?;
-    println!("✓ Folder permanently deleted successfully");
+    output::emit(
+        "✓ Folder permanently deleted successfully",
+        json!({ "success": true, "message": "Folder permanently deleted successfully" }),
+    );
     Ok(())
 }

@@ -7,9 +7,10 @@ Context for working on this repo. Read this first.
 An unofficial **Rust port of the Internxt CLI** (the official one is Node/TypeScript).
 Goal: faster, lower memory, single static binary. Implements **login, upload-file,
 download-file** with fully streaming transfers (handles 100GB+ files without loading
-them into RAM), plus the drive-management commands (**logout, whoami, list,
-create-folder, move/rename/trash/restore file+folder, trash-list, trash-clear,
-delete-permanently**). Not affiliated with Internxt.
+them into RAM), plus **upload-folder** (recursive) and the drive-management commands
+(**logout, whoami, list, create-folder, move/rename/trash/restore file+folder,
+trash-list, trash-clear, delete-permanently**). All commands support a global
+**`--json`** flag. Not affiliated with Internxt.
 
 Roadmap + what's missing: see [TODO.md](TODO.md).
 
@@ -50,8 +51,9 @@ those to find upstream changes worth porting.
 | `src/auth.rs` | login flow + credential save/read (AES-encrypted file) |
 | `src/api.rs` | Drive REST client (`DRIVE_NEW_API_URL`) |
 | `src/network.rs` | bridge/network client (`NETWORK_URL`), streaming PUT/GET |
-| `src/commands.rs` | upload/download orchestration (streaming + multipart) |
+| `src/commands.rs` | upload-file/download-file/upload-folder orchestration (streaming + multipart + recursive) |
 | `src/drive_ops.rs` | logout, whoami, list, create/move/rename/trash/delete folder+file |
+| `src/output.rs` | global `--json` vs human output switch (`emit`/`status`/`emit_error`) |
 | `src/models.rs` | serde DTOs |
 
 ## Key facts / decisions

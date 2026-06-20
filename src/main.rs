@@ -6,6 +6,7 @@ mod crypto;
 mod drive_ops;
 mod models;
 mod network;
+mod output;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -16,6 +17,9 @@ use std::io::Write;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    /// Output the result as a single JSON object (suppresses progress output).
+    #[arg(long, global = true, default_value_t = false)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -35,6 +39,16 @@ enum Commands {
         #[arg(short, long)]
         file: String,
         /// Destination folder uuid. Leave empty for root.
+        #[arg(short = 'i', long)]
+        destination: Option<String>,
+    },
+    /// Upload a folder (recursively) to Internxt Drive.
+    #[command(alias = "upload:folder")]
+    UploadFolder {
+        /// The path to the folder on your system.
+        #[arg(short, long)]
+        folder: String,
+        /// Destination folder id. Leave empty for the root folder.
         #[arg(short = 'i', long)]
         destination: Option<String>,
     },
@@ -185,14 +199,19 @@ fn prompt(msg: &str) -> Result<String> {
 
 #[tokio::main]
 async fn main() {
-    if let Err(e) = run().await {
-        eprintln!("✕ Error: {e:#}");
+    let cli = Cli::parse();
+    output::set_json(cli.json);
+    if let Err(e) = run(cli).await {
+        if output::is_json() {
+            output::emit_error(&format!("{e:#}"));
+        } else {
+            eprintln!("✕ Error: {e:#}");
+        }
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<()> {
-    let cli = Cli::parse();
+async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Login {
             email,
@@ -209,10 +228,19 @@ async fn run() -> Result<()> {
             };
             let creds = auth::login(&email, &password, twofactor.as_deref()).await?;
             auth::save_credentials(&creds)?;
-            println!("✓ Successfully logged in to: {}", creds.user.email);
+            output::emit(
+                &format!("✓ Successfully logged in to: {}", creds.user.email),
+                serde_json::json!({ "success": true, "login": { "email": creds.user.email } }),
+            );
         }
         Commands::UploadFile { file, destination } => {
             commands::upload_file(&file, destination.as_deref()).await?;
+        }
+        Commands::UploadFolder {
+            folder,
+            destination,
+        } => {
+            commands::upload_folder(&folder, destination.as_deref()).await?;
         }
         Commands::DownloadFile {
             id,
