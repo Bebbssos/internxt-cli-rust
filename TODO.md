@@ -26,18 +26,21 @@ diff upstream against them to find changes worth pulling in.
 - [x] `login` — legacy email/password + 2FA (node `login-legacy`)
 - [x] `upload-file` — streaming, single-part + multipart
 - [x] `download-file` — streaming decrypt-to-disk
+- [x] `logout` — best-effort `/auth/logout` + clear local credentials
+- [x] `whoami`
+- [x] `list` — list folder contents (`-e` extended; paginated)
+- [x] `create-folder`
+- [x] `move-file`, `move-folder`
+- [x] `rename-file`, `rename-folder`
+- [x] `trash-file`, `trash-folder`, `trash-list`, `trash-restore-file`, `trash-restore-folder`, `trash-clear`
+- [x] `delete-permanently-file`, `delete-permanently-folder`
+
+> All of the above live in `src/drive_ops.rs` (REST helpers in `src/api.rs`).
+> Verified end-to-end against a real account (full file + folder lifecycles).
 
 ### Missing commands
 - [ ] `login` (SSO) — node `login.ts` web-based flow (local callback server + browser)
-- [ ] `logout`
-- [ ] `whoami`
-- [ ] `list` — list folder contents
-- [ ] `create-folder`
 - [ ] `upload-folder` — recursive folder upload (folder tree + concurrent files)
-- [ ] `move-file`, `move-folder`
-- [ ] `rename-file`, `rename-folder`
-- [ ] `trash-file`, `trash-folder`, `trash-list`, `trash-restore-file`, `trash-restore-folder`, `trash-clear`
-- [ ] `delete-permanently-file`, `delete-permanently-folder`
 - [ ] `config` — show/set config
 - [ ] `logs`
 - [ ] `webdav`, `webdav-config`, `add-cert` — WebDAV server mode (big; express + sqlite + TLS)

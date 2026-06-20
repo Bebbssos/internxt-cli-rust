@@ -5,9 +5,11 @@ Context for working on this repo. Read this first.
 ## What this is
 
 An unofficial **Rust port of the Internxt CLI** (the official one is Node/TypeScript).
-Goal: faster, lower memory, single static binary. Currently implements **login,
-upload-file, download-file** with fully streaming transfers (handles 100GB+ files
-without loading them into RAM). Not affiliated with Internxt.
+Goal: faster, lower memory, single static binary. Implements **login, upload-file,
+download-file** with fully streaming transfers (handles 100GB+ files without loading
+them into RAM), plus the drive-management commands (**logout, whoami, list,
+create-folder, move/rename/trash/restore file+folder, trash-list, trash-clear,
+delete-permanently**). Not affiliated with Internxt.
 
 Roadmap + what's missing: see [TODO.md](TODO.md).
 
@@ -42,13 +44,14 @@ those to find upstream changes worth porting.
 
 | File | Responsibility |
 |---|---|
-| `src/main.rs` | clap CLI dispatch (`login`, `upload-file`, `download-file`) |
+| `src/main.rs` | clap CLI dispatch (all subcommands) |
 | `src/config.rs` | API URLs + app constants (public; env-overridable), paths |
 | `src/crypto.rs` | passToHash, CryptoJS AES-CBC, lib AES-GCM, GenerateFileKey, AES-256-CTR, hashes |
 | `src/auth.rs` | login flow + credential save/read (AES-encrypted file) |
 | `src/api.rs` | Drive REST client (`DRIVE_NEW_API_URL`) |
 | `src/network.rs` | bridge/network client (`NETWORK_URL`), streaming PUT/GET |
 | `src/commands.rs` | upload/download orchestration (streaming + multipart) |
+| `src/drive_ops.rs` | logout, whoami, list, create/move/rename/trash/delete folder+file |
 | `src/models.rs` | serde DTOs |
 
 ## Key facts / decisions
