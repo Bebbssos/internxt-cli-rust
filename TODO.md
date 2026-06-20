@@ -1,0 +1,85 @@
+# TODO / Roadmap
+
+Status of the Rust port vs the official node Internxt CLI.
+
+## Upstream baseline (what we ported from)
+
+Reference sources live in `./og` (git-ignored). Fetch them with
+`./scripts/fetch-og-sources.sh`. The port is based on these exact commits —
+diff upstream against them to find changes worth pulling in.
+
+| Package | Repo | Pinned commit | Tag / version | Commit date |
+|---|---|---|---|---|
+| cli | github.com/internxt/cli | `166fb5a77dab27aea3e9cdb1af0e1713d9dde04e` | v1.6.5 | 2026-06-16 |
+| inxt-js | github.com/internxt/inxt-js | `a27cc91cde65700ebca088ebba3870d9bbf2a94f` | v3.3.1 | 2026-06-16 |
+| lib | github.com/internxt/lib | `22eaae309ad17a8c39c03b742bca631feca0a8f9` | (master) v1.4.2 | 2026-06-17 |
+| sdk | github.com/internxt/sdk | `aa97c980562926b3425a290f8ca39ea5c1f45a15` | v1.17.9 | 2026-06-17 |
+
+> Note: the **released** CLI (v1.6.5) actually runs older published deps —
+> `@internxt/inxt-js@3.2.2`, `@internxt/sdk@1.17.5`, `@internxt/lib@1.4.2`
+> (present in `og/node_modules`). The source repos above are slightly ahead.
+> Behaviour we ported matches the runtime versions; check both if something differs.
+
+## Commands
+
+### Done
+- [x] `login` — legacy email/password + 2FA (node `login-legacy`)
+- [x] `upload-file` — streaming, single-part + multipart
+- [x] `download-file` — streaming decrypt-to-disk
+
+### Missing commands
+- [ ] `login` (SSO) — node `login.ts` web-based flow (local callback server + browser)
+- [ ] `logout`
+- [ ] `whoami`
+- [ ] `list` — list folder contents
+- [ ] `create-folder`
+- [ ] `upload-folder` — recursive folder upload (folder tree + concurrent files)
+- [ ] `move-file`, `move-folder`
+- [ ] `rename-file`, `rename-folder`
+- [ ] `trash-file`, `trash-folder`, `trash-list`, `trash-restore-file`, `trash-restore-folder`, `trash-clear`
+- [ ] `delete-permanently-file`, `delete-permanently-folder`
+- [ ] `config` — show/set config
+- [ ] `logs`
+- [ ] `webdav`, `webdav-config`, `add-cert` — WebDAV server mode (big; express + sqlite + TLS)
+- [ ] `workspaces-list`, `workspaces-use`, `workspaces-unset`
+
+## Feature gaps in already-ported commands
+
+### Auth
+- [ ] Token expiry check + refresh (`getAuthDetails` / `refreshUserToken`) — currently
+      stored token is used as-is; no renewal on near-expiry.
+- [ ] Workspace credential handling + refresh (`getNetworkCreds` workspace branch).
+- [ ] TOTP secret → code generation (node `--twofactortoken` flag via otpauth).
+- [ ] Login with generated PGP/Kyber keys (`/auth/cli/login/access`). We use
+      `/auth/login/access` WITHOUT keys; fine for existing accounts, but registration
+      or key-update paths are unsupported.
+- [ ] Decrypt + persist private keys (ecc/kyber) — currently only mnemonic is decrypted.
+
+### Upload
+- [ ] Thumbnail generation + upload (`ThumbnailService`).
+- [ ] Retry with backoff on transient failures (`uploadFileWithRetry`, MAX_RETRIES/DELAYS_MS).
+- [ ] Upload size limit check (node enforces a per-file limit; see CLI README "40GB").
+- [ ] Workspace uploads (`createFileEntry` via workspaces client).
+- [ ] Real progress bar (currently minimal prints).
+- [ ] HMAC on upload (sdk now stores hmac on upload — see sdk commit; node inxt-js
+      passes `hmac: undefined`, so we skip it. Revisit if server starts requiring it.)
+
+### Download
+- [ ] Range / resume support (`RangeOptions`, partial download with CTR offset IV math).
+- [ ] Shared-link / token download (`getDownloadLinks(..., token)`).
+- [ ] Multi-shard parallel download (we download shards sequentially).
+- [ ] Workspace downloads.
+
+### Infrastructure / parity
+- [ ] `.env` loading (node uses dotenv). We hardcode public defaults in `src/config.rs`,
+      overridable via env vars. Decide if a `.env` file should be supported.
+- [ ] SDK-style request retry layer (node `SdkManager` maxRetries: 3).
+- [ ] Local drive cache (node uses better-sqlite3 / typeorm `internxt-cli-drive.db`).
+- [ ] JSON output mode (`--json`) for scripting parity.
+- [ ] `--non-interactive` flag semantics.
+
+## Nice-to-have / ideas
+- [ ] Benchmarks vs node CLI (throughput, RAM, cold-start).
+- [ ] Resumable uploads (persist UploadId + completed parts).
+- [ ] Tune multipart part size / concurrency for throughput.
+- [ ] Integration test harness against a test account (currently only crypto unit tests).
