@@ -1,7 +1,7 @@
 //! Crypto primitives ported 1:1 from og/cli crypto.service.ts, og/lib aes,
 //! and og/inxt-js crypto utils. Byte-for-byte compatible with the node CLI.
 
-use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, StreamCipher};
+use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, StreamCipher};
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use anyhow::{anyhow, Result};
@@ -23,7 +23,7 @@ pub fn pass_to_hash(password: &str, salt_hex: Option<&str>) -> Result<(String, S
         Some(s) => hex::decode(s)?,
         None => {
             let mut b = [0u8; 16];
-            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
+            rand::RngCore::fill_bytes(&mut rand::rng(), &mut b);
             b.to_vec()
         }
     };
@@ -55,11 +55,12 @@ fn key_and_iv(secret: &str, salt: &[u8]) -> ([u8; 32], [u8; 16]) {
 /// CryptoJS-compatible AES-256-CBC encrypt. Output hex of: "Salted__" + salt(8) + ciphertext.
 pub fn encrypt_text_with_key(text: &str, secret: &str) -> String {
     let mut salt = [0u8; 8];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut salt);
+    rand::RngCore::fill_bytes(&mut rand::rng(), &mut salt);
     let (key, iv) = key_and_iv(secret, &salt);
 
-    let ct = Aes256CbcEnc::new(&key.into(), &iv.into())
-        .encrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(text.as_bytes());
+    let ct = Aes256CbcEnc::new_from_slices(&key, &iv)
+        .expect("valid AES-256-CBC key/iv length")
+        .encrypt_padded_vec::<cbc::cipher::block_padding::Pkcs7>(text.as_bytes());
 
     let mut out = b"Salted__".to_vec();
     out.extend_from_slice(&salt);
@@ -75,8 +76,9 @@ pub fn decrypt_text_with_key(encrypted_hex: &str, secret: &str) -> Result<String
     }
     let salt = &data[8..16];
     let (key, iv) = key_and_iv(secret, salt);
-    let pt = Aes256CbcDec::new(&key.into(), &iv.into())
-        .decrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(&data[16..])
+    let pt = Aes256CbcDec::new_from_slices(&key, &iv)
+        .expect("valid AES-256-CBC key/iv length")
+        .decrypt_padded_vec::<cbc::cipher::block_padding::Pkcs7>(&data[16..])
         .map_err(|e| anyhow!("cbc decrypt failed: {e}"))?;
     Ok(String::from_utf8(pt)?)
 }
@@ -163,7 +165,8 @@ pub fn generate_file_key(mnemonic: &str, bucket_id: &str, index: &[u8]) -> Resul
 
 /// In-place AES-256-CTR (encrypt == decrypt). iv must be 16 bytes.
 pub fn aes256ctr_apply(key: &[u8; 32], iv: &[u8], data: &mut [u8]) {
-    let mut cipher = Aes256Ctr::new(key.into(), iv.into());
+    let mut cipher =
+        Aes256Ctr::new_from_slices(key, iv).expect("valid AES-256-CTR key/iv length");
     cipher.apply_keystream(data);
 }
 
@@ -231,7 +234,7 @@ pub struct Ctr(Aes256Ctr);
 
 impl Ctr {
     pub fn new(key: &[u8; 32], iv: &[u8]) -> Self {
-        Ctr(Aes256Ctr::new(key.into(), iv.into()))
+        Ctr(Aes256Ctr::new_from_slices(key, iv).expect("valid AES-256-CTR key/iv length"))
     }
     pub fn apply(&mut self, data: &mut [u8]) {
         self.0.apply_keystream(data);

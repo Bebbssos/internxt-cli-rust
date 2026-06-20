@@ -4,6 +4,8 @@ An unofficial Rust port of the [Internxt CLI](https://github.com/internxt/cli), 
 
 > Not affiliated with or endorsed by Internxt.
 
+> This port was written mostly by [Claude Code](https://claude.com/claude-code), porting the behaviour of the official Node/TypeScript CLI.
+
 ## Status
 
 Implemented: authentication, streaming file transfers, recursive folder upload, and the full set of drive-management commands (list, create/move/rename, trash + restore, permanent delete). Every command supports `--json` for scripting.
@@ -11,6 +13,21 @@ Implemented: authentication, streaming file transfers, recursive folder upload, 
 Crypto is byte-for-byte compatible with the node CLI (verified by cross-check tests, see `cargo test`).
 
 Not yet ported: SSO login, workspaces, thumbnails, token refresh on expiry, the `config` command, and WebDAV server mode.
+
+## Compatibility with `@internxt/cli`
+
+This is intended to be a **mostly drop-in replacement** for the official [`@internxt/cli`](https://www.npmjs.com/package/@internxt/cli): for the implemented commands the names, aliases, flags, endpoints, payloads, credential file location/format (`~/.internxt-cli/.inxtcli`) and crypto all match, so the two are interchangeable for everyday `login` / `upload` / `download` / list / move / rename / trash workflows.
+
+It is *not* a 100% replacement — anything in "Not yet ported" above is simply absent. Beyond missing commands, the known **behavioural differences (breaking changes)** are:
+
+- **`login` is legacy-only.** Our `login` is the official CLI's `login-legacy` flow (email + password + optional 2FA). The official `login` (SSO / web browser callback) is not implemented.
+- **`--json` output schema differs.** We emit a simplified `{ "success": true, ... }` object per command rather than the exact oclif JSON envelope. Field names mostly match, but don't assume byte-identical structure.
+- **No interactive prompting for missing flags.** Required arguments that are absent produce a clap usage error instead of an interactive prompt. The exceptions that still prompt: `login` (email/password/2FA) and `trash-clear` (confirmation, unless `--force`).
+- **Personal drive only.** Workspaces are unsupported; there is no `workspaces-*` command and no workspace credential handling.
+- **No token auto-refresh.** A stored token is used as-is; on expiry you must `login` again (the official CLI refreshes near-expiry).
+- **No thumbnail generation** on upload.
+- **Only the mnemonic is persisted** from the decrypted account keys (not the ecc/kyber private keys).
+- **Plain-text table output** uses simple aligned columns rather than the official CLI's boxed tables. Use `--json` for stable machine-readable output.
 
 ## Build
 

@@ -109,7 +109,7 @@ pub async fn upload_file_to_network(
     size: u64,
 ) -> Result<String> {
     let mut index = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut index);
+    rand::RngCore::fill_bytes(&mut rand::rng(), &mut index);
     let iv = index[0..16].to_vec();
     let key = crypto::generate_file_key(mnemonic, bucket, &index)?;
 
