@@ -1,0 +1,21 @@
+internxt-cli-rust
+Copyright (C) 2026 Bebbssos
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. See the LICENSE file.
+
+This is an unofficial, independent Rust reimplementation. It is not affiliated
+with, endorsed by, or supported by Internxt.
+
+Protocol and cryptographic behaviour were derived from the official Internxt
+packages in order to interoperate with the Internxt service:
+
+  - @internxt/cli   — MIT, Copyright (c) Internxt
+  - @internxt/sdk   — MIT, Copyright (c) Internxt
+  - @internxt/lib   — MIT, Copyright (c) Internxt
+  - @internxt/inxt-js — AGPL-3.0 (LICENSE file) / ISC (package.json); Copyright (c) Internxt
+
+Because @internxt/inxt-js is distributed with an AGPL-3.0 license file, this
+project is released under AGPL-3.0 to remain compatible with all upstream terms.

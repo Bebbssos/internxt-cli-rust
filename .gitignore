@@ -1,0 +1,14 @@
+# Rust build output
+/target
+
+# Original Internxt node sources + node_modules (third-party, not redistributed here)
+/og
+
+# Local credentials / env (never committed; runtime path is ~/.internxt-cli)
+.env
+*.inxtcli
+.internxt-cli/
+
+# Editor / OS
+.DS_Store
+*.swp
