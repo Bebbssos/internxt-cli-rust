@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static JSON: AtomicBool = AtomicBool::new(false);
+static NON_INTERACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn set_json(v: bool) {
     JSON.store(v, Ordering::Relaxed);
@@ -13,6 +14,16 @@ pub fn set_json(v: bool) {
 
 pub fn is_json() -> bool {
     JSON.load(Ordering::Relaxed)
+}
+
+/// Non-interactive mode (`-x`/`--non-interactive`): the CLI never prompts for
+/// input and errors out instead when a required value is missing.
+pub fn set_non_interactive(v: bool) {
+    NON_INTERACTIVE.store(v, Ordering::Relaxed);
+}
+
+pub fn is_non_interactive() -> bool {
+    NON_INTERACTIVE.load(Ordering::Relaxed)
 }
 
 /// Terminal success output: the JSON object in JSON mode, else the human line.

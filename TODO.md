@@ -53,7 +53,8 @@ diff upstream against them to find changes worth pulling in.
 - [ ] Token expiry check + refresh (`getAuthDetails` / `refreshUserToken`) — currently
       stored token is used as-is; no renewal on near-expiry.
 - [ ] Workspace credential handling + refresh (`getNetworkCreds` workspace branch).
-- [ ] TOTP secret → code generation (node `--twofactortoken` flag via otpauth).
+- [x] TOTP secret → code generation (node `--twofactortoken`/`-t` flag via otpauth;
+      `crypto::totp_now`, RFC 6238 SHA-1/30s/6-digit, base32 secret).
 - [ ] Login with generated PGP/Kyber keys (`/auth/cli/login/access`). We use
       `/auth/login/access` WITHOUT keys; fine for existing accounts, but registration
       or key-update paths are unsupported.
@@ -81,4 +82,5 @@ diff upstream against them to find changes worth pulling in.
 - [ ] Local drive cache (node uses better-sqlite3 / typeorm `internxt-cli-drive.db`).
 - [x] JSON output mode (`--json`) for scripting parity — global flag; each command
       emits a single JSON object on success/error (`src/output.rs`).
-- [ ] `--non-interactive` flag semantics.
+- [x] `--non-interactive` flag semantics (global `-x`/`INXT_NONINTERACTIVE`; never
+      prompts, errors on missing required value — login email/password/2FA, trash-clear).

@@ -20,18 +20,31 @@ struct Cli {
     /// Output the result as a single JSON object (suppresses progress output).
     #[arg(long, global = true, default_value_t = false)]
     json: bool,
+    /// Prevent the CLI from prompting for input; error out instead.
+    #[arg(
+        short = 'x',
+        long = "non-interactive",
+        global = true,
+        env = "INXT_NONINTERACTIVE",
+        default_value_t = false
+    )]
+    non_interactive: bool,
 }
 
 #[derive(Subcommand)]
 enum Commands {
     /// Log in with email and password (legacy flow).
     Login {
-        #[arg(short, long)]
+        #[arg(short, long, env = "INXT_USER")]
         email: Option<String>,
-        #[arg(short, long)]
+        #[arg(short, long, env = "INXT_PASSWORD")]
         password: Option<String>,
-        #[arg(short = 'w', long)]
+        /// The two-factor auth code (TOTP).
+        #[arg(short = 'w', long, env = "INXT_TWOFACTORCODE")]
         twofactor: Option<String>,
+        /// The TOTP secret token, used to generate a code. Takes priority over --twofactor.
+        #[arg(short = 't', long, env = "INXT_OTPTOKEN")]
+        twofactortoken: Option<String>,
     },
     /// Upload a file to Internxt Drive.
     #[command(alias = "upload:file")]
@@ -201,6 +214,7 @@ fn prompt(msg: &str) -> Result<String> {
 async fn main() {
     let cli = Cli::parse();
     output::set_json(cli.json);
+    output::set_non_interactive(cli.non_interactive);
     if let Err(e) = run(cli).await {
         if output::is_json() {
             output::emit_error(&format!("{e:#}"));
@@ -217,16 +231,31 @@ async fn run(cli: Cli) -> Result<()> {
             email,
             password,
             twofactor,
+            twofactortoken,
         } => {
             let email = match email {
                 Some(e) => e,
+                None if output::is_non_interactive() => {
+                    return Err(anyhow::anyhow!("No value provided for required flag: email"))
+                }
                 None => prompt("What is your email? ")?,
             };
             let password = match password {
                 Some(p) => p,
+                None if output::is_non_interactive() => {
+                    return Err(anyhow::anyhow!(
+                        "No value provided for required flag: password"
+                    ))
+                }
                 None => rpassword::prompt_password("What is your password? ")?,
             };
-            let creds = auth::login(&email, &password, twofactor.as_deref()).await?;
+            let creds = auth::login(
+                &email,
+                &password,
+                twofactor.as_deref(),
+                twofactortoken.as_deref(),
+            )
+            .await?;
             auth::save_credentials(&creds)?;
             output::emit(
                 &format!("✓ Successfully logged in to: {}", creds.user.email),

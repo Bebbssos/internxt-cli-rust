@@ -9,7 +9,16 @@ use crate::crypto;
 use crate::models::{Credentials, UserInfo};
 
 /// Performs legacy email/password login and returns credentials.
-pub async fn login(email: &str, password: &str, tfa: Option<&str>) -> Result<Credentials> {
+///
+/// `tfa` is a ready-to-use TOTP code; `tfa_token` is a TOTP *secret* from which
+/// a code is generated and which takes priority over `tfa` (mirrors the node
+/// CLI `--twofactortoken` flag).
+pub async fn login(
+    email: &str,
+    password: &str,
+    tfa: Option<&str>,
+    tfa_token: Option<&str>,
+) -> Result<Credentials> {
     let email = email.to_lowercase();
     let api = DriveApi::new();
 
@@ -21,18 +30,23 @@ pub async fn login(email: &str, password: &str, tfa: Option<&str>) -> Result<Cre
     let (_, hash) = crypto::pass_to_hash(password, Some(&salt))?;
     let encrypted_password_hash = crypto::encrypt_text(&hash);
 
-    // 2b. obtain 2FA code if the account requires it
-    let tfa_owned: Option<String> = match tfa {
-        Some(t) if !t.trim().is_empty() => Some(t.to_string()),
-        _ if tfa_enabled => {
-            use std::io::Write;
-            print!("What is your two-factor code? ");
-            std::io::stdout().flush().ok();
-            let mut s = String::new();
-            std::io::stdin().read_line(&mut s)?;
-            Some(s.trim().to_string())
-        }
-        _ => None,
+    // 2b. obtain 2FA code if the account requires it. A TOTP secret token takes
+    // priority over a literal code; otherwise prompt (unless non-interactive).
+    let tfa_owned: Option<String> = if !tfa_enabled {
+        None
+    } else if let Some(token) = tfa_token.filter(|t| !t.trim().is_empty()) {
+        Some(crypto::totp_now(token.trim())?)
+    } else if let Some(code) = tfa.filter(|t| !t.trim().is_empty()) {
+        Some(code.to_string())
+    } else if crate::output::is_non_interactive() {
+        return Err(anyhow!("No value provided for required flag: twofactor"));
+    } else {
+        use std::io::Write;
+        print!("What is your two-factor code? ");
+        std::io::stdout().flush().ok();
+        let mut s = String::new();
+        std::io::stdin().read_line(&mut s)?;
+        Some(s.trim().to_string())
     };
 
     // 3. login access (without keys)

@@ -171,6 +171,47 @@ pub fn aes256ctr_apply(key: &[u8; 32], iv: &[u8], data: &mut [u8]) {
     cipher.apply_keystream(data);
 }
 
+/// Generate a 6-digit TOTP code from a base32 secret (RFC 6238, SHA-1, 30s
+/// period). Mirrors otpauth's `new OTPAuth.TOTP({ secret, digits: 6 })` used by
+/// the node CLI's `--twofactortoken` flag.
+pub fn totp_now(secret: &str) -> Result<String> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| anyhow!("system clock before unix epoch: {e}"))?
+        .as_secs();
+    totp_at(secret, timestamp, 30, 6)
+}
+
+fn totp_at(secret: &str, timestamp: u64, period: u64, digits: u32) -> Result<String> {
+    use hmac::digest::KeyInit as HmacKeyInit;
+    use hmac::{Mac, SimpleHmac};
+    // otpauth normalizes the secret: uppercase and drop non-base32 chars.
+    let cleaned: String = secret
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    let key = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &cleaned)
+        .ok_or_else(|| anyhow!("invalid base32 TOTP secret"))?;
+    if key.is_empty() {
+        return Err(anyhow!("invalid base32 TOTP secret"));
+    }
+
+    let counter = timestamp / period;
+    let mut mac = <SimpleHmac<Sha1> as HmacKeyInit>::new_from_slice(&key)
+        .map_err(|e| anyhow!("totp hmac key: {e}"))?;
+    mac.update(&counter.to_be_bytes());
+    let digest = mac.finalize().into_bytes();
+
+    let offset = (digest[digest.len() - 1] & 0x0f) as usize;
+    let bin = (u32::from(digest[offset] & 0x7f) << 24)
+        | (u32::from(digest[offset + 1]) << 16)
+        | (u32::from(digest[offset + 2]) << 8)
+        | u32::from(digest[offset + 3]);
+    let code = bin % 10u32.pow(digits);
+    Ok(format!("{code:0width$}", width = digits as usize))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +228,16 @@ mod tests {
     fn matches_node_decrypt() {
         let enc = "53616c7465645f5f00112233445566774556e47b00ca7ba4959bea3b6abdf0be";
         assert_eq!(decrypt_text_with_key(enc, SECRET).unwrap(), "hello world");
+    }
+
+    // RFC 6238 Appendix B test vector (SHA-1, secret "12345678901234567890").
+    #[test]
+    fn matches_rfc6238_totp() {
+        let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        assert_eq!(totp_at(secret, 59, 30, 8).unwrap(), "94287082");
+        assert_eq!(totp_at(secret, 1111111109, 30, 8).unwrap(), "07081804");
+        // 6-digit truncation (what the CLI actually uses).
+        assert_eq!(totp_at(secret, 59, 30, 6).unwrap(), "287082");
     }
 
     #[test]

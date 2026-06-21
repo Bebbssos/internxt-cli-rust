@@ -381,9 +381,9 @@ pub async fn trash_restore_folder(folder_id: &str, destination: Option<&str>) ->
 pub async fn trash_clear(force: bool) -> Result<()> {
     let creds = auth::read_credentials()?;
     if !force {
-        if output::is_json() {
+        if output::is_json() || output::is_non_interactive() {
             return Err(anyhow!(
-                "The \"--force\" flag is required to empty the trash in JSON mode."
+                "The \"--force\" flag is required to empty the trash in JSON / non-interactive mode."
             ));
         }
         use std::io::Write;
