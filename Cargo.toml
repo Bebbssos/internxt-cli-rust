@@ -20,7 +20,7 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 hex = "0.4"
 base64 = "0.22"
-rand = "0.9"
+rand = "0.10"
 dirs = "6"
 rpassword = "7"
 futures-util = "0.3"

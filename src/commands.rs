@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -109,7 +110,7 @@ pub async fn upload_file_to_network(
     size: u64,
 ) -> Result<String> {
     let mut index = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rng(), &mut index);
+    rand::rng().fill(&mut index);
     let iv = index[0..16].to_vec();
     let key = crypto::generate_file_key(mnemonic, bucket, &index)?;
 

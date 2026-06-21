@@ -7,6 +7,7 @@ use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use md5::Md5;
+use rand::RngExt;
 use ripemd::Ripemd160;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
@@ -23,7 +24,7 @@ pub fn pass_to_hash(password: &str, salt_hex: Option<&str>) -> Result<(String, S
         Some(s) => hex::decode(s)?,
         None => {
             let mut b = [0u8; 16];
-            rand::RngCore::fill_bytes(&mut rand::rng(), &mut b);
+            rand::rng().fill(&mut b);
             b.to_vec()
         }
     };
@@ -55,7 +56,7 @@ fn key_and_iv(secret: &str, salt: &[u8]) -> ([u8; 32], [u8; 16]) {
 /// CryptoJS-compatible AES-256-CBC encrypt. Output hex of: "Salted__" + salt(8) + ciphertext.
 pub fn encrypt_text_with_key(text: &str, secret: &str) -> String {
     let mut salt = [0u8; 8];
-    rand::RngCore::fill_bytes(&mut rand::rng(), &mut salt);
+    rand::rng().fill(&mut salt);
     let (key, iv) = key_and_iv(secret, &salt);
 
     let ct = Aes256CbcEnc::new_from_slices(&key, &iv)
