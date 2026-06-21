@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -36,9 +36,27 @@ fn to_rfc3339(t: SystemTime) -> String {
 }
 
 /// Upload a local file to Internxt Drive (streaming; single-part or multipart).
-pub async fn upload_file(file_path: &str, destination: Option<&str>) -> Result<()> {
+/// With `use_stdin`, the body is read from stdin instead of `file_path`; `name`
+/// supplies the Drive name (required) and `size_hint` the byte length (optional).
+pub async fn upload_file(
+    file_path: Option<&str>,
+    destination: Option<&str>,
+    use_stdin: bool,
+    name: Option<&str>,
+    size_hint: Option<u64>,
+) -> Result<()> {
     let creds = auth::get_auth_details().await?;
 
+    let folder_uuid = match destination {
+        Some(d) if !d.trim().is_empty() => d.to_string(),
+        _ => creds.root_folder().to_string(),
+    };
+
+    if use_stdin {
+        return upload_from_stdin(&creds, name, size_hint, &folder_uuid).await;
+    }
+
+    let file_path = file_path.ok_or_else(|| anyhow!("Provide --file <PATH> or --stdin"))?;
     let path = Path::new(file_path);
     let meta = std::fs::metadata(path).map_err(|_| anyhow!("File not found: {file_path}"))?;
     if !meta.is_file() {
@@ -57,11 +75,6 @@ pub async fn upload_file(file_path: &str, destination: Option<&str>) -> Result<(
         .unwrap_or("")
         .to_string();
 
-    let folder_uuid = match destination {
-        Some(d) if !d.trim().is_empty() => d.to_string(),
-        _ => creds.root_folder().to_string(),
-    };
-
     let mut file_id = String::new();
 
     if size > 0 {
@@ -73,18 +86,106 @@ pub async fn upload_file(file_path: &str, destination: Option<&str>) -> Result<(
     let creation = to_rfc3339(meta.created().unwrap_or_else(|_| SystemTime::now()));
     let modification = to_rfc3339(meta.modified().unwrap_or_else(|_| SystemTime::now()));
 
-    let api = DriveApi::for_credentials(&creds);
+    finish_file_entry(
+        &creds,
+        &stem,
+        &file_type,
+        size,
+        &folder_uuid,
+        &file_id,
+        &creation,
+        &modification,
+    )
+    .await
+}
+
+/// Upload a file whose body comes from stdin. Filename is required (stdin has none).
+/// If `size_hint` is provided the body streams straight through (single-part, true
+/// streaming); otherwise stdin is spooled to a temp file to learn its length first.
+async fn upload_from_stdin(
+    creds: &crate::models::Credentials,
+    name: Option<&str>,
+    size_hint: Option<u64>,
+    folder_uuid: &str,
+) -> Result<()> {
+    let name = name.ok_or_else(|| anyhow!("--name <NAME> is required with --stdin"))?;
+    let np = Path::new(name);
+    let stem = np
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file")
+        .to_string();
+    let file_type = np
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+
+    let (file_id, size) = match size_hint {
+        Some(0) => (String::new(), 0),
+        Some(sz) => {
+            crate::output::status(&format!("Uploading {sz} bytes from stdin..."));
+            let id = upload_stream_to_network(
+                &net,
+                creds.bucket(),
+                creds.mnemonic(),
+                tokio::io::stdin(),
+                sz,
+            )
+            .await?;
+            (id, sz)
+        }
+        None => {
+            crate::output::status("Buffering stdin...");
+            let tmp = spool_stdin_to_temp().await?;
+            if tmp.size == 0 {
+                (String::new(), 0)
+            } else {
+                crate::output::status(&format!("Uploading {} bytes from stdin...", tmp.size));
+                let id = upload_file_to_network(
+                    &net,
+                    creds.bucket(),
+                    creds.mnemonic(),
+                    &tmp.path,
+                    tmp.size,
+                )
+                .await?;
+                (id, tmp.size)
+            }
+            // tmp dropped here -> temp file deleted
+        }
+    };
+
+    let now = to_rfc3339(SystemTime::now());
+    finish_file_entry(creds, &stem, &file_type, size, folder_uuid, &file_id, &now, &now).await
+}
+
+/// Create the drive file entry and emit the success line. Shared by both upload paths.
+#[allow(clippy::too_many_arguments)]
+async fn finish_file_entry(
+    creds: &crate::models::Credentials,
+    stem: &str,
+    file_type: &str,
+    size: u64,
+    folder_uuid: &str,
+    file_id: &str,
+    creation: &str,
+    modification: &str,
+) -> Result<()> {
+    let api = DriveApi::for_credentials(creds);
     let drive_file = api
         .create_file_entry(
             &creds.token,
-            &stem,
-            &file_type,
+            stem,
+            file_type,
             size,
-            &folder_uuid,
-            &file_id,
+            folder_uuid,
+            file_id,
             creds.bucket(),
-            &creation,
-            &modification,
+            creation,
+            modification,
         )
         .await?;
 
@@ -101,6 +202,33 @@ pub async fn upload_file(file_path: &str, destination: Option<&str>) -> Result<(
         serde_json::json!({ "success": true, "file": { "uuid": drive_file.uuid } }),
     );
     Ok(())
+}
+
+/// A temp file that deletes itself on drop. Used to spool unknown-length stdin.
+struct TempSpool {
+    path: PathBuf,
+    size: u64,
+}
+
+impl Drop for TempSpool {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Copy all of stdin into a uniquely-named temp file, returning its path + size.
+async fn spool_stdin_to_temp() -> Result<TempSpool> {
+    let mut rnd = [0u8; 16];
+    rand::rng().fill(&mut rnd);
+    let path = std::env::temp_dir().join(format!("internxt-stdin-{}.tmp", hex::encode(rnd)));
+    let mut file = tokio::fs::File::create(&path).await?;
+    // Guard owns the path so a mid-copy error still cleans up.
+    let mut spool = TempSpool { path, size: 0 };
+    let mut stdin = tokio::io::stdin();
+    let size = tokio::io::copy(&mut stdin, &mut file).await?;
+    file.flush().await?;
+    spool.size = size;
+    Ok(spool)
 }
 
 /// Encrypt + upload a file's bytes to the network, returning the network file id.
@@ -120,20 +248,44 @@ pub async fn upload_file_to_network(
     if size > MULTIPART_THRESHOLD {
         upload_multipart(net, bucket, size, path, &key, &iv, &index).await
     } else {
-        upload_single(net, bucket, size, path, &key, &iv, &index).await
+        let file = tokio::fs::File::open(path).await?;
+        upload_single(net, bucket, size, file, &key, &iv, &index).await
     }
 }
 
-/// Single presigned-URL upload, body streamed straight from disk through CTR.
-async fn upload_single(
+/// Encrypt + upload `size` bytes from an arbitrary reader (e.g. stdin), returning
+/// the network file id. Always single-part: the source isn't seekable, so multipart
+/// (which re-slices a buffered stream) doesn't apply — the size must be known.
+pub async fn upload_stream_to_network<R>(
+    net: &NetworkApi,
+    bucket: &str,
+    mnemonic: &str,
+    reader: R,
+    size: u64,
+) -> Result<String>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let mut index = [0u8; 32];
+    rand::rng().fill(&mut index);
+    let iv = index[0..16].to_vec();
+    let key = crypto::generate_file_key(mnemonic, bucket, &index)?;
+    upload_single(net, bucket, size, reader, &key, &iv, &index).await
+}
+
+/// Single presigned-URL upload, body streamed straight from a reader through CTR.
+async fn upload_single<R>(
     net: &NetworkApi,
     bucket: &str,
     size: u64,
-    path: &Path,
+    reader: R,
     key: &[u8; 32],
     iv: &[u8],
     index: &[u8],
-) -> Result<String> {
+) -> Result<String>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
     let start = net.start_upload(bucket, size, 1).await?;
     let slot = start
         .uploads
@@ -143,23 +295,22 @@ async fn upload_single(
     let url = slot.url.ok_or_else(|| anyhow!("no upload url returned"))?;
 
     let hasher = Arc::new(Mutex::new(Sha256::new()));
-    let file = tokio::fs::File::open(path).await?;
 
     // Streaming state moved into the body producer.
-    struct St {
-        file: tokio::fs::File,
+    struct St<R> {
+        reader: R,
         ctr: Ctr,
         hasher: Arc<Mutex<Sha256>>,
     }
     let st = St {
-        file,
+        reader,
         ctr: Ctr::new(key, iv),
         hasher: hasher.clone(),
     };
 
     let body = futures_util::stream::unfold(st, |mut st| async move {
         let mut buf = vec![0u8; READ_CHUNK];
-        match st.file.read(&mut buf).await {
+        match st.reader.read(&mut buf).await {
             Ok(0) => None,
             Ok(n) => {
                 buf.truncate(n);
@@ -279,12 +430,30 @@ async fn dispatch_part(
     Ok(())
 }
 
-/// Download + decrypt a file by uuid, streaming chunks to disk.
-pub async fn download_file(uuid: &str, directory: Option<&str>, overwrite: bool) -> Result<()> {
+/// Download + decrypt a file by uuid. Writes to a file under `directory` (default),
+/// or to stdout when `to_stdout` is set (binary-clean: all chatter goes to stderr).
+pub async fn download_file(
+    uuid: &str,
+    directory: Option<&str>,
+    overwrite: bool,
+    to_stdout: bool,
+) -> Result<()> {
+    if to_stdout && crate::output::is_json() {
+        return Err(anyhow!("--stdout cannot be combined with --json"));
+    }
+    // When piping to stdout, status/progress must not pollute the data stream.
+    let note = |m: &str| {
+        if to_stdout {
+            crate::output::status_err(m);
+        } else {
+            crate::output::status(m);
+        }
+    };
+
     let creds = auth::get_auth_details().await?;
 
     let api = DriveApi::for_credentials(&creds);
-    crate::output::status("Getting file metadata...");
+    note("Getting file metadata...");
     let meta: DriveFileData = api.get_file_meta(&creds.token, uuid).await?;
 
     let name = meta
@@ -297,23 +466,32 @@ pub async fn download_file(uuid: &str, directory: Option<&str>, overwrite: bool)
         _ => name.clone(),
     };
 
-    let dir = directory.filter(|d| !d.trim().is_empty()).unwrap_or(".");
-    let out_path = Path::new(dir).join(&filename);
-
-    if out_path.exists() && !overwrite {
-        return Err(anyhow!(
-            "File already exists, use --overwrite to overwrite: {}",
-            out_path.display()
-        ));
-    }
+    // Resolve the output target. None == stdout.
+    let out_path = if to_stdout {
+        None
+    } else {
+        let dir = directory.filter(|d| !d.trim().is_empty()).unwrap_or(".");
+        let p = Path::new(dir).join(&filename);
+        if p.exists() && !overwrite {
+            return Err(anyhow!(
+                "File already exists, use --overwrite to overwrite: {}",
+                p.display()
+            ));
+        }
+        Some(p)
+    };
 
     let size = meta.size.0;
     if size == 0 {
-        std::fs::write(&out_path, b"")?;
-        crate::output::emit(
-            &format!("File downloaded successfully to {}", out_path.display()),
-            serde_json::json!({ "success": true, "path": out_path.display().to_string() }),
-        );
+        if let Some(p) = &out_path {
+            std::fs::write(p, b"")?;
+            crate::output::emit(
+                &format!("File downloaded successfully to {}", p.display()),
+                serde_json::json!({ "success": true, "path": p.display().to_string() }),
+            );
+        } else {
+            note("File downloaded (0 bytes).");
+        }
         return Ok(());
     }
 
@@ -327,7 +505,7 @@ pub async fn download_file(uuid: &str, directory: Option<&str>, overwrite: bool)
         meta.bucket.clone()
     };
 
-    crate::output::status("Preparing network...");
+    note("Preparing network...");
     let net = NetworkApi::new(creds.net_user(), creds.net_pass());
     let links = net.get_download_links(&bucket, &file_id).await?;
     if matches!(links.version, None | Some(1)) {
@@ -342,7 +520,10 @@ pub async fn download_file(uuid: &str, directory: Option<&str>, overwrite: bool)
     shards.sort_by_key(|s| s.index);
 
     let mut ctr = Ctr::new(&key, iv);
-    let mut out = tokio::fs::File::create(&out_path).await?;
+    let mut out: Box<dyn AsyncWrite + Unpin + Send> = match &out_path {
+        Some(p) => Box::new(tokio::fs::File::create(p).await?),
+        None => Box::new(tokio::io::stdout()),
+    };
     let mut written: u64 = 0;
 
     for shard in &shards {
@@ -353,22 +534,26 @@ pub async fn download_file(uuid: &str, directory: Option<&str>, overwrite: bool)
             ctr.apply(&mut bytes);
             out.write_all(&bytes).await?;
             written += bytes.len() as u64;
+            // Progress always to stderr so it never mixes into a piped download.
             if size > 0 && !crate::output::is_json() {
                 let pct = (written as f64 / size as f64 * 100.0).min(100.0);
-                print!("\rDownloading {pct:.0}%");
+                eprint!("\rDownloading {pct:.0}%");
                 use std::io::Write;
-                let _ = std::io::stdout().flush();
+                let _ = std::io::stderr().flush();
             }
         }
     }
     out.flush().await?;
     if !crate::output::is_json() {
-        print!("\r");
+        eprint!("\r");
     }
-    crate::output::emit(
-        &format!("File downloaded successfully to {}", out_path.display()),
-        serde_json::json!({ "success": true, "path": out_path.display().to_string() }),
-    );
+    match &out_path {
+        Some(p) => crate::output::emit(
+            &format!("File downloaded successfully to {}", p.display()),
+            serde_json::json!({ "success": true, "path": p.display().to_string() }),
+        ),
+        None => note("File downloaded to stdout."),
+    }
     Ok(())
 }
 

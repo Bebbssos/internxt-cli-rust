@@ -49,6 +49,119 @@ diff upstream against them to find changes worth pulling in.
       `use` decrypts the workspace mnemonic (PGP ecc + Kyber512 hybrid) and stores
       the workspace context; all drive/network commands then operate within it.
 
+## Beyond-og features (not in the official CLI)
+
+These three are extensions we add on top of node parity. Design below; defaults
+chosen pragmatically (flag them if you disagree before implementing).
+
+### 1. `upload-file` from stdin — **[x] done**
+
+Pipe bytes in instead of reading a path. Filename is required (stdin has none).
+
+Implemented: `--stdin` + `--name` (required) + optional `--size`. With `--size`,
+stdin streams directly (single-part); without it, stdin is spooled to a self-deleting
+temp file (`TempSpool`) to learn the length, then uploaded normally (single/multipart).
+`upload_single` is now generic over `AsyncRead`; `upload_stream_to_network` is the
+stdin entry point. `src/commands.rs`.
+
+- New flags on `upload-file`: `--stdin` (read body from stdin) and `--name <NAME>`
+  (required with `--stdin`; supplies the Drive name + extension split, like a path).
+  Optional `--size <BYTES>`.
+- **Why a size is needed at all:** the network `start` call needs the total size
+  and part count *up front*, and each S3 presigned PUT needs a `Content-Length`.
+  Unknown-length streaming is therefore impossible end-to-end.
+- **Decision (default):** if `--size` is given, stream stdin straight through CTR
+  with that length (true streaming, no temp file). Otherwise **spool stdin to a
+  temp file** (`config::tmp dir` / same FS as creds), `fsync`, read `len`, upload
+  normally, delete temp. RAM stays bounded either way.
+- Refactor: extract the network-upload core to accept a generic
+  `AsyncRead + size` source rather than only `&Path`. `upload_file_to_network`,
+  `upload_single`, `upload_multipart` all currently take `path: &Path` + `size`;
+  generalise to a reader factory (multipart re-opens / re-seeks, so for the
+  `--size` direct-stream path we either disallow multipart or buffer per-part —
+  single-part is the simple v1; multipart-from-temp works for the spool path).
+- `create_file_entry`: `modificationTime`/`creationTime` = now (no fs mtime).
+
+### 2. `download-file` to stdout — **[x] done**
+
+Stream decrypted bytes to stdout instead of a file.
+
+Implemented: `--stdout` flag. Output target is `Box<dyn AsyncWrite>` (file or
+`tokio::io::stdout()`); all status + progress routed to stderr (`output::status_err`,
+`eprint!`) so the data stream stays clean; rejected in `--json` mode. `src/commands.rs`.
+
+- New: `--stdout` flag (or accept `-d -`). Mutually exclusive with `--directory`.
+- Refactor `download_file` core to write to a `Box<dyn AsyncWrite + Unpin + Send>`
+  (file today, `tokio::io::stdout()` for this). Decrypt loop is unchanged.
+- Progress bar + all status text must go to **stderr** (never stdout) so the piped
+  data is clean. In `--json` mode `--stdout` is rejected (binary + JSON conflict).
+- No `--overwrite` semantics for stdout.
+
+### 3. One-way folder sync — **not in og**
+
+**One-shot, not a daemon.** Each command does a single reconcile pass when invoked,
+then exits. No filesystem watcher, no long-running process, no polling loop.
+
+**Two separate commands, one direction each. No bidirectional mode, no conflict
+policy** — the source side always wins. This sidesteps the "changed on both sides"
+ambiguity (no sync-state DB needed).
+
+- `sync-up   --local <DIR> --remote <FOLDER-UUID>` — make **remote match local**
+  (push). Upload new/changed local files; optionally trash remote extras.
+- `sync-down --local <DIR> --remote <FOLDER-UUID>` — make **local match remote**
+  (pull). Download new/changed remote files; optionally delete local extras.
+
+Aliases `sync:up` / `sync:down` for colon-style parity.
+
+**Tree walk** (keyed by **relative path**, POSIX-normalised, case-sensitive):
+- local: reuse `scan_dir` (pre-orders folders before files, skips symlinks).
+- remote: recurse `get_folder_subfolders` / `get_folder_subfiles` from the root uuid
+  into a `rel-path -> {uuid, size, modificationTime, fileId, bucket}` map. Cache
+  folder uuids so file ops target/create the right parent.
+
+**Change detection** (same for both commands): compare `size` first; if equal,
+compare `modificationTime` (remote stores it — set on every `create_file_entry`;
+present in `og .../storage/types.ts DriveFileData.modificationTime`). Local mtime
+from fs metadata; both as epoch seconds, ±2s tolerance for FS granularity. Different
+size ⇒ changed; equal size + mtime within tolerance ⇒ unchanged (skip).
+
+**`sync-up` (local → remote):**
+| state | action (default) | `--delete` |
+|---|---|---|
+| local only | upload | upload |
+| remote only | — (leave) | trash remote (`--delete=permanent` ⇒ delete-permanently) |
+| both, changed | re-upload (local wins) | same |
+| both, equal | skip | skip |
+- Re-upload of a changed file: trash old remote entry + `create_file_entry` for new
+  content (no in-place content-replace API in use today; loses remote uuid —
+  acceptable v1). Remote-missing parent folders → `create_folder` (retry helper).
+
+**`sync-down` (remote → local):**
+| state | action (default) | `--delete` |
+|---|---|---|
+| remote only | download | download |
+| local only | — (leave) | remove local file (`--delete=trash` ⇒ OS trash if a lib is added) |
+| both, changed | re-download (remote wins) | same |
+| both, equal | skip | skip |
+- Re-download: stream to a temp sibling, fsync, atomic rename over target. Missing
+  local parent dirs → `create_dir_all`. Default local delete = **remove**
+  (no cross-platform trash lib in v1).
+
+**Shared infra.** Reuse the bounded-semaphore concurrency from `upload_folder`
+(`MAX_CONCURRENT_FILE_UPLOADS`). `--dry-run` prints planned actions and exits.
+`--json` ⇒ single summary object (counts + per-action list). Workspace-aware free via
+`DriveApi::for_credentials` + `creds.*()`. Factor the tree-diff (build local map,
+build remote map, classify each rel-path) into one shared helper; the two commands
+only differ in which side drives and which delete path runs.
+
+**Open questions (implement time):**
+- Local cache DB later (node uses sqlite) for true deletion detection / faster diffs?
+  Out of scope for v1.
+- Case-insensitive FS (macOS/Windows) collision handling.
+- Preserve remote uuid on content update (needs in-place replace path).
+
+---
+
 ## Feature gaps in already-ported commands
 
 ### Auth

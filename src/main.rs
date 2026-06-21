@@ -50,11 +50,22 @@ enum Commands {
     /// Upload a file to Internxt Drive.
     #[command(alias = "upload:file")]
     UploadFile {
+        /// Path to the file. Omit when using --stdin.
         #[arg(short, long)]
-        file: String,
+        file: Option<String>,
         /// Destination folder uuid. Leave empty for root.
         #[arg(short = 'i', long)]
         destination: Option<String>,
+        /// Read the file body from stdin instead of --file. Requires --name.
+        #[arg(long, default_value_t = false)]
+        stdin: bool,
+        /// Drive filename (with extension) for the uploaded file. Required with --stdin.
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Exact byte length of stdin. If given, streams directly; otherwise stdin is
+        /// spooled to a temp file to learn its size.
+        #[arg(short = 's', long)]
+        size: Option<u64>,
     },
     /// Upload a folder (recursively) to Internxt Drive.
     #[command(alias = "upload:folder")]
@@ -75,6 +86,9 @@ enum Commands {
         directory: Option<String>,
         #[arg(short, long, default_value_t = false)]
         overwrite: bool,
+        /// Write the decrypted bytes to stdout instead of a file (status goes to stderr).
+        #[arg(long, default_value_t = false)]
+        stdout: bool,
     },
     /// Log out the current user from the Internxt CLI.
     Logout,
@@ -283,8 +297,21 @@ async fn run(cli: Cli) -> Result<()> {
                 serde_json::json!({ "success": true, "login": { "email": creds.user.email } }),
             );
         }
-        Commands::UploadFile { file, destination } => {
-            commands::upload_file(&file, destination.as_deref()).await?;
+        Commands::UploadFile {
+            file,
+            destination,
+            stdin,
+            name,
+            size,
+        } => {
+            commands::upload_file(
+                file.as_deref(),
+                destination.as_deref(),
+                stdin,
+                name.as_deref(),
+                size,
+            )
+            .await?;
         }
         Commands::UploadFolder {
             folder,
@@ -296,8 +323,9 @@ async fn run(cli: Cli) -> Result<()> {
             id,
             directory,
             overwrite,
+            stdout,
         } => {
-            commands::download_file(&id, directory.as_deref(), overwrite).await?;
+            commands::download_file(&id, directory.as_deref(), overwrite, stdout).await?;
         }
         Commands::Logout => drive_ops::logout().await?,
         Commands::Whoami => drive_ops::whoami().await?,

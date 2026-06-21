@@ -42,6 +42,14 @@ pub fn status(msg: &str) {
     }
 }
 
+/// Status line on stderr — for commands whose stdout carries binary data
+/// (e.g. `download-file --stdout`). Suppressed in JSON mode like `status`.
+pub fn status_err(msg: &str) {
+    if !is_json() {
+        eprintln!("{msg}");
+    }
+}
+
 /// Terminal error output as a JSON object (used by main's error handler).
 pub fn emit_error(message: &str) {
     println!(
