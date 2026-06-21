@@ -45,26 +45,37 @@ diff upstream against them to find changes worth pulling in.
 - [ ] `config` — show/set config
 - [ ] `logs`
 - [ ] `webdav`, `webdav-config`, `add-cert` — WebDAV server mode (big; express + sqlite + TLS)
-- [ ] `workspaces-list`, `workspaces-use`, `workspaces-unset`
+- [x] `workspaces-list`, `workspaces-use`, `workspaces-unset` (`src/workspaces.rs`).
+      `use` decrypts the workspace mnemonic (PGP ecc + Kyber512 hybrid) and stores
+      the workspace context; all drive/network commands then operate within it.
 
 ## Feature gaps in already-ported commands
 
 ### Auth
-- [ ] Token expiry check + refresh (`getAuthDetails` / `refreshUserToken`) — currently
-      stored token is used as-is; no renewal on near-expiry.
-- [ ] Workspace credential handling + refresh (`getNetworkCreds` workspace branch).
+- [x] Token expiry check + refresh (`getAuthDetails` / `refreshUserToken`) —
+      `auth::get_auth_details()` decodes the JWT `exp`, errors if expired, and
+      refreshes via `GET /users/cli/refresh` when within 2 days of expiry (then
+      persists the new token). All network commands call it instead of
+      `read_credentials`.
+- [x] Workspace credential handling + refresh. `Credentials::net_user/net_pass/
+      bucket/mnemonic/root_folder` pick workspace vs personal; `get_auth_details`
+      re-fetches workspace credentials (`/workspaces/{id}/credentials`) when the
+      workspace token nears expiry.
 - [x] TOTP secret → code generation (node `--twofactortoken`/`-t` flag via otpauth;
       `crypto::totp_now`, RFC 6238 SHA-1/30s/6-digit, base32 secret).
 - [ ] Login with generated PGP/Kyber keys (`/auth/cli/login/access`). We use
-      `/auth/login/access` WITHOUT keys; fine for existing accounts, but registration
-      or key-update paths are unsupported.
-- [ ] Decrypt + persist private keys (ecc/kyber) — currently only mnemonic is decrypted.
+      `/auth/login/access` WITHOUT keys; fine for existing accounts (the server
+      returns the stored keys), but registration / key-update paths are unsupported.
+- [x] Decrypt + persist private keys (ecc/kyber). Login decrypts `keys.ecc/kyber`
+      (lib AES-GCM) and stores them base64; used to decrypt workspace mnemonics
+      (`crypto::decrypt_workspace_key`: OpenPGP ecc + Kyber512 KEM + blake3 XOF).
 
 ### Upload
 - [ ] Thumbnail generation + upload (`ThumbnailService`).
 - [ ] Retry with backoff on transient failures (`uploadFileWithRetry`, MAX_RETRIES/DELAYS_MS).
 - [ ] Upload size limit check (node enforces a per-file limit; see CLI README "40GB").
-- [ ] Workspace uploads (`createFileEntry` via workspaces client).
+- [x] Workspace uploads — `createFileEntry` routes to `/workspaces/{id}/files`
+      and uses the workspace bucket + network creds + mnemonic when active.
 - [ ] Real progress bar (currently minimal prints).
 - [ ] HMAC on upload (sdk now stores hmac on upload — see sdk commit; node inxt-js
       passes `hmac: undefined`, so we skip it. Revisit if server starts requiring it.)
@@ -73,7 +84,7 @@ diff upstream against them to find changes worth pulling in.
 - [ ] Range / resume support (`RangeOptions`, partial download with CTR offset IV math).
 - [ ] Shared-link / token download (`getDownloadLinks(..., token)`).
 - [ ] Multi-shard parallel download (we download shards sequentially).
-- [ ] Workspace downloads.
+- [x] Workspace downloads — uses workspace bucket + network creds + mnemonic.
 
 ### Infrastructure / parity
 - [ ] `.env` loading (node uses dotenv). We hardcode public defaults in `src/config.rs`,

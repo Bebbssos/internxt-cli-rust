@@ -6,6 +6,10 @@ pub struct Credentials {
     /// JWT used as Bearer for the drive API (the node CLI's `newToken`).
     pub token: String,
     pub user: UserInfo,
+    /// Active workspace context (set by `workspaces use`), if any. When present,
+    /// all drive/network operations are scoped to this workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceContext>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -17,6 +21,81 @@ pub struct UserInfo {
     pub bridge_user: String,
     pub user_id: String,
     pub root_folder_id: String,
+    /// Decrypted ecc (OpenPGP) private key, base64(armored). Needed to decrypt
+    /// workspace mnemonics. Optional: only present for key-aware logins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ecc_private_key: Option<String>,
+    /// Decrypted kyber private key, base64(raw). Optional (hybrid workspaces only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kyber_private_key: Option<String>,
+}
+
+/// Persisted active-workspace context. Mirrors the node CLI's stored `workspace`
+/// (credentials + decrypted workspace mnemonic).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct WorkspaceContext {
+    /// Workspace uuid (used in `/workspaces/{id}/...` routes and the web link).
+    pub id: String,
+    pub name: String,
+    /// `x-internxt-workspace` header value (WorkspaceCredentialsDetails.tokenHeader).
+    pub token: String,
+    pub bucket: String,
+    /// Network (bridge) basic-auth user/pass for workspace transfers.
+    pub network_user: String,
+    pub network_pass: String,
+    /// Decrypted workspace mnemonic (WorkspaceUser.key after hybrid decrypt).
+    pub mnemonic: String,
+    /// Workspace root folder uuid (default browse/upload target).
+    pub root_folder_id: String,
+}
+
+impl Credentials {
+    /// Network basic-auth user: workspace network user when a workspace is active,
+    /// else the personal bridge user.
+    pub fn net_user(&self) -> &str {
+        match &self.workspace {
+            Some(w) => &w.network_user,
+            None => &self.user.bridge_user,
+        }
+    }
+
+    /// Network basic-auth password source (sha256'd downstream): workspace network
+    /// pass when active, else the personal userId.
+    pub fn net_pass(&self) -> &str {
+        match &self.workspace {
+            Some(w) => &w.network_pass,
+            None => &self.user.user_id,
+        }
+    }
+
+    /// Active bucket: workspace bucket when active, else personal bucket.
+    pub fn bucket(&self) -> &str {
+        match &self.workspace {
+            Some(w) => &w.bucket,
+            None => &self.user.bucket,
+        }
+    }
+
+    /// Active mnemonic for file-key derivation: workspace mnemonic when active.
+    pub fn mnemonic(&self) -> &str {
+        match &self.workspace {
+            Some(w) => &w.mnemonic,
+            None => &self.user.mnemonic,
+        }
+    }
+
+    /// Default root folder: workspace root when active, else personal root.
+    pub fn root_folder(&self) -> &str {
+        match &self.workspace {
+            Some(w) => &w.root_folder_id,
+            None => &self.user.root_folder_id,
+        }
+    }
+
+    /// Active workspace uuid, if any.
+    pub fn workspace_id(&self) -> Option<&str> {
+        self.workspace.as_ref().map(|w| w.id.as_str())
+    }
 }
 
 // ---- Network (bridge) DTOs ----

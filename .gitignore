@@ -12,3 +12,6 @@
 # Editor / OS
 .DS_Store
 *.swp
+
+# Generated crypto reference vectors (non-deterministic; needs /og to regenerate)
+/scripts/ref-keys.json

@@ -37,8 +37,7 @@ fn to_rfc3339(t: SystemTime) -> String {
 
 /// Upload a local file to Internxt Drive (streaming; single-part or multipart).
 pub async fn upload_file(file_path: &str, destination: Option<&str>) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let user = &creds.user;
+    let creds = auth::get_auth_details().await?;
 
     let path = Path::new(file_path);
     let meta = std::fs::metadata(path).map_err(|_| anyhow!("File not found: {file_path}"))?;
@@ -60,21 +59,21 @@ pub async fn upload_file(file_path: &str, destination: Option<&str>) -> Result<(
 
     let folder_uuid = match destination {
         Some(d) if !d.trim().is_empty() => d.to_string(),
-        _ => user.root_folder_id.clone(),
+        _ => creds.root_folder().to_string(),
     };
 
     let mut file_id = String::new();
 
     if size > 0 {
-        let net = NetworkApi::new(&user.bridge_user, &user.user_id);
+        let net = NetworkApi::new(creds.net_user(), creds.net_pass());
         crate::output::status("Preparing network...");
-        file_id = upload_file_to_network(&net, &user.bucket, &user.mnemonic, path, size).await?;
+        file_id = upload_file_to_network(&net, creds.bucket(), creds.mnemonic(), path, size).await?;
     }
 
     let creation = to_rfc3339(meta.created().unwrap_or_else(|_| SystemTime::now()));
     let modification = to_rfc3339(meta.modified().unwrap_or_else(|_| SystemTime::now()));
 
-    let api = DriveApi::new();
+    let api = DriveApi::for_credentials(&creds);
     let drive_file = api
         .create_file_entry(
             &creds.token,
@@ -83,15 +82,19 @@ pub async fn upload_file(file_path: &str, destination: Option<&str>) -> Result<(
             size,
             &folder_uuid,
             &file_id,
-            &user.bucket,
+            creds.bucket(),
             &creation,
             &modification,
         )
         .await?;
 
+    let ws_suffix = creds
+        .workspace_id()
+        .map(|id| format!("?workspaceid={id}"))
+        .unwrap_or_default();
     crate::output::emit(
         &format!(
-            "File uploaded successfully, view it at {}/file/{}",
+            "File uploaded successfully, view it at {}/file/{}{ws_suffix}",
             config::drive_web_url(),
             drive_file.uuid
         ),
@@ -278,10 +281,9 @@ async fn dispatch_part(
 
 /// Download + decrypt a file by uuid, streaming chunks to disk.
 pub async fn download_file(uuid: &str, directory: Option<&str>, overwrite: bool) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let user = &creds.user;
+    let creds = auth::get_auth_details().await?;
 
-    let api = DriveApi::new();
+    let api = DriveApi::for_credentials(&creds);
     crate::output::status("Getting file metadata...");
     let meta: DriveFileData = api.get_file_meta(&creds.token, uuid).await?;
 
@@ -320,13 +322,13 @@ pub async fn download_file(uuid: &str, directory: Option<&str>, overwrite: bool)
         .clone()
         .ok_or_else(|| anyhow!("file has no network fileId"))?;
     let bucket = if meta.bucket.is_empty() {
-        user.bucket.clone()
+        creds.bucket().to_string()
     } else {
         meta.bucket.clone()
     };
 
     crate::output::status("Preparing network...");
-    let net = NetworkApi::new(&user.bridge_user, &user.user_id);
+    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
     let links = net.get_download_links(&bucket, &file_id).await?;
     if matches!(links.version, None | Some(1)) {
         return Err(anyhow!("File version 1 not supported"));
@@ -334,7 +336,7 @@ pub async fn download_file(uuid: &str, directory: Option<&str>, overwrite: bool)
 
     let index = hex::decode(&links.index)?;
     let iv = &index[0..16];
-    let key = crypto::generate_file_key(&user.mnemonic, &bucket, &index)?;
+    let key = crypto::generate_file_key(creds.mnemonic(), &bucket, &index)?;
 
     let mut shards = links.shards.clone();
     shards.sort_by_key(|s| s.index);
@@ -483,7 +485,8 @@ async fn upload_one_file(
     net: &NetworkApi,
     api: &DriveApi,
     token: &str,
-    user: &crate::models::UserInfo,
+    bucket: &str,
+    mnemonic: &str,
     file: &ScanNode,
     parent_uuid: &str,
 ) -> Result<()> {
@@ -498,7 +501,7 @@ async fn upload_one_file(
 
     let mut file_id = String::new();
     if size > 0 {
-        file_id = upload_file_to_network(net, &user.bucket, &user.mnemonic, &file.abs, size).await?;
+        file_id = upload_file_to_network(net, bucket, mnemonic, &file.abs, size).await?;
     }
 
     let creation = to_rfc3339(meta.created().unwrap_or_else(|_| SystemTime::now()));
@@ -510,7 +513,7 @@ async fn upload_one_file(
         size,
         parent_uuid,
         &file_id,
-        &user.bucket,
+        bucket,
         &creation,
         &modification,
     )
@@ -520,8 +523,7 @@ async fn upload_one_file(
 
 /// Recursively upload a local folder tree to Internxt Drive.
 pub async fn upload_folder(local_path: &str, destination: Option<&str>) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let user = creds.user.clone();
+    let creds = Arc::new(auth::get_auth_details().await?);
 
     let root = Path::new(local_path);
     let md = std::fs::metadata(root).map_err(|_| anyhow!("Not a directory: {local_path}"))?;
@@ -530,8 +532,10 @@ pub async fn upload_folder(local_path: &str, destination: Option<&str>) -> Resul
     }
     let dest = match destination {
         Some(d) if !d.trim().is_empty() => d.to_string(),
-        _ => user.root_folder_id.clone(),
+        _ => creds.root_folder().to_string(),
     };
+    let bucket = creds.bucket().to_string();
+    let mnemonic = creds.mnemonic().to_string();
 
     let parent = root.parent().unwrap_or_else(|| Path::new(""));
     let mut folders = Vec::new();
@@ -540,8 +544,8 @@ pub async fn upload_folder(local_path: &str, destination: Option<&str>) -> Resul
 
     let timer = Instant::now();
     crate::output::status("Preparing network...");
-    let net = NetworkApi::new(&user.bridge_user, &user.user_id);
-    let api = DriveApi::new();
+    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+    let api = DriveApi::for_credentials(&creds);
 
     // 1. Recreate the folder tree (sequential — children need their parent's uuid).
     let mut folder_map: HashMap<PathBuf, String> = HashMap::new();
@@ -594,13 +598,14 @@ pub async fn upload_folder(local_path: &str, destination: Option<&str>) -> Resul
         };
         let permit = sem.clone().acquire_owned().await.unwrap();
         let net = net.clone();
-        let api = DriveApi::new();
+        let api = DriveApi::for_credentials(&creds);
         let token = creds.token.clone();
-        let user = user.clone();
+        let bucket = bucket.clone();
+        let mnemonic = mnemonic.clone();
         let uploaded = uploaded.clone();
         handles.push(tokio::spawn(async move {
             let _permit = permit;
-            match upload_one_file(&net, &api, &token, &user, &file, &parent_uuid).await {
+            match upload_one_file(&net, &api, &token, &bucket, &mnemonic, &file, &parent_uuid).await {
                 Ok(()) => {
                     uploaded.fetch_add(file.size, Ordering::Relaxed);
                     crate::output::status(&format!("Uploaded {}", file.name));

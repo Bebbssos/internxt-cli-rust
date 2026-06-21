@@ -19,7 +19,7 @@ fn fallback_root(uuid: Option<&str>, root: &str) -> String {
 }
 
 /// Node FormatUtils.humanFileSize parity.
-fn human_file_size(size: f64) -> String {
+pub(crate) fn human_file_size(size: f64) -> String {
     const UNITS: [&str; 9] = ["B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"];
     let idx = if size <= 0.0 {
         0
@@ -49,7 +49,7 @@ fn str_field(v: &Value, key: &str) -> String {
 }
 
 /// Print a simple aligned table.
-fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+pub(crate) fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
@@ -89,7 +89,7 @@ pub async fn logout() -> Result<()> {
         }
     };
     // Best effort: invalidate server-side, then always clear local credentials.
-    let _ = DriveApi::new().logout(&creds.token).await;
+    let _ = DriveApi::for_credentials(&creds).logout(&creds.token).await;
     let path = config::credentials_file();
     if path.exists() {
         std::fs::remove_file(&path)?;
@@ -123,9 +123,9 @@ pub async fn whoami() -> Result<()> {
 // ---- listing ----
 
 pub async fn list(folder_id: Option<&str>, extended: bool) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let api = DriveApi::new();
-    let folder_uuid = fallback_root(folder_id, &creds.user.root_folder_id);
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
+    let folder_uuid = fallback_root(folder_id, creds.root_folder());
 
     let folders = collect_all(&api, &creds.token, &folder_uuid, true).await?;
     let files = collect_all(&api, &creds.token, &folder_uuid, false).await?;
@@ -154,10 +154,19 @@ async fn collect_all(
             api.get_folder_subfiles(token, folder_uuid, offset).await?
         };
         let key = if folders { "folders" } else { "files" };
-        let arr = page.get(key).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        // Personal endpoints return `.folders`/`.files`; workspace endpoints
+        // return `.result`.
+        let arr = page
+            .get(key)
+            .or_else(|| page.get("result"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let got = arr.len() as u32;
         for item in arr {
-            if str_field(&item, "status") == "EXISTS" {
+            // Keep EXISTS items; workspace results may omit `status`.
+            let status = str_field(&item, "status");
+            if status.is_empty() || status == "EXISTS" {
                 out.push(item);
             }
         }
@@ -219,9 +228,9 @@ fn render_items(folders: &[Value], files: &[Value], extended: bool) {
 // ---- folder/file mutations ----
 
 pub async fn create_folder(name: &str, parent_id: Option<&str>) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let api = DriveApi::new();
-    let parent = fallback_root(parent_id, &creds.user.root_folder_id);
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
+    let parent = fallback_root(parent_id, creds.root_folder());
 
     output::status("Creating folder...");
     let folder = api.create_folder(&creds.token, name, &parent).await?;
@@ -240,9 +249,9 @@ pub async fn create_folder(name: &str, parent_id: Option<&str>) -> Result<()> {
 }
 
 pub async fn move_file(file_id: &str, destination: Option<&str>) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let api = DriveApi::new();
-    let dest = fallback_root(destination, &creds.user.root_folder_id);
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
+    let dest = fallback_root(destination, creds.root_folder());
     let file = api.move_file(&creds.token, file_id, &dest).await?;
     output::emit(
         &format!("✓ File moved successfully to: {dest}"),
@@ -252,9 +261,9 @@ pub async fn move_file(file_id: &str, destination: Option<&str>) -> Result<()> {
 }
 
 pub async fn move_folder(folder_id: &str, destination: Option<&str>) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let api = DriveApi::new();
-    let dest = fallback_root(destination, &creds.user.root_folder_id);
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
+    let dest = fallback_root(destination, creds.root_folder());
     let folder = api.move_folder(&creds.token, folder_id, &dest).await?;
     output::emit(
         &format!("✓ Folder moved successfully to: {dest}"),
@@ -264,8 +273,8 @@ pub async fn move_folder(folder_id: &str, destination: Option<&str>) -> Result<(
 }
 
 pub async fn rename_file(file_id: &str, new_name: &str) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let api = DriveApi::new();
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
     // Split into name + extension like node's path.parse.
     let p = std::path::Path::new(new_name);
     let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or(new_name);
@@ -284,8 +293,8 @@ pub async fn rename_file(file_id: &str, new_name: &str) -> Result<()> {
 }
 
 pub async fn rename_folder(folder_id: &str, new_name: &str) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let api = DriveApi::new();
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
     api.rename_folder(&creds.token, folder_id, new_name).await?;
     output::emit(
         &format!("✓ Folder renamed successfully with: {new_name}"),
@@ -297,8 +306,8 @@ pub async fn rename_folder(folder_id: &str, new_name: &str) -> Result<()> {
 // ---- trash ----
 
 pub async fn trash_file(file_id: &str) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let api = DriveApi::new();
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
     api.trash_items(&creds.token, json!([{ "uuid": file_id, "type": "file" }]))
         .await?;
     output::emit(
@@ -309,8 +318,8 @@ pub async fn trash_file(file_id: &str) -> Result<()> {
 }
 
 pub async fn trash_folder(folder_id: &str) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let api = DriveApi::new();
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
     api.trash_items(&creds.token, json!([{ "uuid": folder_id, "type": "folder" }]))
         .await?;
     output::emit(
@@ -321,8 +330,8 @@ pub async fn trash_folder(folder_id: &str) -> Result<()> {
 }
 
 pub async fn trash_list(extended: bool) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let api = DriveApi::new();
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
 
     let folders = collect_trash(&api, &creds.token, "folders").await?;
     let files = collect_trash(&api, &creds.token, "files").await?;
@@ -355,9 +364,9 @@ async fn collect_trash(api: &DriveApi, token: &str, kind: &str) -> Result<Vec<Va
 }
 
 pub async fn trash_restore_file(file_id: &str, destination: Option<&str>) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let api = DriveApi::new();
-    let dest = fallback_root(destination, &creds.user.root_folder_id);
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
+    let dest = fallback_root(destination, creds.root_folder());
     let file = api.move_file(&creds.token, file_id, &dest).await?;
     output::emit(
         &format!("✓ File restored successfully to: {dest}"),
@@ -367,9 +376,9 @@ pub async fn trash_restore_file(file_id: &str, destination: Option<&str>) -> Res
 }
 
 pub async fn trash_restore_folder(folder_id: &str, destination: Option<&str>) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let api = DriveApi::new();
-    let dest = fallback_root(destination, &creds.user.root_folder_id);
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
+    let dest = fallback_root(destination, creds.root_folder());
     let folder = api.move_folder(&creds.token, folder_id, &dest).await?;
     output::emit(
         &format!("✓ Folder restored successfully to: {dest}"),
@@ -379,7 +388,7 @@ pub async fn trash_restore_folder(folder_id: &str, destination: Option<&str>) ->
 }
 
 pub async fn trash_clear(force: bool) -> Result<()> {
-    let creds = auth::read_credentials()?;
+    let creds = auth::get_auth_details().await?;
     if !force {
         if output::is_json() || output::is_non_interactive() {
             return Err(anyhow!(
@@ -398,7 +407,7 @@ pub async fn trash_clear(force: bool) -> Result<()> {
             ));
         }
     }
-    DriveApi::new().clear_trash(&creds.token).await?;
+    DriveApi::for_credentials(&creds).clear_trash(&creds.token).await?;
     output::emit(
         "✓ Trash emptied successfully.",
         json!({ "success": true, "message": "Trash emptied successfully." }),
@@ -407,8 +416,8 @@ pub async fn trash_clear(force: bool) -> Result<()> {
 }
 
 pub async fn delete_permanently_file(file_id: &str) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let api = DriveApi::new();
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
     // Confirm the file exists first (node fetches metadata, errors if missing).
     api.get_file_meta(&creds.token, file_id)
         .await
@@ -422,8 +431,8 @@ pub async fn delete_permanently_file(file_id: &str) -> Result<()> {
 }
 
 pub async fn delete_permanently_folder(folder_id: &str) -> Result<()> {
-    let creds = auth::read_credentials()?;
-    let api = DriveApi::new();
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
     api.get_folder_meta(&creds.token, folder_id)
         .await
         .map_err(|_| anyhow!("Folder not found"))?;

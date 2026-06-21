@@ -41,6 +41,9 @@ md-5 = "0.11"
 hmac = "0.13"
 cipher = "0.5"
 bip39 = "2"
+pgp = "0.19"
+safe_pqc_kyber = { version = "0.6", default-features = false, features = ["kyber512", "std"] }
+blake3 = "1"
 
 [profile.release]
 opt-level = 3

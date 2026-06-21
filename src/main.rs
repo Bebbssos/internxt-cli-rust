@@ -7,6 +7,7 @@ mod drive_ops;
 mod models;
 mod network;
 mod output;
+mod workspaces;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -200,6 +201,26 @@ enum Commands {
         #[arg(short = 'i', long)]
         id: String,
     },
+    /// List the workspaces you belong to.
+    #[command(alias = "workspaces:list")]
+    WorkspacesList {
+        /// Display additional information (owner, address).
+        #[arg(short, long, default_value_t = false)]
+        extended: bool,
+    },
+    /// Set the active workspace for subsequent commands.
+    #[command(alias = "workspaces:use")]
+    WorkspacesUse {
+        /// The workspace id to activate. Use `workspaces-list` to view ids.
+        #[arg(short = 'i', long)]
+        id: Option<String>,
+        /// Switch back to your personal drive space (unset the active workspace).
+        #[arg(short, long, default_value_t = false)]
+        personal: bool,
+    },
+    /// Unset the active workspace (operate within your personal drive space).
+    #[command(alias = "workspaces:unset")]
+    WorkspacesUnset,
 }
 
 fn prompt(msg: &str) -> Result<String> {
@@ -308,6 +329,11 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::DeletePermanentlyFolder { id } => {
             drive_ops::delete_permanently_folder(&id).await?
         }
+        Commands::WorkspacesList { extended } => workspaces::list(extended).await?,
+        Commands::WorkspacesUse { id, personal } => {
+            workspaces::use_workspace(id.as_deref(), personal).await?
+        }
+        Commands::WorkspacesUnset => workspaces::unset().await?,
     }
     Ok(())
 }

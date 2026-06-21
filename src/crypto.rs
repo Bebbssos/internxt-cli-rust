@@ -2,8 +2,9 @@
 //! and og/inxt-js crypto utils. Byte-for-byte compatible with the node CLI.
 
 use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, StreamCipher};
+use aes_gcm::aead::consts::U16;
 use aes_gcm::aead::Aead;
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use aes_gcm::{AesGcm, KeyInit, Nonce};
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use md5::Md5;
@@ -17,6 +18,9 @@ use crate::config;
 type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
+/// AES-256-GCM with a 16-byte IV (node `@internxt/lib` uses a non-96-bit IV,
+/// so GCM derives the counter via GHASH rather than the 96-bit fast path).
+type Aes256GcmIv16 = AesGcm<aes_gcm::aes::Aes256, U16>;
 
 /// pbkdf2(password, salt, 10000, 32, sha1) -> (salt_hex, hash_hex)
 pub fn pass_to_hash(password: &str, salt_hex: Option<&str>) -> Result<(String, String)> {
@@ -110,13 +114,128 @@ pub fn decrypt_private_key(private_key_b64: &str, password: &str) -> Result<Stri
     let mut key = [0u8; 32];
     pbkdf2::pbkdf2_hmac::<Sha512>(password.as_bytes(), salt, 2145, &mut key);
 
-    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| anyhow!("gcm key: {e}"))?;
+    let cipher = Aes256GcmIv16::new_from_slice(&key).map_err(|e| anyhow!("gcm key: {e}"))?;
     let mut buf = ct.to_vec();
     buf.extend_from_slice(tag);
     let pt = cipher
-        .decrypt(Nonce::from_slice(iv), buf.as_ref())
+        .decrypt(Nonce::<U16>::from_slice(iv), buf.as_ref())
         .map_err(|_| anyhow!("Private key is corrupted"))?;
     Ok(String::from_utf8(pt)?)
+}
+
+/// 'HybridMode' in base64 — prefix marking a post-quantum (ecc+kyber) ciphertext.
+const HYBRID_MODE_PREFIX: &str = "SHlicmlkTW9kZQ==";
+
+/// Raw Kyber512 secret key length (Dashlane PQClean).
+const KYBER512_SK_LEN: usize = 1632;
+
+/// Kyber512 KEM decapsulation. `ct`/`sk` are the raw Dashlane PQClean bytes
+/// (ciphertext 768B, secret key 1632B); returns the 32-byte shared secret.
+pub fn kyber512_decapsulate(ct: &[u8], sk: &[u8]) -> Result<[u8; 32]> {
+    safe_pqc_kyber::decapsulate(ct, sk).map_err(|e| anyhow!("kyber decapsulate failed: {e:?}"))
+}
+
+/// Coerce a stored Kyber private key to the raw 1632-byte secret key.
+/// Accepts either base64(raw) (our clean form) or the node CLI's literal
+/// `base64(utf8(base64(raw)))` form, decoding twice when needed.
+fn kyber_secret_key_raw(stored_b64: &str) -> Result<Vec<u8>> {
+    let once = B64.decode(stored_b64)?;
+    if once.len() == KYBER512_SK_LEN {
+        return Ok(once);
+    }
+    if let Ok(twice) = B64.decode(&once) {
+        if twice.len() == KYBER512_SK_LEN {
+            return Ok(twice);
+        }
+    }
+    Err(anyhow!(
+        "kyber secret key has unexpected length {} (want {KYBER512_SK_LEN})",
+        once.len()
+    ))
+}
+
+/// blake3 XOF: extend `secret` to `out_bytes` bytes, returned as a hex string.
+/// Mirrors node CryptoUtils.extendSecret (hash-wasm `blake3(secret, bits)`).
+pub fn blake3_extend(secret: &[u8], out_bytes: usize) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(secret);
+    let mut out = vec![0u8; out_bytes];
+    hasher.finalize_xof().fill(&mut out);
+    hex::encode(out)
+}
+
+/// XOR two equal-length hex strings, returning a hex string (CryptoUtils.XORhex).
+fn xor_hex(a: &str, b: &str) -> Result<String> {
+    if a.len() != b.len() {
+        return Err(anyhow!("Can XOR only strings with identical length"));
+    }
+    let ab = hex::decode(a)?;
+    let bb = hex::decode(b)?;
+    let xored: Vec<u8> = ab.iter().zip(bb.iter()).map(|(x, y)| x ^ y).collect();
+    Ok(hex::encode(xored))
+}
+
+/// Decrypt an armored OpenPGP message with an armored (unprotected) private key.
+/// The private key is already password-decrypted, so no passphrase is needed.
+fn pgp_decrypt(armored_message: &str, armored_private_key: &str) -> Result<String> {
+    use pgp::composed::{Deserializable, Message, SignedSecretKey};
+    use pgp::types::Password;
+    use std::io::Read;
+
+    let (secret_key, _) = SignedSecretKey::from_string(armored_private_key)
+        .map_err(|e| anyhow!("invalid pgp private key: {e}"))?;
+    let (message, _) = Message::from_string(armored_message)
+        .map_err(|e| anyhow!("invalid pgp message: {e}"))?;
+
+    let mut decrypted = message
+        .decrypt(&Password::empty(), &secret_key)
+        .map_err(|e| anyhow!("pgp decrypt failed: {e}"))?;
+    while decrypted.is_compressed() {
+        decrypted = decrypted
+            .decompress()
+            .map_err(|e| anyhow!("pgp decompress failed: {e}"))?;
+    }
+    let mut out = String::new();
+    decrypted
+        .read_to_string(&mut out)
+        .map_err(|e| anyhow!("pgp read failed: {e}"))?;
+    Ok(out)
+}
+
+/// Decrypts an Internxt workspace mnemonic blob (`workspaceUser.key`).
+/// Mirrors og/cli keys.service hybridDecryptMessageWithPrivateKey: ecc-only when
+/// the blob is a single base64 PGP message, hybrid (ecc+kyber) when it is
+/// `HybridMode$kyberCt$eccCt`. `ecc_private_key_b64`/`kyber_private_key_b64` are
+/// the (already password-decrypted) keys, base64-encoded as stored at login.
+pub fn decrypt_workspace_key(
+    blob: &str,
+    ecc_private_key_b64: &str,
+    kyber_private_key_b64: Option<&str>,
+) -> Result<String> {
+    let ecc_armored = String::from_utf8(B64.decode(ecc_private_key_b64)?)?;
+    let parts: Vec<&str> = blob.split('$').collect();
+
+    if parts.first() == Some(&HYBRID_MODE_PREFIX) {
+        if parts.len() != 3 {
+            return Err(anyhow!("malformed hybrid workspace key"));
+        }
+        let kyber_b64 = kyber_private_key_b64
+            .ok_or_else(|| anyhow!("hybrid workspace key requires a Kyber private key"))?;
+        let kyber_ct = B64.decode(parts[1])?;
+        let kyber_sk = kyber_secret_key_raw(kyber_b64)?;
+        let kyber_secret = kyber512_decapsulate(&kyber_ct, &kyber_sk)?;
+
+        let ecc_message = String::from_utf8(B64.decode(parts[2])?)?;
+        let ecc_plaintext = pgp_decrypt(&ecc_message, &ecc_armored)?;
+
+        // ecc_plaintext is a hex string; XOR it with the blake3-extended kyber secret.
+        let secret_hex = blake3_extend(&kyber_secret, ecc_plaintext.len() / 2);
+        let xored = xor_hex(&ecc_plaintext, &secret_hex)?;
+        Ok(String::from_utf8(hex::decode(xored)?)?)
+    } else {
+        let ecc_message = String::from_utf8(B64.decode(blob)?)?;
+        pgp_decrypt(&ecc_message, &ecc_armored)
+    }
 }
 
 pub fn sha256(input: &[u8]) -> Vec<u8> {
