@@ -7,6 +7,8 @@ mod drive_ops;
 mod models;
 mod network;
 mod output;
+#[cfg(feature = "sso")]
+mod sso;
 mod sync;
 mod workspaces;
 
@@ -35,8 +37,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Log in with email and password (legacy flow).
+    /// Log in to your Internxt account.
+    ///
+    /// Uses the web-based SSO flow when built with the `sso` feature (default),
+    /// otherwise falls back to the legacy email/password flow. Use `login-sso`
+    /// or `login-legacy` to force a specific flow.
     Login {
+        /// SSO: address the browser uses to reach this machine (default 127.0.0.1).
+        #[arg(long, env = "INXT_LOGIN_SERVER_HOST")]
+        host: Option<String>,
+        /// SSO: port for the local callback server (default: a random free port).
+        #[arg(long, env = "INXT_LOGIN_SERVER_PORT")]
+        port: Option<u16>,
         #[arg(short, long, env = "INXT_USER")]
         email: Option<String>,
         #[arg(short, long, env = "INXT_PASSWORD")]
@@ -47,6 +59,30 @@ enum Commands {
         /// The TOTP secret token, used to generate a code. Takes priority over --twofactor.
         #[arg(short = 't', long, env = "INXT_OTPTOKEN")]
         twofactortoken: Option<String>,
+    },
+    /// Log in with email and password (legacy flow).
+    #[command(alias = "login:legacy")]
+    LoginLegacy {
+        #[arg(short, long, env = "INXT_USER")]
+        email: Option<String>,
+        #[arg(short, long, env = "INXT_PASSWORD")]
+        password: Option<String>,
+        /// The two-factor auth code (TOTP).
+        #[arg(short = 'w', long, env = "INXT_TWOFACTORCODE")]
+        twofactor: Option<String>,
+        /// The TOTP secret token, used to generate a code. Takes priority over --twofactor.
+        #[arg(short = 't', long, env = "INXT_OTPTOKEN")]
+        twofactortoken: Option<String>,
+    },
+    /// Log in via the web-based SSO flow (requires the `sso` feature).
+    #[command(alias = "login:sso")]
+    LoginSso {
+        /// Address the browser uses to reach this machine (default 127.0.0.1).
+        #[arg(long, env = "INXT_LOGIN_SERVER_HOST")]
+        host: Option<String>,
+        /// Port for the local callback server (default: a random free port).
+        #[arg(long, env = "INXT_LOGIN_SERVER_PORT")]
+        port: Option<u16>,
     },
     /// Upload a file to Internxt Drive.
     #[command(alias = "upload:file")]
@@ -280,6 +316,54 @@ fn prompt(msg: &str) -> Result<String> {
     Ok(s.trim().to_string())
 }
 
+async fn run_legacy_login(
+    email: Option<String>,
+    password: Option<String>,
+    twofactor: Option<String>,
+    twofactortoken: Option<String>,
+) -> Result<()> {
+    let email = match email {
+        Some(e) => e,
+        None if output::is_non_interactive() => {
+            return Err(anyhow::anyhow!("No value provided for required flag: email"))
+        }
+        None => prompt("What is your email? ")?,
+    };
+    let password = match password {
+        Some(p) => p,
+        None if output::is_non_interactive() => {
+            return Err(anyhow::anyhow!(
+                "No value provided for required flag: password"
+            ))
+        }
+        None => rpassword::prompt_password("What is your password? ")?,
+    };
+    let creds = auth::login(
+        &email,
+        &password,
+        twofactor.as_deref(),
+        twofactortoken.as_deref(),
+    )
+    .await?;
+    auth::save_credentials(&creds)?;
+    output::emit(
+        &format!("✓ Successfully logged in to: {}", creds.user.email),
+        serde_json::json!({ "success": true, "login": { "email": creds.user.email } }),
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sso")]
+async fn run_sso_login(host: Option<String>, port: Option<u16>) -> Result<()> {
+    let creds = sso::login(host.as_deref(), port).await?;
+    auth::save_credentials(&creds)?;
+    output::emit(
+        &format!("✓ Successfully logged in to: {}", creds.user.email),
+        serde_json::json!({ "success": true, "login": { "email": creds.user.email } }),
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -298,39 +382,42 @@ async fn main() {
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Login {
+            host,
+            port,
             email,
             password,
             twofactor,
             twofactortoken,
         } => {
-            let email = match email {
-                Some(e) => e,
-                None if output::is_non_interactive() => {
-                    return Err(anyhow::anyhow!("No value provided for required flag: email"))
-                }
-                None => prompt("What is your email? ")?,
-            };
-            let password = match password {
-                Some(p) => p,
-                None if output::is_non_interactive() => {
-                    return Err(anyhow::anyhow!(
-                        "No value provided for required flag: password"
-                    ))
-                }
-                None => rpassword::prompt_password("What is your password? ")?,
-            };
-            let creds = auth::login(
-                &email,
-                &password,
-                twofactor.as_deref(),
-                twofactortoken.as_deref(),
-            )
-            .await?;
-            auth::save_credentials(&creds)?;
-            output::emit(
-                &format!("✓ Successfully logged in to: {}", creds.user.email),
-                serde_json::json!({ "success": true, "login": { "email": creds.user.email } }),
-            );
+            #[cfg(feature = "sso")]
+            {
+                let _ = (email, password, twofactor, twofactortoken);
+                run_sso_login(host, port).await?;
+            }
+            #[cfg(not(feature = "sso"))]
+            {
+                let _ = (host, port);
+                run_legacy_login(email, password, twofactor, twofactortoken).await?;
+            }
+        }
+        Commands::LoginLegacy {
+            email,
+            password,
+            twofactor,
+            twofactortoken,
+        } => {
+            run_legacy_login(email, password, twofactor, twofactortoken).await?;
+        }
+        Commands::LoginSso { host, port } => {
+            #[cfg(feature = "sso")]
+            run_sso_login(host, port).await?;
+            #[cfg(not(feature = "sso"))]
+            {
+                let _ = (host, port);
+                return Err(anyhow::anyhow!(
+                    "SSO login is not available: this binary was built without the `sso` feature"
+                ));
+            }
         }
         Commands::UploadFile {
             file,

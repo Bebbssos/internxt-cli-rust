@@ -5,7 +5,8 @@ Context for working on this repo. Read this first.
 ## What this is
 
 An unofficial **Rust port of the Internxt CLI** (the official one is Node/TypeScript).
-Goal: faster, lower memory, single static binary. Implements **login, upload-file,
+Goal: faster, lower memory, single static binary. Implements **login** (legacy
+email/password + web-based **SSO** universal-link flow), **upload-file,
 download-file** with fully streaming transfers (handles 100GB+ files without loading
 them into RAM), plus **upload-folder** (recursive) and the drive-management commands
 (**logout, whoami, list, create-folder, move/rename/trash/restore file+folder,
@@ -39,6 +40,7 @@ those to find upstream changes worth porting.
 - Password hash / CryptoJS AES / credentials file → `og/cli/src/services/crypto.service.ts`, `config.service.ts`
 - Private-key AES-GCM decrypt → `og/lib/src/aes/`
 - Login flow + endpoints → `og/sdk/src/auth/index.ts`, `og/cli/src/services/auth.service.ts`
+- SSO / universal-link login (callback server + browser) → `og/cli/src/commands/login.ts`, `og/cli/src/services/universal-link.service.ts`
 - File-key derivation (`GenerateFileKey`), shard hash (`ripemd160(sha256)`) → `og/inxt-js/src/lib/utils/crypto/crypto.ts`, `og/inxt-js/src/lib/utils/streams/Hasher.ts`
 - Upload start/PUT/finish + multipart → `og/sdk/src/network/`, `og/inxt-js/src/lib/core/upload/`
 - Drive REST (createFileEntry, file meta) → `og/sdk/src/drive/storage/index.ts`, `og/cli/src/services/drive/`
@@ -52,7 +54,8 @@ those to find upstream changes worth porting.
 | `src/main.rs` | clap CLI dispatch (all subcommands) |
 | `src/config.rs` | API URLs + app constants (public; env-overridable), paths |
 | `src/crypto.rs` | passToHash, CryptoJS AES-CBC, lib AES-GCM, GenerateFileKey, AES-256-CTR, hashes, workspace-key decrypt (PGP/Kyber512/blake3) |
-| `src/auth.rs` | login flow (+ ecc/kyber key decrypt), credential save/read, token + workspace-cred refresh |
+| `src/auth.rs` | legacy login flow (+ ecc/kyber key decrypt), SSO credential build, credential save/read, token + workspace-cred refresh |
+| `src/sso.rs` | web-based SSO login (feature `sso`): local axum callback server + browser open, universal-link flow |
 | `src/api.rs` | Drive REST client (`DRIVE_NEW_API_URL`); workspace-aware via `for_credentials` (`x-internxt-workspace` header + `/workspaces/{id}/…` routing) |
 | `src/network.rs` | bridge/network client (`NETWORK_URL`), streaming PUT/GET |
 | `src/commands.rs` | upload-file/download-file/upload-folder orchestration (streaming + multipart + recursive) |
@@ -70,9 +73,20 @@ those to find upstream changes worth porting.
   **If you touch crypto, re-run these.** Regenerate the keys vectors with
   `NODE_PATH=og/node_modules node scripts/ref-keys.js > scripts/ref-keys.json`
   (the file is git-ignored / non-deterministic; the keys test skips if it is absent).
-- **Login** uses `/auth/login/access` WITHOUT *sending* keys, but reads the stored
-  `keys.ecc/kyber` the server returns, decrypts them (lib AES-GCM), and persists them
-  base64 — needed to decrypt workspace mnemonics. 2FA prompted when required.
+- **Login** (legacy) uses `/auth/login/access` WITHOUT *sending* keys, but reads the
+  stored `keys.ecc/kyber` the server returns, decrypts them (lib AES-GCM), and persists
+  them base64 — needed to decrypt workspace mnemonics. 2FA prompted when required.
+- **Subcommands**: `login` = SSO when built with the `sso` feature (default) else legacy;
+  `login-legacy` = always email/password; `login-sso` = always SSO (errors if built
+  `--no-default-features`). aliases `login:legacy` / `login:sso`.
+- **SSO login** (`src/sso.rs`, feature `sso`): binds a local axum server on `0.0.0.0:port`
+  (random port if unset), opens the browser at `{DRIVE_WEB_URL}/login?universalLink=true&redirectUri={b64}`,
+  waits for the `/callback` GET carrying base64 `mnemonic`/`newToken`/`privateKey`,
+  redirects the browser to `auth-link-ok`/`auth-link-error`, then builds creds via
+  `refreshUserCredentials` (`GET /users/cli/refresh`). `--host` sets the address the
+  browser uses (for cross-device login); `--port` fixes the callback port. **Kyber key is
+  dropped in SSO** (link never carries it, refresh returns it encrypted, no password to
+  decrypt) — ecc-only workspaces work; hybrid-Kyber workspaces need `login-legacy`.
 - **Workspaces**: `workspaces use` decrypts the workspace mnemonic
   (`crypto::decrypt_workspace_key`: ecc-only or `HybridMode$kyberCt$eccCt`) and stores a
   `WorkspaceContext`. When active, drive calls carry `x-internxt-workspace` and route to
@@ -98,11 +112,13 @@ those to find upstream changes worth porting.
 ## Build / test / run
 
 ```sh
-cargo build --release        # -> target/release/internxt
+cargo build --release        # -> target/release/internxt (SSO on by default)
+cargo build --release --no-default-features   # smaller binary, legacy login only (no axum/open)
 cargo test                   # crypto cross-check vs node (requires scripts/ref.js values; no network)
 node scripts/ref.js          # regenerate reference crypto values (needs og/ fetched)
 
-target/release/internxt login --email you@example.com
+target/release/internxt login                       # SSO (opens browser); use --host/--port for another device
+target/release/internxt login-legacy --email you@example.com   # email/password
 target/release/internxt upload-file -f ./file -i <folder-uuid>
 target/release/internxt download-file -i <file-uuid> -d ./out --overwrite
 

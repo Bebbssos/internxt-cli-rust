@@ -89,6 +89,52 @@ pub async fn login(
     Ok(creds)
 }
 
+/// Builds credentials from a completed web-based (universal-link) SSO login.
+///
+/// The web app has already decrypted everything client-side and delivered the
+/// clear `mnemonic`, session `token` and ecc `private_key_pem` via the callback.
+/// We only need to fetch the rest of the user identity from `refreshUserCredentials`.
+///
+/// The kyber private key is intentionally dropped: the universal link never
+/// carries it and the refresh endpoint returns it still encrypted (there is no
+/// password in the SSO flow to decrypt it). ecc-only workspaces still work;
+/// hybrid (Kyber) workspaces require a legacy login. Mirrors og/cli
+/// universal-link.service.ts, which likewise never obtains a usable kyber key.
+#[cfg(feature = "sso")]
+pub async fn build_sso_credentials(
+    mnemonic: &str,
+    token: &str,
+    private_key_pem: &str,
+) -> Result<Credentials> {
+    if !crypto::validate_mnemonic(mnemonic) {
+        return Err(anyhow!("decrypted mnemonic is invalid"));
+    }
+
+    let data = DriveApi::new().refresh_user_credentials(token).await?;
+    let new_token = data["newToken"]
+        .as_str()
+        .ok_or_else(|| anyhow!("no newToken in refresh response: {data}"))?
+        .to_string();
+    let user = &data["user"];
+
+    let creds = Credentials {
+        token: new_token,
+        user: UserInfo {
+            email: field(user, "email")?,
+            mnemonic: mnemonic.to_string(),
+            bucket: field(user, "bucket")?,
+            bridge_user: field(user, "bridgeUser")?,
+            user_id: field(user, "userId")?,
+            root_folder_id: field(user, "rootFolderId")?,
+            // Stored as base64(armored PEM), same shape as decrypt_user_keys.
+            ecc_private_key: Some(B64.encode(private_key_pem.as_bytes())),
+            kyber_private_key: None,
+        },
+        workspace: None,
+    };
+    Ok(creds)
+}
+
 /// Decrypts the user's ecc + kyber private keys from the login response and
 /// returns them base64-encoded as stored (mirrors node `doLogin`). Returns
 /// `None` for a key when it is absent or cannot be decrypted.

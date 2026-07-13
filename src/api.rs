@@ -120,17 +120,24 @@ impl DriveApi {
     /// GET /users/cli/refresh -> new session token (refreshUserCredentials).
     /// Returns the `newToken`; the rest of the user identity is unchanged.
     pub async fn refresh_user_token(&self, token: &str) -> Result<String> {
+        let v = self.refresh_user_credentials(token).await?;
+        v["newToken"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow!("no newToken in refresh response: {v}"))
+    }
+
+    /// GET /users/cli/refresh -> full `{ newToken, user }` (refreshUserCredentials).
+    /// Used by the SSO login flow to fetch the user identity, since the
+    /// universal link only carries the mnemonic, token and ecc private key.
+    pub async fn refresh_user_credentials(&self, token: &str) -> Result<serde_json::Value> {
         let resp = self
             .client
             .get(self.url("/users/cli/refresh"))
             .headers(self.auth_headers(token)?)
             .send()
             .await?;
-        let v = Self::check(resp, "refreshUserCredentials").await?;
-        v["newToken"]
-            .as_str()
-            .map(|s| s.to_string())
-            .ok_or_else(|| anyhow!("no newToken in refresh response: {v}"))
+        Self::check(resp, "refreshUserCredentials").await
     }
 
     /// GET /files/{uuid}/meta

@@ -1,6 +1,6 @@
 # internxt-cli-rust
 
-An unofficial Rust port of the [Internxt CLI](https://github.com/internxt/cli), focused on speed and low memory use. File transfers are fully streaming — large files (100GB+) are uploaded and downloaded without ever being loaded into RAM.
+An unofficial Rust port of the [Internxt CLI](https://github.com/internxt/cli), focused on speed and low memory use.
 
 > Not affiliated with or endorsed by Internxt.
 
@@ -8,11 +8,11 @@ An unofficial Rust port of the [Internxt CLI](https://github.com/internxt/cli), 
 
 ## Status
 
-Implemented: authentication, streaming file transfers, recursive folder upload, one-way folder sync (`sync-up` / `sync-down`), and the full set of drive-management commands (list, create/move/rename, trash + restore, permanent delete). Every command supports `--json` for scripting.
+Implemented: authentication (legacy + web-based SSO), streaming file transfers, recursive folder upload, one-way folder sync (`sync-up` / `sync-down`), workspaces (list/use/unset with workspace-scoped transfers), automatic token refresh near expiry, and the full set of drive-management commands (list, create/move/rename, trash + restore, permanent delete). Every command supports `--json` for scripting.
 
 Crypto is byte-for-byte compatible with the node CLI (verified by cross-check tests, see `cargo test`).
 
-Not yet ported: SSO login, workspaces, thumbnails, token refresh on expiry, the `config` command, and WebDAV server mode.
+Not yet ported: thumbnails, the `config` command, and WebDAV server mode.
 
 ## Compatibility with `@internxt/cli`
 
@@ -20,13 +20,10 @@ This is intended to be a **mostly drop-in replacement** for the official [`@inte
 
 It is *not* a 100% replacement — anything in "Not yet ported" above is simply absent. Beyond missing commands, the known **behavioural differences (breaking changes)** are:
 
-- **`login` is legacy-only.** Our `login` is the official CLI's `login-legacy` flow (email + password + optional 2FA). The official `login` (SSO / web browser callback) is not implemented.
+- **`login` defaults to SSO.** Built with the default `sso` feature, `login` runs the web-browser callback flow (like the official CLI); `login-legacy` runs email + password + optional 2FA, and `login-sso` forces SSO. Build `--no-default-features` for a smaller binary where `login` falls back to legacy and `login-sso` errors. The SSO flow drops the kyber private key (hybrid-Kyber workspaces need `login-legacy`).
 - **`--json` output schema differs.** We emit a simplified `{ "success": true, ... }` object per command rather than the exact oclif JSON envelope. Field names mostly match, but don't assume byte-identical structure.
-- **No interactive prompting for missing flags.** Required arguments that are absent produce a clap usage error instead of an interactive prompt. The exceptions that still prompt: `login` (email/password/2FA) and `trash-clear` (confirmation, unless `--force`).
-- **Personal drive only.** Workspaces are unsupported; there is no `workspaces-*` command and no workspace credential handling.
-- **No token auto-refresh.** A stored token is used as-is; on expiry you must `login` again (the official CLI refreshes near-expiry).
+- **No interactive prompting for missing flags.** Required arguments that are absent produce a clap usage error instead of an interactive prompt. The exceptions that still prompt: `login-legacy` (email/password/2FA) and `trash-clear` (confirmation, unless `--force`).
 - **No thumbnail generation** on upload.
-- **Only the mnemonic is persisted** from the decrypted account keys (not the ecc/kyber private keys).
 - **Plain-text table output** uses simple aligned columns rather than the official CLI's boxed tables. Use `--json` for stable machine-readable output.
 
 ## Build
@@ -34,6 +31,9 @@ It is *not* a 100% replacement — anything in "Not yet ported" above is simply 
 ```sh
 cargo build --release
 # binary at target/release/internxt
+
+# smaller binary without the web-based SSO login (drops axum + open):
+cargo build --release --no-default-features
 ```
 
 ## Commands
@@ -42,9 +42,14 @@ All commands accept the global `--json` flag, which prints a single JSON result 
 
 | Command | Aliases | Arguments | Description |
 |---|---|---|---|
-| `login` | | `-e, --email <EMAIL>`, `-p, --password <PASSWORD>`, `-w, --twofactor <CODE>` | Log in with email + password (legacy flow). Prompts for any missing value; 2FA prompted if the account requires it. |
+| `login` | | `--host <HOST>`, `--port <PORT>` (SSO); or legacy flags when built without `sso` | Log in. SSO web-browser flow by default (`--host`/`--port` for cross-device); falls back to legacy when built `--no-default-features`. |
+| `login-sso` | `login:sso` | `--host <HOST>`, `--port <PORT>` | Web-based SSO login (opens a browser, local callback server). Errors if built without the `sso` feature. |
+| `login-legacy` | `login:legacy` | `-e, --email <EMAIL>`, `-p, --password <PASSWORD>`, `-w, --twofactor <CODE>` | Log in with email + password. Prompts for any missing value; 2FA prompted if the account requires it. |
 | `logout` | | | Invalidate the session server-side and clear local credentials. |
 | `whoami` | | | Show the currently logged-in user. |
+| `workspaces-list` | `workspaces:list` | `-e, --extended` | List the workspaces you belong to. |
+| `workspaces-use` | `workspaces:use` | `-i, --id <WORKSPACE_ID>`, `-p, --personal` | Set the active workspace for subsequent commands (`--personal` switches back to your personal drive). |
+| `workspaces-unset` | `workspaces:unset` | | Unset the active workspace (operate within your personal drive space). |
 | `upload-file` | `upload:file` | `-f, --file <PATH>`, `-i, --destination <FOLDER_ID>` | Upload a single file (streaming; single-part or multipart). |
 | `upload-folder` | `upload:folder` | `-f, --folder <PATH>`, `-i, --destination <FOLDER_ID>` | Recursively upload a folder tree (concurrent file uploads). |
 | `download-file` | `download:file` | `-i, --id <FILE_ID>`, `-d, --directory <DIR>`, `-o, --overwrite` | Download + decrypt a file by id, streaming to disk. |
@@ -72,7 +77,8 @@ All commands accept the global `--json` flag, which prints a single JSON result 
 ## Usage examples
 
 ```sh
-internxt login --email you@example.com          # prompts for password (+ 2FA if enabled)
+internxt login                                  # SSO: opens a browser to authenticate
+internxt login-legacy --email you@example.com   # email/password; prompts for password (+ 2FA if enabled)
 internxt upload-file -f ./file.bin -i <folder-uuid>
 internxt upload-folder -f ./my-folder           # recursive; -i for a destination folder
 internxt download-file -i <file-uuid> -d ./out --overwrite
@@ -91,12 +97,14 @@ Credentials are stored AES-encrypted at `~/.internxt-cli/.inxtcli` (same locatio
 ## Architecture
 
 - `src/crypto.rs` — password hashing, CryptoJS-compatible AES, file-key derivation, AES-256-CTR.
-- `src/auth.rs` — login flow + credential persistence.
+- `src/auth.rs` — login flow + credential persistence + token/workspace refresh.
+- `src/sso.rs` — web-based SSO login (feature `sso`): local callback server + browser.
 - `src/api.rs` — Drive REST client.
 - `src/network.rs` — bridge (network) client: start/PUT/finish + download links/shards.
 - `src/commands.rs` — streaming upload/download + recursive folder upload.
 - `src/sync.rs` — one-way folder sync (`sync-up` / `sync-down`): tree diff + reconcile.
 - `src/drive_ops.rs` — drive-management commands (list, folder/file ops, trash).
+- `src/workspaces.rs` — workspaces list/use/unset + workspace mnemonic decrypt.
 - `src/output.rs` — global `--json` / human output switch.
 
 ### Streaming / memory

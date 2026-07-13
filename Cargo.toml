@@ -11,6 +11,13 @@ repository = "https://github.com/Bebbssos/internxt-cli-rust"
 name = "internxt"
 path = "src/main.rs"
 
+[features]
+default = ["sso"]
+# Web-based (universal-link) SSO login. Pulls in axum (local callback server)
+# and open (browser launcher). Disable to build a smaller binary with only the
+# legacy email/password login.
+sso = ["dep:axum", "dep:open"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", features = ["json", "stream"] }
@@ -28,6 +35,10 @@ futures-util = "0.3"
 bytes = "1"
 chrono = "0.4"
 indicatif = "0.18"
+
+# sso (web-based login): temporary local callback server + browser opener
+axum = { version = "0.8", optional = true }
+open = { version = "5", optional = true }
 
 # crypto
 aes = "0.9"

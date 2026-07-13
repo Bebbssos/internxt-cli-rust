@@ -26,7 +26,6 @@ diff upstream against them to find changes worth pulling in.
 
 ## Missing commands
 
-- `login` (SSO) — node `login.ts` web-based flow (local callback server + browser)
 - `config` — show/set config
 - `logs`
 - `webdav`, `webdav-config`, `add-cert` — WebDAV server mode (big; express + sqlite + TLS)
@@ -34,6 +33,9 @@ diff upstream against them to find changes worth pulling in.
 ## Feature gaps in already-ported commands
 
 ### Auth
+- SSO login drops the kyber private key (universal link never carries it; the
+  refresh endpoint returns it still-encrypted, no password to decrypt). ecc-only
+  workspaces work; hybrid-Kyber workspaces need `login-legacy`. Matches og.
 - Login with generated PGP/Kyber keys (`/auth/cli/login/access`). We use
   `/auth/login/access` WITHOUT keys; fine for existing accounts (the server
   returns the stored keys), but registration / key-update paths are unsupported.
