@@ -2,6 +2,7 @@
 //! prints a single JSON object on success (and on error) and suppresses the
 //! human-readable status/progress chatter.
 
+use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -48,6 +49,25 @@ pub fn status_err(msg: &str) {
     if !is_json() {
         eprintln!("{msg}");
     }
+}
+
+/// A byte-oriented progress bar for transfers, drawn on stderr (so it never
+/// pollutes piped stdout data). Returns a hidden bar in JSON mode. `verb` is the
+/// leading label, e.g. "Uploading" / "Downloading".
+pub fn progress_bar(total: u64, verb: &str) -> ProgressBar {
+    if is_json() {
+        return ProgressBar::hidden();
+    }
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{msg} [{bar:30.cyan/blue}] {percent:>3}% {bytes}/{total_bytes} ({binary_bytes_per_sec}, ETA {eta})",
+        )
+        .unwrap()
+        .progress_chars("=>-"),
+    );
+    pb.set_message(verb.to_string());
+    pb
 }
 
 /// Terminal error output as a JSON object (used by main's error handler).

@@ -80,7 +80,8 @@ pub async fn upload_file(
     if size > 0 {
         let net = NetworkApi::new(creds.net_user(), creds.net_pass());
         crate::output::status("Preparing network...");
-        file_id = upload_file_to_network(&net, creds.bucket(), creds.mnemonic(), path, size).await?;
+        file_id =
+            upload_file_to_network(&net, creds.bucket(), creds.mnemonic(), path, size, None).await?;
     }
 
     let creation = to_rfc3339(meta.created().unwrap_or_else(|_| SystemTime::now()));
@@ -133,6 +134,7 @@ async fn upload_from_stdin(
                 creds.mnemonic(),
                 tokio::io::stdin(),
                 sz,
+                None,
             )
             .await?;
             (id, sz)
@@ -150,6 +152,7 @@ async fn upload_from_stdin(
                     creds.mnemonic(),
                     &tmp.path,
                     tmp.size,
+                    None,
                 )
                 .await?;
                 (id, tmp.size)
@@ -233,12 +236,16 @@ async fn spool_stdin_to_temp() -> Result<TempSpool> {
 
 /// Encrypt + upload a file's bytes to the network, returning the network file id.
 /// Picks single-part or multipart based on size. Shared by upload-file / upload-folder.
+/// `pb` = an optional shared progress bar to report byte progress into (used by
+/// folder uploads to share one overall bar). When `None`, a per-transfer bar is
+/// created and finished internally.
 pub async fn upload_file_to_network(
     net: &NetworkApi,
     bucket: &str,
     mnemonic: &str,
     path: &Path,
     size: u64,
+    pb: Option<&indicatif::ProgressBar>,
 ) -> Result<String> {
     let mut index = [0u8; 32];
     rand::rng().fill(&mut index);
@@ -246,10 +253,10 @@ pub async fn upload_file_to_network(
     let key = crypto::generate_file_key(mnemonic, bucket, &index)?;
 
     if size > MULTIPART_THRESHOLD {
-        upload_multipart(net, bucket, size, path, &key, &iv, &index).await
+        upload_multipart(net, bucket, size, path, &key, &iv, &index, pb).await
     } else {
         let file = tokio::fs::File::open(path).await?;
-        upload_single(net, bucket, size, file, &key, &iv, &index).await
+        upload_single(net, bucket, size, file, &key, &iv, &index, pb).await
     }
 }
 
@@ -262,6 +269,7 @@ pub async fn upload_stream_to_network<R>(
     mnemonic: &str,
     reader: R,
     size: u64,
+    pb: Option<&indicatif::ProgressBar>,
 ) -> Result<String>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -270,7 +278,7 @@ where
     rand::rng().fill(&mut index);
     let iv = index[0..16].to_vec();
     let key = crypto::generate_file_key(mnemonic, bucket, &index)?;
-    upload_single(net, bucket, size, reader, &key, &iv, &index).await
+    upload_single(net, bucket, size, reader, &key, &iv, &index, pb).await
 }
 
 /// Single presigned-URL upload, body streamed straight from a reader through CTR.
@@ -282,6 +290,7 @@ async fn upload_single<R>(
     key: &[u8; 32],
     iv: &[u8],
     index: &[u8],
+    pb: Option<&indicatif::ProgressBar>,
 ) -> Result<String>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -295,17 +304,22 @@ where
     let url = slot.url.ok_or_else(|| anyhow!("no upload url returned"))?;
 
     let hasher = Arc::new(Mutex::new(Sha256::new()));
+    // Own a bar only if the caller didn't supply a shared one.
+    let owned_pb = pb.is_none().then(|| crate::output::progress_bar(size, "Uploading"));
+    let pb = pb.unwrap_or_else(|| owned_pb.as_ref().unwrap());
 
     // Streaming state moved into the body producer.
     struct St<R> {
         reader: R,
         ctr: Ctr,
         hasher: Arc<Mutex<Sha256>>,
+        pb: indicatif::ProgressBar,
     }
     let st = St {
         reader,
         ctr: Ctr::new(key, iv),
         hasher: hasher.clone(),
+        pb: pb.clone(),
     };
 
     let body = futures_util::stream::unfold(st, |mut st| async move {
@@ -316,14 +330,17 @@ where
                 buf.truncate(n);
                 st.ctr.apply(&mut buf);
                 st.hasher.lock().unwrap().update(&buf);
+                st.pb.inc(n as u64);
                 Some((Ok::<Bytes, std::io::Error>(Bytes::from(buf)), st))
             }
             Err(e) => Some((Err(e), st)),
         }
     });
 
-    crate::output::status(&format!("Uploading {} bytes...", size));
     net.put_stream(&url, size, body).await?;
+    if let Some(p) = &owned_pb {
+        p.finish_and_clear();
+    }
 
     let digest = hasher.lock().unwrap().clone().finalize();
     let hash = hex::encode(crypto::ripemd160(&digest));
@@ -343,6 +360,7 @@ async fn upload_multipart(
     key: &[u8; 32],
     iv: &[u8],
     index: &[u8],
+    pb: Option<&indicatif::ProgressBar>,
 ) -> Result<String> {
     let num_parts = size.div_ceil(PART_SIZE as u64) as u32;
     let start = net.start_upload(bucket, size, num_parts).await?;
@@ -361,11 +379,12 @@ async fn upload_multipart(
     let mut file = tokio::fs::File::open(path).await?;
 
     let sem = Arc::new(tokio::sync::Semaphore::new(UPLOAD_CONCURRENCY));
+    let owned_pb = pb.is_none().then(|| crate::output::progress_bar(size, "Uploading"));
+    let pb = pb.unwrap_or_else(|| owned_pb.as_ref().unwrap());
     let mut handles = Vec::new();
     let mut part_buf: Vec<u8> = Vec::with_capacity(PART_SIZE);
     let mut part_number: u32 = 1;
     let mut read_buf = vec![0u8; READ_CHUNK];
-    let mut uploaded: u64 = 0;
 
     loop {
         let n = file.read(&mut read_buf).await?;
@@ -380,23 +399,24 @@ async fn upload_multipart(
         while part_buf.len() >= PART_SIZE {
             let rest = part_buf.split_off(PART_SIZE);
             let body = std::mem::replace(&mut part_buf, rest);
-            dispatch_part(net, &urls, &sem, &mut handles, part_number, body).await?;
+            dispatch_part(net, &urls, &sem, &pb, &mut handles, part_number, body).await?;
             part_number += 1;
         }
     }
     if !part_buf.is_empty() {
         let body = std::mem::take(&mut part_buf);
-        dispatch_part(net, &urls, &sem, &mut handles, part_number, body).await?;
+        dispatch_part(net, &urls, &sem, &pb, &mut handles, part_number, body).await?;
     }
 
     let mut parts = Vec::with_capacity(handles.len());
     for h in handles {
         let p = h.await.map_err(|e| anyhow!("part task panicked: {e}"))??;
-        uploaded += 1;
         parts.push(p);
     }
     parts.sort_by_key(|p| p.part_number);
-    let _ = uploaded;
+    if let Some(p) = &owned_pb {
+        p.finish_and_clear();
+    }
 
     let digest = hasher.finalize();
     let hash = hex::encode(crypto::ripemd160(&digest));
@@ -411,6 +431,7 @@ async fn dispatch_part(
     net: &NetworkApi,
     urls: &[String],
     sem: &Arc<tokio::sync::Semaphore>,
+    pb: &indicatif::ProgressBar,
     handles: &mut Vec<tokio::task::JoinHandle<Result<PartRef>>>,
     part_number: u32,
     body: Vec<u8>,
@@ -421,10 +442,12 @@ async fn dispatch_part(
         .clone();
     let permit = sem.clone().acquire_owned().await.unwrap();
     let net = net.clone();
+    let pb = pb.clone();
+    let len = body.len() as u64;
     handles.push(tokio::spawn(async move {
         let _permit = permit;
         let etag = net.put_part(&url, body).await?;
-        crate::output::status(&format!("Uploaded part {part_number}"));
+        pb.inc(len);
         Ok(PartRef { part_number, etag })
     }));
     Ok(())
@@ -524,7 +547,8 @@ pub async fn download_file(
         Some(p) => Box::new(tokio::fs::File::create(p).await?),
         None => Box::new(tokio::io::stdout()),
     };
-    let mut written: u64 = 0;
+    // Progress bar draws on stderr, so it never mixes into a piped download.
+    let pb = crate::output::progress_bar(size, "Downloading");
 
     for shard in &shards {
         let resp = net.download_shard_stream(&shard.url).await?;
@@ -533,20 +557,11 @@ pub async fn download_file(
             let mut bytes = chunk?.to_vec();
             ctr.apply(&mut bytes);
             out.write_all(&bytes).await?;
-            written += bytes.len() as u64;
-            // Progress always to stderr so it never mixes into a piped download.
-            if size > 0 && !crate::output::is_json() {
-                let pct = (written as f64 / size as f64 * 100.0).min(100.0);
-                eprint!("\rDownloading {pct:.0}%");
-                use std::io::Write;
-                let _ = std::io::stderr().flush();
-            }
+            pb.inc(bytes.len() as u64);
         }
     }
     out.flush().await?;
-    if !crate::output::is_json() {
-        eprint!("\r");
-    }
+    pb.finish_and_clear();
     match &out_path {
         Some(p) => crate::output::emit(
             &format!("File downloaded successfully to {}", p.display()),
@@ -674,6 +689,7 @@ async fn upload_one_file(
     mnemonic: &str,
     file: &ScanNode,
     parent_uuid: &str,
+    pb: &indicatif::ProgressBar,
 ) -> Result<()> {
     let meta = std::fs::metadata(&file.abs)?;
     let size = meta.len();
@@ -686,7 +702,7 @@ async fn upload_one_file(
 
     let mut file_id = String::new();
     if size > 0 {
-        file_id = upload_file_to_network(net, bucket, mnemonic, &file.abs, size).await?;
+        file_id = upload_file_to_network(net, bucket, mnemonic, &file.abs, size, Some(pb)).await?;
     }
 
     let creation = to_rfc3339(meta.created().unwrap_or_else(|_| SystemTime::now()));
@@ -765,6 +781,8 @@ pub async fn upload_folder(local_path: &str, destination: Option<&str>) -> Resul
     let uploaded = Arc::new(AtomicU64::new(0));
     let folder_map = Arc::new(folder_map);
     let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FILE_UPLOADS));
+    // One shared overall bar across all files (concurrent per-file bars would clash).
+    let pb = crate::output::progress_bar(total_bytes, "Uploading");
     let mut handles = Vec::new();
 
     for file in files {
@@ -788,15 +806,18 @@ pub async fn upload_folder(local_path: &str, destination: Option<&str>) -> Resul
         let bucket = bucket.clone();
         let mnemonic = mnemonic.clone();
         let uploaded = uploaded.clone();
+        let pb = pb.clone();
         handles.push(tokio::spawn(async move {
             let _permit = permit;
-            match upload_one_file(&net, &api, &token, &bucket, &mnemonic, &file, &parent_uuid).await {
+            match upload_one_file(&net, &api, &token, &bucket, &mnemonic, &file, &parent_uuid, &pb)
+                .await
+            {
                 Ok(()) => {
                     uploaded.fetch_add(file.size, Ordering::Relaxed);
-                    crate::output::status(&format!("Uploaded {}", file.name));
+                    pb.println(format!("Uploaded {}", file.name));
                 }
                 Err(e) => {
-                    crate::output::status(&format!("Failed to upload {}: {e}", file.name));
+                    pb.println(format!("Failed to upload {}: {e}", file.name));
                 }
             }
         }));
@@ -804,6 +825,7 @@ pub async fn upload_folder(local_path: &str, destination: Option<&str>) -> Resul
     for h in handles {
         let _ = h.await;
     }
+    pb.finish_and_clear();
 
     let root_name = root
         .file_name()
