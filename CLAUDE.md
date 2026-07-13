@@ -9,8 +9,9 @@ Goal: faster, lower memory, single static binary. Implements **login, upload-fil
 download-file** with fully streaming transfers (handles 100GB+ files without loading
 them into RAM), plus **upload-folder** (recursive) and the drive-management commands
 (**logout, whoami, list, create-folder, move/rename/trash/restore file+folder,
-trash-list, trash-clear, delete-permanently**) and **workspaces** (list/use/unset,
-with workspace-scoped upload/download/list/etc). All commands support a global
+trash-list, trash-clear, delete-permanently**), **workspaces** (list/use/unset,
+with workspace-scoped upload/download/list/etc), and one-way folder **sync**
+(**sync-up** / **sync-down**). All commands support a global
 **`--json`** flag. Not affiliated with Internxt.
 
 Roadmap + what's missing: see [TODO.md](TODO.md).
@@ -55,6 +56,7 @@ those to find upstream changes worth porting.
 | `src/api.rs` | Drive REST client (`DRIVE_NEW_API_URL`); workspace-aware via `for_credentials` (`x-internxt-workspace` header + `/workspaces/{id}/…` routing) |
 | `src/network.rs` | bridge/network client (`NETWORK_URL`), streaming PUT/GET |
 | `src/commands.rs` | upload-file/download-file/upload-folder orchestration (streaming + multipart + recursive) |
+| `src/sync.rs` | sync-up/sync-down: one-way folder reconcile (local↔remote tree diff, size+mtime change detection, optional `--delete`) |
 | `src/drive_ops.rs` | logout, whoami, list, create/move/rename/trash/delete folder+file |
 | `src/workspaces.rs` | workspaces list/use/unset; decrypts workspace mnemonic |
 | `src/output.rs` | global `--json` vs human output switch (`emit`/`status`/`emit_error`) |

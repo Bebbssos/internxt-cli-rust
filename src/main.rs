@@ -7,6 +7,7 @@ mod drive_ops;
 mod models;
 mod network;
 mod output;
+mod sync;
 mod workspaces;
 
 use anyhow::Result;
@@ -235,6 +236,40 @@ enum Commands {
     /// Unset the active workspace (operate within your personal drive space).
     #[command(alias = "workspaces:unset")]
     WorkspacesUnset,
+    /// One-way sync: make a remote Drive folder match a local folder (push).
+    #[command(alias = "sync:up")]
+    SyncUp {
+        /// The local directory to sync from.
+        #[arg(short, long)]
+        local: String,
+        /// The remote folder uuid to sync into. Leave empty for the root folder.
+        #[arg(short, long)]
+        remote: Option<String>,
+        /// Delete remote files not present locally. Optional value: `trash`
+        /// (default) or `permanent`.
+        #[arg(long, num_args = 0..=1, default_missing_value = "default")]
+        delete: Option<String>,
+        /// Print the planned actions without transferring anything.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+    /// One-way sync: make a local folder match a remote Drive folder (pull).
+    #[command(alias = "sync:down")]
+    SyncDown {
+        /// The local directory to sync into.
+        #[arg(short, long)]
+        local: String,
+        /// The remote folder uuid to sync from. Leave empty for the root folder.
+        #[arg(short, long)]
+        remote: Option<String>,
+        /// Delete local files not present remotely. Optional value: `remove`
+        /// (default; OS trash not yet supported).
+        #[arg(long, num_args = 0..=1, default_missing_value = "default")]
+        delete: Option<String>,
+        /// Print the planned actions without transferring anything.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
 }
 
 fn prompt(msg: &str) -> Result<String> {
@@ -362,6 +397,18 @@ async fn run(cli: Cli) -> Result<()> {
             workspaces::use_workspace(id.as_deref(), personal).await?
         }
         Commands::WorkspacesUnset => workspaces::unset().await?,
+        Commands::SyncUp {
+            local,
+            remote,
+            delete,
+            dry_run,
+        } => sync::sync_up(&local, remote.as_deref(), delete.as_deref(), dry_run).await?,
+        Commands::SyncDown {
+            local,
+            remote,
+            delete,
+            dry_run,
+        } => sync::sync_down(&local, remote.as_deref(), delete.as_deref(), dry_run).await?,
     }
     Ok(())
 }

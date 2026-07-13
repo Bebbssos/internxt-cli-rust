@@ -8,7 +8,7 @@ An unofficial Rust port of the [Internxt CLI](https://github.com/internxt/cli), 
 
 ## Status
 
-Implemented: authentication, streaming file transfers, recursive folder upload, and the full set of drive-management commands (list, create/move/rename, trash + restore, permanent delete). Every command supports `--json` for scripting.
+Implemented: authentication, streaming file transfers, recursive folder upload, one-way folder sync (`sync-up` / `sync-down`), and the full set of drive-management commands (list, create/move/rename, trash + restore, permanent delete). Every command supports `--json` for scripting.
 
 Crypto is byte-for-byte compatible with the node CLI (verified by cross-check tests, see `cargo test`).
 
@@ -62,6 +62,12 @@ All commands accept the global `--json` flag, which prints a single JSON result 
 | `trash-clear` | `trash:clear` | `-f, --force` | Empty the trash permanently. Prompts unless `--force` (required in `--json` mode). |
 | `delete-permanently-file` | `delete:permanently:file` | `-i, --id <FILE_ID>` | Permanently delete a file. Cannot be undone. |
 | `delete-permanently-folder` | `delete:permanently:folder` | `-i, --id <FOLDER_ID>` | Permanently delete a folder. Cannot be undone. |
+| `sync-up` | `sync:up` | `-l, --local <DIR>`, `-r, --remote <FOLDER_ID>`, `--delete[=trash\|permanent]`, `--dry-run` | Make a remote folder match a local one (push): upload new/changed files, optionally trash/delete remote extras. |
+| `sync-down` | `sync:down` | `-l, --local <DIR>`, `-r, --remote <FOLDER_ID>`, `--delete`, `--dry-run` | Make a local folder match a remote one (pull): download new/changed files, optionally remove local extras. |
+
+### Sync
+
+`sync-up` and `sync-down` do a single **one-way** reconcile pass then exit (not a daemon). The source side always wins — there is no bidirectional mode and no conflict resolution. Files are keyed by relative path; change detection compares size, then `modificationTime` (±2s tolerance). `--dry-run` prints the plan without transferring; `--json` emits a summary object with counts + per-action list. Downloaded files are stamped with the remote modification time so repeat runs are idempotent. `--delete` is opt-in and off by default; it prunes both extra files **and** extra folders (deleting the top-most extra folder cascades its whole subtree).
 
 ## Usage examples
 
@@ -75,6 +81,9 @@ internxt list -i <folder-uuid> --json           # machine-readable output
 internxt create-folder -n "Reports" -i <parent-uuid>
 internxt trash-file -i <file-uuid>
 internxt trash-clear --force
+internxt sync-up   -l ./my-folder -r <folder-uuid> --dry-run   # preview a push
+internxt sync-up   -l ./my-folder -r <folder-uuid> --delete    # push, trashing remote extras
+internxt sync-down -l ./my-folder -r <folder-uuid>             # pull new/changed files
 ```
 
 Credentials are stored AES-encrypted at `~/.internxt-cli/.inxtcli` (same location/format as the node CLI).
@@ -86,6 +95,7 @@ Credentials are stored AES-encrypted at `~/.internxt-cli/.inxtcli` (same locatio
 - `src/api.rs` — Drive REST client.
 - `src/network.rs` — bridge (network) client: start/PUT/finish + download links/shards.
 - `src/commands.rs` — streaming upload/download + recursive folder upload.
+- `src/sync.rs` — one-way folder sync (`sync-up` / `sync-down`): tree diff + reconcile.
 - `src/drive_ops.rs` — drive-management commands (list, folder/file ops, trash).
 - `src/output.rs` — global `--json` / human output switch.
 

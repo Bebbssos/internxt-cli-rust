@@ -45,6 +45,7 @@ bip39 = "2"
 pgp = "0.19"
 safe_pqc_kyber = { version = "0.6", default-features = false, features = ["kyber512", "std"] }
 blake3 = "1"
+filetime = "0.2.29"
 
 [profile.release]
 opt-level = 3

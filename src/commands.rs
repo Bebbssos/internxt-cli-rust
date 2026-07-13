@@ -652,7 +652,7 @@ fn scan_dir(
 }
 
 /// Create a folder, retrying transient failures; returns None if it already exists.
-async fn create_folder_with_retry(
+pub(crate) async fn create_folder_with_retry(
     api: &DriveApi,
     token: &str,
     name: &str,

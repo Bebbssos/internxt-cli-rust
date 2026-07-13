@@ -97,7 +97,29 @@ Implemented: `--stdout` flag. Output target is `Box<dyn AsyncWrite>` (file or
   data is clean. In `--json` mode `--stdout` is rejected (binary + JSON conflict).
 - No `--overwrite` semantics for stdout.
 
-### 3. One-way folder sync — **not in og**
+### 3. One-way folder sync — **[x] done** (not in og)
+
+Implemented in `src/sync.rs` as `sync-up` / `sync-down` (aliases `sync:up` /
+`sync:down`), verified end-to-end against a real account (up, down, idempotent
+re-runs both directions, change detection, `--delete` both ways, roundtrip byte
+integrity). Notes vs. the design below:
+- Shared tree walk: `walk_local` (rel-path keyed, skips symlinks) + `build_remote_tree`
+  (recurses `get_folder_subfolders`/`subfiles`, paginated, EXISTS-filtered).
+- Change detection as designed (size, then `modificationTime` ±2s). Uploads set
+  `modificationTime` = local mtime; **downloads stamp the local file's mtime to the
+  remote value** (`filetime` crate) so repeat runs are idempotent.
+- `--delete` is opt-in (off by default). sync-up: `--delete`/`--delete=trash` trashes
+  remote extras, `--delete=permanent` deletes them. sync-down: `--delete` removes
+  local extras (`--delete=trash` for OS trash still unimplemented — errors clearly).
+- `--dry-run` prints the plan and exits; `--json` emits a summary object (counts +
+  per-action list). Transfers use the bounded semaphore (10 concurrent).
+- **Folder pruning:** `--delete` prunes extra *folders* too, not just files. Only
+  the top-most extra dir in a chain is deleted (trash/remove cascades its subtree);
+  files/subfolders under it are skipped to avoid double-work. A folder is never
+  "extra" if any synced file lives under it (local files always register all their
+  parent dirs), so pruning can't remove needed content.
+- **Scope cut for v1:** re-upload of a changed file trashes the old remote entry +
+  creates a new one (loses the remote uuid — no in-place content-replace API).
 
 **One-shot, not a daemon.** Each command does a single reconcile pass when invoked,
 then exits. No filesystem watcher, no long-running process, no polling loop.
