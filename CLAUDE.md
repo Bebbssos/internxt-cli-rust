@@ -11,9 +11,9 @@ download-file** with fully streaming transfers (handles 100GB+ files without loa
 them into RAM), plus **upload-folder** (recursive) and the drive-management commands
 (**logout, whoami, list, create-folder, move/rename/trash/restore file+folder,
 trash-list, trash-clear, delete-permanently**), **workspaces** (list/use/unset,
-with workspace-scoped upload/download/list/etc), and one-way folder **sync**
-(**sync-up** / **sync-down**). All commands support a global
-**`--json`** flag. Not affiliated with Internxt.
+with workspace-scoped upload/download/list/etc), one-way folder **sync**
+(**sync-up** / **sync-down**), and a foreground **WebDAV server** (**webdav**).
+All commands support a global **`--json`** flag. Not affiliated with Internxt.
 
 Roadmap + what's missing: see [TODO.md](TODO.md).
 
@@ -60,6 +60,7 @@ those to find upstream changes worth porting.
 | `src/network.rs` | bridge/network client (`NETWORK_URL`), streaming PUT/GET |
 | `src/commands.rs` | upload-file/download-file/upload-folder orchestration (streaming + multipart + recursive) |
 | `src/sync.rs` | sync-up/sync-down: one-way folder reconcile (local↔remote tree diff, size+mtime change detection, optional `--delete`) |
+| `src/webdav/` | WebDAV server (feature `webdav`): `mod.rs` (axum server + dispatch + auth + TLS), `handlers.rs` (method handlers), `resource.rs` (path→Drive-item resolution via tree walk), `xml.rs` (response XML) |
 | `src/drive_ops.rs` | logout, whoami, list, create/move/rename/trash/delete folder+file |
 | `src/workspaces.rs` | workspaces list/use/unset; decrypts workspace mnemonic |
 | `src/output.rs` | global `--json` vs human output switch (`emit`/`status`/`emit_error`) |
@@ -109,11 +110,28 @@ those to find upstream changes worth porting.
   public per-client constants from the upstream `.env.template`, not user data.
   `og/` and `target/` are git-ignored.
 
+- **WebDAV** (`src/webdav/`, feature `webdav`, default-on): a **foreground** `webdav`
+  command (runs until Ctrl-C) — deliberately *not* og's pm2 daemon + `webdav-config`.
+  Options are inline flags. axum `Router::fallback` catches all methods (incl. custom
+  verbs PROPFIND/MKCOL/MOVE/LOCK/…) and dispatches by `req.method()`. Path→item
+  resolution walks the folder tree via `get_folder_subfolders/subfiles` (workspace-aware),
+  no sqlite cache. GET/PUT stream through the shared `commands::{download_file_to_writer,
+  upload_stream_to_network}` (RAM-bounded); PUT with no Content-Length spools to a temp
+  file. DELETE trashes unless `--delete-permanently`. Default **HTTP**; **HTTPS** is the
+  separate **`webdav-tls`** feature (rustls via `axum-server` + `rcgen` self-signed or
+  `--cert`/`--key`). `COPY`/`PROPPATCH` → 501 (mirrors og). Response XML is hand-built
+  in `xml.rs` to match og's `D:`-namespaced shape. Creds live behind an
+  `RwLock<Arc<Credentials>>`; a background task calls `get_auth_details` hourly and
+  swaps in the refreshed token, and each request snapshots via `ctx.creds()` — so a
+  long-running server survives token expiry. `webdav-config` / `webdav
+  start|stop|status` names are left free for a future daemon mode.
+
 ## Build / test / run
 
 ```sh
-cargo build --release        # -> target/release/internxt (SSO on by default)
-cargo build --release --no-default-features   # smaller binary, legacy login only (no axum/open)
+cargo build --release        # -> target/release/internxt (SSO + WebDAV-over-HTTP on by default)
+cargo build --release --features webdav-tls   # + HTTPS for the WebDAV server
+cargo build --release --no-default-features   # smaller binary, legacy login only (no axum/open/webdav)
 cargo test                   # crypto cross-check vs node (requires scripts/ref.js values; no network)
 node scripts/ref.js          # regenerate reference crypto values (needs og/ fetched)
 
@@ -126,6 +144,10 @@ target/release/internxt download-file -i <file-uuid> -d ./out --overwrite
 target/release/internxt workspaces-list
 target/release/internxt workspaces-use -i <workspace-uuid>
 target/release/internxt workspaces-use --personal   # or: workspaces-unset
+
+# webdav: serve Drive over WebDAV in the foreground (Ctrl-C to stop)
+target/release/internxt webdav --host 0.0.0.0 --port 8080
+cargo build --release --features webdav-tls   # add HTTPS (--https, self-signed or --cert/--key)
 ```
 
 ## Conventions

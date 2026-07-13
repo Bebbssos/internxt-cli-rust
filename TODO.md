@@ -28,7 +28,10 @@ diff upstream against them to find changes worth pulling in.
 
 - `config` — show/set config
 - `logs`
-- `webdav`, `webdav-config`, `add-cert` — WebDAV server mode (big; express + sqlite + TLS)
+- `webdav-config`, `webdav start|stop|status`, `add-cert` — the daemon-style WebDAV
+  management commands. The `webdav` **server itself is ported** (foreground command,
+  see README); these subcommands are intentionally deferred pending a decision on
+  whether to add a background/daemon mode. Command names are left free for them.
 
 ## Feature gaps in already-ported commands
 
@@ -51,6 +54,18 @@ diff upstream against them to find changes worth pulling in.
 - Range / resume support (`RangeOptions`, partial download with CTR offset IV math).
 - Shared-link / token download (`getDownloadLinks(..., token)`).
 - Multi-shard parallel download (we download shards sequentially).
+
+### WebDAV
+- `COPY` and `PROPPATCH` return `501` (og also stubs COPY; PROPPATCH unimplemented).
+- `--timeout` is accepted but not wired to a request-timeout layer (og sets
+  `server.requestTimeout`). Add a tower `TimeoutLayer` if needed.
+- No local drive cache / path→uuid database (og uses sqlite); every resolution walks
+  the folder tree. Fine for typical trees; could be slow for very large/deep folders.
+- No thumbnail upload on PUT (shares the general thumbnail gap above).
+- Range GET decrypts from the start and discards the prefix (CTR is continuous); a
+  large offset still downloads+decrypts the skipped bytes. Proper CTR-offset seeking
+  would avoid that (same math as the Download range item).
+- HTTPS lives behind the `webdav-tls` feature (rustls + rcgen self-signed / custom cert).
 
 ### Infrastructure / parity
 - `.env` loading (node uses dotenv). We hardcode public defaults in `src/config.rs`,

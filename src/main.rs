@@ -10,6 +10,8 @@ mod output;
 #[cfg(feature = "sso")]
 mod sso;
 mod sync;
+#[cfg(feature = "webdav")]
+mod webdav;
 mod workspaces;
 
 use anyhow::Result;
@@ -289,6 +291,47 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+    /// Serve your Internxt Drive over WebDAV (runs until Ctrl-C).
+    ///
+    /// Options are passed inline (no separate config command). Plain HTTP by
+    /// default; use `--https` for HTTPS (self-signed unless `--cert`/`--key`
+    /// are given; requires the `webdav-tls` feature).
+    #[cfg(feature = "webdav")]
+    Webdav {
+        /// Host to bind (and advertise). Use 0.0.0.0 to accept LAN clients.
+        #[arg(short = 'l', long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on.
+        #[arg(short, long, default_value_t = 3005)]
+        port: u16,
+        /// Serve over HTTPS instead of plain HTTP.
+        #[arg(short = 's', long, default_value_t = false)]
+        https: bool,
+        /// TLS certificate (PEM). With --https and no --cert, a self-signed cert is generated.
+        #[arg(long, requires = "https")]
+        cert: Option<String>,
+        /// TLS private key (PEM). Required alongside --cert.
+        #[arg(long, requires = "cert")]
+        key: Option<String>,
+        /// Server request timeout in minutes (0 = none). Reserved for long transfers.
+        #[arg(short, long, default_value_t = 60)]
+        timeout: u64,
+        /// Auto-create missing parent folders on PUT / MKCOL.
+        #[arg(short = 'c', long, default_value_t = false)]
+        create_full_path: bool,
+        /// Require HTTP Basic auth from clients (needs --username and --password).
+        #[arg(short = 'a', long, default_value_t = false)]
+        custom_auth: bool,
+        /// Username for --custom-auth.
+        #[arg(short = 'u', long)]
+        username: Option<String>,
+        /// Password for --custom-auth.
+        #[arg(short = 'w', long)]
+        password: Option<String>,
+        /// Delete files permanently instead of moving them to trash.
+        #[arg(short = 'd', long, default_value_t = false)]
+        delete_permanently: bool,
+    },
     /// One-way sync: make a local folder match a remote Drive folder (pull).
     #[command(alias = "sync:down")]
     SyncDown {
@@ -496,6 +539,49 @@ async fn run(cli: Cli) -> Result<()> {
             delete,
             dry_run,
         } => sync::sync_down(&local, remote.as_deref(), delete.as_deref(), dry_run).await?,
+        #[cfg(feature = "webdav")]
+        Commands::Webdav {
+            host,
+            port,
+            https,
+            cert,
+            key,
+            timeout,
+            create_full_path,
+            custom_auth,
+            username,
+            password,
+            delete_permanently,
+        } => {
+            let custom = if custom_auth {
+                match (username, password) {
+                    (Some(u), Some(p)) => Some((u, p)),
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "--custom-auth requires --username and --password"
+                        ))
+                    }
+                }
+            } else {
+                None
+            };
+            let config = webdav::WebdavConfig {
+                host,
+                port,
+                protocol: if https {
+                    webdav::Protocol::Https
+                } else {
+                    webdav::Protocol::Http
+                },
+                timeout_minutes: timeout,
+                create_full_path,
+                custom_auth: custom,
+                delete_permanently,
+                cert: cert.map(std::path::PathBuf::from),
+                key: key.map(std::path::PathBuf::from),
+            };
+            webdav::run(config).await?;
+        }
     }
     Ok(())
 }
