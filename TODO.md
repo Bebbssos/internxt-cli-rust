@@ -67,6 +67,20 @@ diff upstream against them to find changes worth pulling in.
   would avoid that (same math as the Download range item).
 - HTTPS lives behind the `webdav-tls` feature (rustls + rcgen self-signed / custom cert).
 
+### FUSE mount (`mount`, beyond og — no official equivalent)
+- Random-access reads re-download from the start of the file and skip to the offset
+  (per-handle stream only avoids this for *sequential* reads / small forward gaps). Same
+  CTR-offset seeking fix as the WebDAV/Download range items would make random reads cheap.
+- Writes buffer the whole file to a temp file and upload on `release` (Internxt has no
+  partial update). `fsync` does **not** upload — a crash before `release` loses buffered
+  writes. Could upload-on-fsync for durability at a re-upload cost.
+- `setattr(size)` truncation only takes effect against an **open** write handle; a bare
+  `truncate(2)` on a closed file updates local metadata only (no Drive rewrite).
+- Read-modify-write of a large existing file downloads the whole file first (materialize),
+  then re-uploads it whole. Fine for typical edits; heavy for huge files.
+- No `--timeout`, no thumbnail upload (shares the general gaps). macOS/FreeBSD build the
+  same way but are untested here (developed/verified on Linux + libfuse3).
+
 ### Infrastructure / parity
 - `.env` loading (node uses dotenv). We hardcode public defaults in `src/config.rs`,
   overridable via env vars. Decide if a `.env` file should be supported.

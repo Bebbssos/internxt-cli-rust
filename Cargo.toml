@@ -12,7 +12,7 @@ name = "internxt"
 path = "src/main.rs"
 
 [features]
-default = ["sso", "webdav"]
+default = ["sso", "webdav", "fuse"]
 # Web-based (universal-link) SSO login. Pulls in axum (local callback server)
 # and open (browser launcher). Disable to build a smaller binary with only the
 # legacy email/password login.
@@ -23,6 +23,12 @@ webdav = ["dep:axum", "dep:tokio-util", "dep:mime_guess"]
 # HTTPS for the WebDAV server. Pulls in rustls + a self-signed cert generator.
 # Kept separate because the TLS stack is a sizeable extra dependency.
 webdav-tls = ["webdav", "dep:axum-server", "dep:rustls-pemfile", "dep:rcgen"]
+# FUSE mount mode (`internxt mount`). Mounts your Drive as a local filesystem on
+# Unix (Linux / macOS / FreeBSD). `fuser` links libfuse via pkg-config, so a build
+# needs libfuse3-dev + pkg-config (macFUSE on macOS, fusefs-libs3 on FreeBSD) and a
+# FUSE driver at runtime. Declared for `cfg(unix)` only: on Windows the feature is
+# inert (all `mount` code is gated `#[cfg(all(unix, feature = "fuse"))]`).
+fuse = ["dep:fuser", "dep:libc", "dep:tokio-util"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -76,3 +82,7 @@ filetime = "0.2.29"
 [profile.release]
 opt-level = 3
 lto = true
+
+[target."cfg(unix)".dependencies]
+fuser = { version = "0.17.0", optional = true }
+libc = { version = "0.2.186", optional = true }

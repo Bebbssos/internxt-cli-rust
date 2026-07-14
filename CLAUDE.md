@@ -12,8 +12,10 @@ them into RAM), plus **upload-folder** (recursive) and the drive-management comm
 (**logout, whoami, list, create-folder, move/rename/trash/restore file+folder,
 trash-list, trash-clear, delete-permanently**), **workspaces** (list/use/unset,
 with workspace-scoped upload/download/list/etc), one-way folder **sync**
-(**sync-up** / **sync-down**), and a foreground **WebDAV server** (**serve webdav**).
-All commands support a global **`--json`** flag. Not affiliated with Internxt.
+(**sync-up** / **sync-down**), a foreground **WebDAV server** (**serve webdav**),
+and a foreground **FUSE mount** (**mount**, Unix only) that exposes the Drive as a
+local read-write filesystem. All commands support a global **`--json`** flag. Not
+affiliated with Internxt.
 
 Roadmap + what's missing: see [TODO.md](TODO.md).
 
@@ -60,7 +62,9 @@ those to find upstream changes worth porting.
 | `src/network.rs` | bridge/network client (`NETWORK_URL`), streaming PUT/GET |
 | `src/commands.rs` | upload-file/download-file/upload-folder orchestration (streaming + multipart + recursive) |
 | `src/sync.rs` | sync-up/sync-down: one-way folder reconcile (local↔remote tree diff, size+mtime change detection, optional `--delete`) |
-| `src/webdav/` | WebDAV server (feature `webdav`): `mod.rs` (axum server + dispatch + auth + TLS), `handlers.rs` (method handlers), `resource.rs` (path→Drive-item resolution via tree walk), `xml.rs` (response XML) |
+| `src/serve/` | code shared by the serve backends (webdav + fuse): `tree.rs` (protocol-agnostic Drive-tree walk: `FileItem`/`FolderItem`/`DriveItem`, `list_folders`/`list_files`/`resolve_folder`), `cache.rs` (`FolderCache` TTL listing cache), `creds.rs` (`SharedCreds` + hourly token refresh) |
+| `src/webdav/` | WebDAV server (feature `webdav`): `mod.rs` (axum server + dispatch + auth + TLS), `handlers.rs` (method handlers), `resource.rs` (WebDAV URL parsing + `resolve_item`; re-exports `serve::tree`), `xml.rs` (response XML) |
+| `src/fuse/` | FUSE mount (feature `fuse`, Unix only): `mod.rs` (`MountConfig` + `fuser::spawn_mount2` + Ctrl-C unmount), `fs.rs` (`fuser::Filesystem` impl: inode table, sync-callback→tokio bridge, streaming reads, temp-file write buffering) |
 | `src/drive_ops.rs` | logout, whoami, list, create/move/rename/trash/delete folder+file |
 | `src/workspaces.rs` | workspaces list/use/unset; decrypts workspace mnemonic |
 | `src/output.rs` | global `--json` vs human output switch (`emit`/`status`/`emit_error`) |
@@ -154,18 +158,50 @@ those to find upstream changes worth porting.
   body". This — not the earlier folder-race / storage-timeout theories — was the actual
   cause of the WinSCP aborts; confirmed via `tshark` (server FIN/RST right after each
   PROPPATCH 501). Response XML is hand-built
-  in `xml.rs` to match og's `D:`-namespaced shape. Creds live behind an
-  `RwLock<Arc<Credentials>>`; a background task calls `get_auth_details` hourly and
-  swaps in the refreshed token, and each request snapshots via `ctx.creds()` — so a
-  long-running server survives token expiry. `webdav-config` / `webdav
-  start|stop|status` names are left free for a future daemon mode.
+  in `xml.rs` to match og's `D:`-namespaced shape. Creds live behind the shared
+  `serve::creds::SharedCreds` (`RwLock<Arc<Credentials>>`); `serve::creds::spawn_refresh`
+  calls `get_auth_details` hourly and swaps in the refreshed token, and each request
+  snapshots via `ctx.creds()` — so a long-running server survives token expiry.
+  `webdav-config` / `webdav start|stop|status` names are left free for a future daemon mode.
+
+- **FUSE mount** (`src/fuse/`, feature `fuse`, default-on, **Unix only**): a **foreground**
+  `mount <MOUNTPOINT>` command (runs until Ctrl-C, then unmounts) that exposes the Drive as
+  a local **read-write** filesystem via the `fuser` crate. `fuse` is default-on but declared
+  under `[target.'cfg(unix)'.dependencies]` and all code is gated `#[cfg(all(unix, feature =
+  "fuse"))]`, so Windows default builds still compile (feature inert there). `fuser` links
+  **libfuse** (default fuser features) — the only linkage that covers Linux **and** macOS +
+  FreeBSD — so a build needs `libfuse3-dev`+`pkg-config` (macFUSE on macOS, `fusefs-libs3` on
+  FreeBSD) and a FUSE driver at runtime. `fuser`'s `Filesystem` callbacks are **synchronous**
+  (run on its own session thread); each network-touching method clones the shared `Arc<Inner>`
+  and `tokio::runtime::Handle::spawn`s a task that does the async work and calls `reply.*`
+  (the `Reply*` objects are `Send`), so the session thread never blocks and ops run concurrent.
+  **Inodes**: Drive items are keyed by uuid but the kernel needs stable `u64` inodes, so `fs.rs`
+  keeps a two-way `InodeTable` (`ino→NodeData`, `(parent_ino,name)→ino`); root is inode 1,
+  children interned lazily on `lookup`/`readdir`. **Reads** use a per-handle sequential
+  streaming reader (`ReadHandle`): a spawned `download_file_to_writer` decrypts into a duplex
+  pipe, `read_at` serves forward reads from it (small forward gaps are skipped in-stream) and
+  only a **backward** seek restarts the stream — so a sequential read of a huge file is one
+  continuous decrypt (verified: a 40 MB multi-shard file reads back byte-exact), while random
+  access is correct but re-downloads-and-skips. **Writes** use the whole-file model (Internxt
+  has no partial update): a write/`create` handle is backed by a temp file (`--spool-dir` or
+  system temp); existing content is **materialized lazily** (downloaded into the temp file on
+  first read/write, skipped when the open is immediately truncated to 0 — so `>file` costs no
+  download), writes patch the temp file, and on the final `release` the temp is uploaded whole
+  (`upload_file_to_network`) and a **new** Drive file entry replaces the old (create-then-trash,
+  or delete permanently with `--delete-permanently`). `mkdir`/`rmdir`/`unlink`/`rename` map to
+  the Drive REST ops (workspace-aware); mutations invalidate the shared `FolderCache`. Reuses
+  webdav's `--cache-ttl`/`--no-cache` (also used as the kernel attr/entry TTL),
+  `--delete-permanently`, `--spool-dir`, `--max-concurrent-uploads`; adds `--folder-uuid`
+  (mount a subfolder, root default), `--read-only`, `--allow-other` (needs `user_allow_other`
+  in `/etc/fuse.conf`; only then is `AutoUnmount` added, since it requires an allow-other ACL).
+  `serve smb`/`serve sftp` could reuse `serve::{tree,cache,creds}` the same way.
 
 ## Build / test / run
 
 ```sh
-cargo build --release        # -> target/release/internxt (SSO + WebDAV-over-HTTP on by default)
+cargo build --release        # -> target/release/internxt (SSO + WebDAV-over-HTTP + FUSE on by default; FUSE needs libfuse3-dev+pkg-config on Unix)
 cargo build --release --features webdav-tls   # + HTTPS for the WebDAV server
-cargo build --release --no-default-features   # smaller binary, legacy login only (no axum/open/webdav)
+cargo build --release --no-default-features   # smaller binary, legacy login only (no axum/open/webdav/fuse)
 cargo test                   # crypto cross-check vs node (requires scripts/ref.js values; no network)
 node scripts/ref.js          # regenerate reference crypto values (needs og/ fetched)
 
@@ -182,6 +218,11 @@ target/release/internxt workspaces-use --personal   # or: workspaces-unset
 # serve webdav: serve Drive over WebDAV in the foreground (Ctrl-C to stop)
 target/release/internxt serve webdav --host 0.0.0.0 --port 8080
 cargo build --release --features webdav-tls   # add HTTPS (--https, self-signed or --cert/--key)
+
+# mount: expose Drive as a local filesystem via FUSE (Unix only; Ctrl-C to unmount)
+mkdir -p ~/drive && target/release/internxt mount ~/drive
+target/release/internxt mount ~/drive --read-only            # browse/read only
+target/release/internxt mount ~/drive -i <folder-uuid>       # mount a subfolder as root
 ```
 
 ## Conventions

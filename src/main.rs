@@ -4,9 +4,13 @@ mod commands;
 mod config;
 mod crypto;
 mod drive_ops;
+#[cfg(all(unix, feature = "fuse"))]
+mod fuse;
 mod models;
 mod network;
 mod output;
+#[cfg(any(feature = "webdav", feature = "fuse"))]
+mod serve;
 #[cfg(feature = "sso")]
 mod sso;
 mod sync;
@@ -297,6 +301,42 @@ enum Commands {
     #[cfg(feature = "webdav")]
     #[command(subcommand)]
     Serve(ServeCommands),
+    /// Mount your Internxt Drive as a local filesystem via FUSE (runs until Ctrl-C).
+    ///
+    /// Unix only (Linux / macOS / FreeBSD). Requires a FUSE driver at runtime
+    /// (fuse3 on Linux, macFUSE on macOS). Full read-write: writes buffer to a
+    /// temp file and upload in full when the file is closed.
+    #[cfg(all(unix, feature = "fuse"))]
+    Mount {
+        /// Local directory to mount onto (must already exist).
+        #[arg(value_name = "MOUNTPOINT")]
+        mountpoint: String,
+        /// Drive folder uuid to expose as the mount root. Omit for the drive root.
+        #[arg(short = 'i', long)]
+        folder_uuid: Option<String>,
+        /// Cache folder listings + kernel attributes for this many seconds.
+        #[arg(long, default_value_t = 5)]
+        cache_ttl: u64,
+        /// Disable caching (same as --cache-ttl 0; always live, slower).
+        #[arg(long, default_value_t = false)]
+        no_cache: bool,
+        /// Delete files permanently instead of moving them to trash.
+        #[arg(short = 'd', long, default_value_t = false)]
+        delete_permanently: bool,
+        /// Directory for per-write temp buffers (default: system temp dir).
+        #[arg(long)]
+        spool_dir: Option<String>,
+        /// Max file uploads transferring at once (0 = unlimited).
+        #[arg(long, default_value_t = 0)]
+        max_concurrent_uploads: usize,
+        /// Mount read-only (reject all writes/mutations).
+        #[arg(long, default_value_t = false)]
+        read_only: bool,
+        /// Allow other users (and root) to access the mount (needs
+        /// user_allow_other in /etc/fuse.conf on Linux).
+        #[arg(long, default_value_t = false)]
+        allow_other: bool,
+    },
     /// One-way sync: make a local folder match a remote Drive folder (pull).
     #[command(alias = "sync:down")]
     SyncDown {
@@ -622,6 +662,30 @@ async fn run(cli: Cli) -> Result<()> {
                 key: key.map(std::path::PathBuf::from),
             };
             webdav::run(config).await?;
+        }
+        #[cfg(all(unix, feature = "fuse"))]
+        Commands::Mount {
+            mountpoint,
+            folder_uuid,
+            cache_ttl,
+            no_cache,
+            delete_permanently,
+            spool_dir,
+            max_concurrent_uploads,
+            read_only,
+            allow_other,
+        } => {
+            let config = fuse::MountConfig {
+                mountpoint: std::path::PathBuf::from(mountpoint),
+                folder_uuid,
+                cache_ttl: if no_cache { 0 } else { cache_ttl },
+                delete_permanently,
+                spool_dir: spool_dir.map(std::path::PathBuf::from),
+                max_concurrent_uploads,
+                read_only,
+                allow_other,
+            };
+            fuse::run(config).await?;
         }
     }
     Ok(())

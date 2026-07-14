@@ -14,8 +14,7 @@ mod xml;
 #[cfg(feature = "webdav-tls")]
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use axum::body::Body;
@@ -28,11 +27,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use crate::api::DriveApi;
 use crate::config;
 use crate::models::Credentials;
-
-/// How often the background task re-checks / refreshes the session token. The
-/// underlying `get_auth_details` only hits the network when the token is within
-/// two days of expiry, so a frequent tick is cheap.
-const REFRESH_INTERVAL: Duration = Duration::from_secs(3600);
+use crate::serve::creds::SharedCreds;
 
 /// Transport for the WebDAV listener.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -80,7 +75,7 @@ pub struct WebdavConfig {
 /// in a refreshed token without restarting the server; each request takes a
 /// cheap snapshot (`ctx.creds()`) at its start.
 pub struct Ctx {
-    creds: RwLock<Arc<Credentials>>,
+    creds: Arc<SharedCreds>,
     pub config: WebdavConfig,
     pub root_folder: String,
     pub root_updated_at: String,
@@ -96,10 +91,7 @@ impl Ctx {
     /// Current credentials snapshot (a cheap `Arc` clone). Handlers hold this
     /// for the duration of one request so a mid-request refresh is consistent.
     pub fn creds(&self) -> Arc<Credentials> {
-        self.creds.read().unwrap().clone()
-    }
-    fn set_creds(&self, creds: Credentials) {
-        *self.creds.write().unwrap() = Arc::new(creds);
+        self.creds.get()
     }
 
     /// Acquire an upload slot, blocking while the concurrency limit is saturated.
@@ -210,7 +202,7 @@ pub async fn run(config: WebdavConfig) -> Result<()> {
     let upload_sem = (config.max_concurrent_uploads > 0)
         .then(|| tokio::sync::Semaphore::new(config.max_concurrent_uploads));
     let ctx = Arc::new(Ctx {
-        creds: RwLock::new(Arc::new(creds)),
+        creds: Arc::new(SharedCreds::new(creds)),
         config,
         root_folder,
         root_updated_at,
@@ -220,7 +212,7 @@ pub async fn run(config: WebdavConfig) -> Result<()> {
 
     // Keep the session token fresh for long-running servers: `get_auth_details`
     // refreshes near expiry and persists, and we swap the result in.
-    spawn_credential_refresh(ctx.clone());
+    crate::serve::creds::spawn_refresh(ctx.creds.clone());
 
     let app = Router::new().fallback(dispatch).with_state(ctx);
 
@@ -241,21 +233,6 @@ pub async fn run(config: WebdavConfig) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Periodically refresh the session (and workspace) token so a long-lived
-/// server doesn't outlive its credentials. Best-effort: on failure the last
-/// good snapshot is kept and a warning is logged.
-fn spawn_credential_refresh(ctx: Arc<Ctx>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(REFRESH_INTERVAL).await;
-            match crate::auth::get_auth_details().await {
-                Ok(creds) => ctx.set_creds(creds),
-                Err(e) => log(&format!("[REFRESH] credential refresh failed: {e:#}")),
-            }
-        }
-    });
 }
 
 /// Best-effort fetch of the root folder's `updatedAt` for PROPFIND on `/`.
