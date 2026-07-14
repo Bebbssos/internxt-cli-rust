@@ -10,6 +10,8 @@ mod output;
 #[cfg(feature = "sso")]
 mod sso;
 mod sync;
+#[cfg(feature = "webdav")]
+mod webdav;
 mod workspaces;
 
 use anyhow::Result;
@@ -289,6 +291,12 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+    /// Serve your Internxt Drive over a network protocol (runs until Ctrl-C).
+    ///
+    /// Pick a protocol subcommand (currently `webdav`; sftp/smb may follow).
+    #[cfg(feature = "webdav")]
+    #[command(subcommand)]
+    Serve(ServeCommands),
     /// One-way sync: make a local folder match a remote Drive folder (pull).
     #[command(alias = "sync:down")]
     SyncDown {
@@ -305,6 +313,73 @@ enum Commands {
         /// Print the planned actions without transferring anything.
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+    },
+}
+
+/// Protocol subcommands for `serve`.
+#[cfg(feature = "webdav")]
+#[derive(Subcommand)]
+enum ServeCommands {
+    /// Serve your Internxt Drive over WebDAV (runs until Ctrl-C).
+    ///
+    /// Options are passed inline (no separate config command). Plain HTTP by
+    /// default; use `--https` for HTTPS (self-signed unless `--cert`/`--key`
+    /// are given; requires the `webdav-tls` feature).
+    Webdav {
+        /// Host to bind (and advertise). Use 0.0.0.0 to accept LAN clients.
+        #[arg(short = 'l', long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on.
+        #[arg(short, long, default_value_t = 3005)]
+        port: u16,
+        /// Serve over HTTPS instead of plain HTTP.
+        #[arg(short = 's', long, default_value_t = false)]
+        https: bool,
+        /// TLS certificate (PEM). With --https and no --cert, a self-signed cert is generated.
+        #[arg(long, requires = "https")]
+        cert: Option<String>,
+        /// TLS private key (PEM). Required alongside --cert.
+        #[arg(long, requires = "cert")]
+        key: Option<String>,
+        /// Server request timeout in minutes (0 = none). Reserved for long transfers.
+        #[arg(short, long, default_value_t = 60)]
+        timeout: u64,
+        /// Auto-create missing parent folders on PUT / MKCOL.
+        #[arg(short = 'c', long, default_value_t = false)]
+        create_full_path: bool,
+        /// Require HTTP Basic auth from clients (needs --username and --password).
+        #[arg(short = 'a', long, default_value_t = false)]
+        custom_auth: bool,
+        /// Username for --custom-auth.
+        #[arg(short = 'u', long)]
+        username: Option<String>,
+        /// Password for --custom-auth.
+        #[arg(short = 'w', long)]
+        password: Option<String>,
+        /// Delete files permanently instead of moving them to trash.
+        #[arg(short = 'd', long, default_value_t = false)]
+        delete_permanently: bool,
+        /// Spool each PUT body to a temp file before uploading, instead of
+        /// streaming the live client body straight to storage. More robust for
+        /// concurrent/slow clients (e.g. WinSCP) that otherwise trip storage
+        /// socket timeouts; costs temp disk + a little latency.
+        #[arg(long, default_value_t = false)]
+        spool: bool,
+        /// Directory for --spool temp files (default: system temp dir).
+        #[arg(long, requires = "spool")]
+        spool_dir: Option<String>,
+        /// Max PUT uploads transferring at once (0 = unlimited). Set 1 to fully
+        /// serialize uploads — helps clients (e.g. WinSCP) that fan out many
+        /// parallel PUTs and trip storage timeouts / connection aborts.
+        #[arg(long, default_value_t = 0)]
+        max_concurrent_uploads: usize,
+        /// Cache folder listings for this many seconds to speed path resolution
+        /// under bursts of requests. 0 disables the cache.
+        #[arg(long, default_value_t = 5)]
+        cache_ttl: u64,
+        /// Disable the folder-listing cache (same as --cache-ttl 0).
+        #[arg(long, default_value_t = false)]
+        no_cache: bool,
     },
 }
 
@@ -496,6 +571,58 @@ async fn run(cli: Cli) -> Result<()> {
             delete,
             dry_run,
         } => sync::sync_down(&local, remote.as_deref(), delete.as_deref(), dry_run).await?,
+        #[cfg(feature = "webdav")]
+        Commands::Serve(ServeCommands::Webdav {
+            host,
+            port,
+            https,
+            cert,
+            key,
+            timeout,
+            create_full_path,
+            custom_auth,
+            username,
+            password,
+            delete_permanently,
+            spool,
+            spool_dir,
+            max_concurrent_uploads,
+            cache_ttl,
+            no_cache,
+        }) => {
+            let custom = if custom_auth {
+                match (username, password) {
+                    (Some(u), Some(p)) => Some((u, p)),
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "--custom-auth requires --username and --password"
+                        ))
+                    }
+                }
+            } else {
+                None
+            };
+            let config = webdav::WebdavConfig {
+                host,
+                port,
+                protocol: if https {
+                    webdav::Protocol::Https
+                } else {
+                    webdav::Protocol::Http
+                },
+                timeout_minutes: timeout,
+                create_full_path,
+                custom_auth: custom,
+                delete_permanently,
+                spool,
+                spool_dir: spool_dir.map(std::path::PathBuf::from),
+                max_concurrent_uploads,
+                cache_ttl: if no_cache { 0 } else { cache_ttl },
+                cert: cert.map(std::path::PathBuf::from),
+                key: key.map(std::path::PathBuf::from),
+            };
+            webdav::run(config).await?;
+        }
     }
     Ok(())
 }

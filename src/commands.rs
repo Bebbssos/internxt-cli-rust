@@ -572,6 +572,75 @@ pub async fn download_file(
     Ok(())
 }
 
+/// Stream a network file's decrypted bytes into an arbitrary writer. Reusable
+/// core behind `download-file` and the WebDAV GET handler.
+///
+/// `range` optionally restricts output to a byte window `(start, len)`: the CTR
+/// stream is still decrypted from the beginning (CTR is continuous), but bytes
+/// before `start` are discarded and output stops once `len` bytes are written.
+/// No progress bar / status output — the caller owns that.
+pub async fn download_file_to_writer<W>(
+    net: &NetworkApi,
+    mnemonic: &str,
+    bucket: &str,
+    file_id: &str,
+    out: &mut W,
+    range: Option<(u64, u64)>,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let links = net.get_download_links(bucket, file_id).await?;
+    if matches!(links.version, None | Some(1)) {
+        return Err(anyhow!("File version 1 not supported"));
+    }
+
+    let index = hex::decode(&links.index)?;
+    let iv = &index[0..16];
+    let key = crypto::generate_file_key(mnemonic, bucket, &index)?;
+
+    let mut shards = links.shards.clone();
+    shards.sort_by_key(|s| s.index);
+
+    let mut ctr = Ctr::new(&key, iv);
+    // Bytes still to skip / still to emit for a range request.
+    let (mut to_skip, mut remaining) = match range {
+        Some((start, len)) => (start, Some(len)),
+        None => (0, None),
+    };
+
+    'shards: for shard in &shards {
+        let resp = net.download_shard_stream(&shard.url).await?;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let mut bytes = chunk?.to_vec();
+            ctr.apply(&mut bytes);
+            let mut slice: &[u8] = &bytes;
+            if to_skip > 0 {
+                let drop = (to_skip as usize).min(slice.len());
+                slice = &slice[drop..];
+                to_skip -= drop as u64;
+            }
+            if let Some(rem) = remaining.as_mut() {
+                if *rem == 0 {
+                    break 'shards;
+                }
+                let take = (*rem as usize).min(slice.len());
+                slice = &slice[..take];
+                *rem -= take as u64;
+            }
+            if !slice.is_empty() {
+                out.write_all(slice).await?;
+            }
+            if remaining == Some(0) {
+                break 'shards;
+            }
+        }
+    }
+    out.flush().await?;
+    Ok(())
+}
+
 // ---- upload-folder ----
 
 /// One scanned filesystem entry. `rel` is relative to the parent of the upload root,

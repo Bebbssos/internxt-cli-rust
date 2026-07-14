@@ -12,11 +12,17 @@ name = "internxt"
 path = "src/main.rs"
 
 [features]
-default = ["sso"]
+default = ["sso", "webdav"]
 # Web-based (universal-link) SSO login. Pulls in axum (local callback server)
 # and open (browser launcher). Disable to build a smaller binary with only the
 # legacy email/password login.
 sso = ["dep:axum", "dep:open"]
+# WebDAV server mode (`internxt webdav`). Serves Drive over WebDAV via axum.
+# Plain HTTP by default; enable `webdav-tls` for HTTPS (self-signed / custom cert).
+webdav = ["dep:axum", "dep:tokio-util", "dep:mime_guess"]
+# HTTPS for the WebDAV server. Pulls in rustls + a self-signed cert generator.
+# Kept separate because the TLS stack is a sizeable extra dependency.
+webdav-tls = ["webdav", "dep:axum-server", "dep:rustls-pemfile", "dep:rcgen"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -36,9 +42,18 @@ bytes = "1"
 chrono = "0.4"
 indicatif = "0.18"
 
-# sso (web-based login): temporary local callback server + browser opener
+# sso (web-based login) + webdav: local HTTP server via axum
 axum = { version = "0.8", optional = true }
 open = { version = "5", optional = true }
+
+# webdav: stream <-> AsyncRead adapters + MIME lookup for PROPFIND
+tokio-util = { version = "0.7", features = ["io"], optional = true }
+mime_guess = { version = "2", optional = true }
+
+# webdav-tls: HTTPS listener + cert loading/generation
+axum-server = { version = "0.7", features = ["tls-rustls"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
+rcgen = { version = "0.13", optional = true }
 
 # crypto
 aes = "0.9"

@@ -11,9 +11,9 @@ download-file** with fully streaming transfers (handles 100GB+ files without loa
 them into RAM), plus **upload-folder** (recursive) and the drive-management commands
 (**logout, whoami, list, create-folder, move/rename/trash/restore file+folder,
 trash-list, trash-clear, delete-permanently**), **workspaces** (list/use/unset,
-with workspace-scoped upload/download/list/etc), and one-way folder **sync**
-(**sync-up** / **sync-down**). All commands support a global
-**`--json`** flag. Not affiliated with Internxt.
+with workspace-scoped upload/download/list/etc), one-way folder **sync**
+(**sync-up** / **sync-down**), and a foreground **WebDAV server** (**serve webdav**).
+All commands support a global **`--json`** flag. Not affiliated with Internxt.
 
 Roadmap + what's missing: see [TODO.md](TODO.md).
 
@@ -60,6 +60,7 @@ those to find upstream changes worth porting.
 | `src/network.rs` | bridge/network client (`NETWORK_URL`), streaming PUT/GET |
 | `src/commands.rs` | upload-file/download-file/upload-folder orchestration (streaming + multipart + recursive) |
 | `src/sync.rs` | sync-up/sync-down: one-way folder reconcile (local↔remote tree diff, size+mtime change detection, optional `--delete`) |
+| `src/webdav/` | WebDAV server (feature `webdav`): `mod.rs` (axum server + dispatch + auth + TLS), `handlers.rs` (method handlers), `resource.rs` (path→Drive-item resolution via tree walk), `xml.rs` (response XML) |
 | `src/drive_ops.rs` | logout, whoami, list, create/move/rename/trash/delete folder+file |
 | `src/workspaces.rs` | workspaces list/use/unset; decrypts workspace mnemonic |
 | `src/output.rs` | global `--json` vs human output switch (`emit`/`status`/`emit_error`) |
@@ -109,11 +110,62 @@ those to find upstream changes worth porting.
   public per-client constants from the upstream `.env.template`, not user data.
   `og/` and `target/` are git-ignored.
 
+- **WebDAV** (`src/webdav/`, feature `webdav`, default-on): a **foreground** `serve webdav`
+  command (runs until Ctrl-C) — deliberately *not* og's pm2 daemon + `webdav-config`.
+  Nested under a `serve <proto>` parent (clap subcommand) so `serve sftp`/`serve smb` can
+  be added later; the `Webdav` variant now lives in the `ServeCommands` enum in `main.rs`.
+  Options are inline flags. axum `Router::fallback` catches all methods (incl. custom
+  verbs PROPFIND/MKCOL/MOVE/LOCK/…) and dispatches by `req.method()`. Path→item
+  resolution walks the folder tree via `get_folder_subfolders/subfiles` (workspace-aware),
+  no sqlite cache — but subfolder listings are cached in-process (`webdav/cache.rs`,
+  `FolderCache`, keyed by folder uuid) for `--cache-ttl` seconds (default 5, `--no-cache`
+  / `0` disables) to collapse the repeated tree walks a burst of requests does; file
+  listings stay live (no stale-file→duplicate-upload), and folder mutations invalidate.
+  Concurrent creation of the same folder (many parallel PUTs with `--create-full-path`, or
+  racing MKCOLs) is conflict-tolerant: `get_or_create_child` re-lists and adopts the
+  winner's folder instead of surfacing a 409/500 — important because an early error on a
+  large-bodied PUT makes hyper drop the (undrained) TCP connection, which WinSCP reports as
+  "connection aborted / Could not read status line". GET streams through the shared
+  `commands::download_file_to_writer` (RAM-bounded). PUT has two upload strategies:
+  **default streams** the live client body straight to network storage
+  (`upload_stream_to_network`, Content-Length known; falls back to spooling when no length
+  is declared) — RAM-bounded, no temp disk, lowest latency. **`--spool`** instead writes
+  the whole request body to a temp file (`spool_body`, dir = `--spool-dir` or system temp)
+  then uploads from disk (`upload_file_to_network`). Spooling is opt-in because it costs
+  temp disk + latency, but is more robust for concurrent/slow clients (WinSCP): it (a)
+  fully drains the client body up front, so a storage-side failure can't leave an undrained
+  body (that undrained body is what makes hyper abort the TCP connection — WinSCP "Could
+  not send request body / connection aborted"), and (b) feeds the storage PUT from local
+  disk continuously, avoiding the S3 `RequestTimeout` ("socket not read from or written to
+  within the timeout period") that a stalled / executor-starved live stream trips under a
+  concurrent upload burst. Temp file removed on drop. **`--max-concurrent-uploads N`**
+  (0 = unlimited) gates the PUT transfer section via a `tokio::Semaphore` on `Ctx`
+  (`acquire_upload`); `1` serializes uploads so a client that fans out many parallel PUTs
+  (WinSCP) can't overwhelm the storage backend — the permit is taken *before* the body is
+  read, so queued requests hold no open storage socket. DELETE trashes unless
+  `--delete-permanently`. Default **HTTP**; **HTTPS** is the
+  separate **`webdav-tls`** feature (rustls via `axum-server` + `rcgen` self-signed or
+  `--cert`/`--key`). `COPY`/`PROPPATCH` → 501, `UNLOCK`/unknown verbs handled (mirrors og).
+  **Every method that returns without consuming its request body drains it first**
+  (`handlers::drain_body` / `unsupported`; also `LOCK`) — WinSCP reuses connections and
+  *pipelines* (PUT → PROPPATCH → PROPPATCH → PROPFIND), and an undrained PROPPATCH body
+  makes hyper close the socket after the 501 (it can't resync a pipelined stream), which
+  RSTs WinSCP's next in-flight request → "connection aborted / Could not send request
+  body". This — not the earlier folder-race / storage-timeout theories — was the actual
+  cause of the WinSCP aborts; confirmed via `tshark` (server FIN/RST right after each
+  PROPPATCH 501). Response XML is hand-built
+  in `xml.rs` to match og's `D:`-namespaced shape. Creds live behind an
+  `RwLock<Arc<Credentials>>`; a background task calls `get_auth_details` hourly and
+  swaps in the refreshed token, and each request snapshots via `ctx.creds()` — so a
+  long-running server survives token expiry. `webdav-config` / `webdav
+  start|stop|status` names are left free for a future daemon mode.
+
 ## Build / test / run
 
 ```sh
-cargo build --release        # -> target/release/internxt (SSO on by default)
-cargo build --release --no-default-features   # smaller binary, legacy login only (no axum/open)
+cargo build --release        # -> target/release/internxt (SSO + WebDAV-over-HTTP on by default)
+cargo build --release --features webdav-tls   # + HTTPS for the WebDAV server
+cargo build --release --no-default-features   # smaller binary, legacy login only (no axum/open/webdav)
 cargo test                   # crypto cross-check vs node (requires scripts/ref.js values; no network)
 node scripts/ref.js          # regenerate reference crypto values (needs og/ fetched)
 
@@ -126,6 +178,10 @@ target/release/internxt download-file -i <file-uuid> -d ./out --overwrite
 target/release/internxt workspaces-list
 target/release/internxt workspaces-use -i <workspace-uuid>
 target/release/internxt workspaces-use --personal   # or: workspaces-unset
+
+# serve webdav: serve Drive over WebDAV in the foreground (Ctrl-C to stop)
+target/release/internxt serve webdav --host 0.0.0.0 --port 8080
+cargo build --release --features webdav-tls   # add HTTPS (--https, self-signed or --cert/--key)
 ```
 
 ## Conventions
