@@ -9,6 +9,7 @@
 use anyhow::Result;
 use serde_json::Value;
 
+use super::cache::FolderCache;
 use crate::api::DriveApi;
 
 /// A resolved Drive file.
@@ -182,12 +183,17 @@ fn page_items(page: &Value, key: &str) -> Vec<Value> {
         .collect()
 }
 
-/// All EXISTS subfolders of a folder, following pagination.
+/// All EXISTS subfolders of a folder, following pagination. Served from `cache`
+/// when a fresh entry exists; a miss populates it.
 pub async fn list_folders(
     api: &DriveApi,
     token: &str,
     folder_uuid: &str,
+    cache: &FolderCache,
 ) -> Result<Vec<FolderItem>> {
+    if let Some(hit) = cache.get(folder_uuid) {
+        return Ok(hit);
+    }
     let mut out = Vec::new();
     let mut offset: u32 = 0;
     loop {
@@ -200,6 +206,7 @@ pub async fn list_folders(
         }
         offset += got;
     }
+    cache.put(folder_uuid, out.clone());
     Ok(out)
 }
 
@@ -228,6 +235,7 @@ pub async fn resolve_folder(
     root: &str,
     root_updated_at: &str,
     components: &[String],
+    cache: &FolderCache,
 ) -> Result<Option<FolderItem>> {
     let mut current = FolderItem {
         uuid: root.to_string(),
@@ -235,7 +243,7 @@ pub async fn resolve_folder(
         updated_at: root_updated_at.to_string(),
     };
     for comp in components {
-        let folders = list_folders(api, token, &current.uuid).await?;
+        let folders = list_folders(api, token, &current.uuid, cache).await?;
         match folders.into_iter().find(|f| &f.plain_name == comp) {
             Some(f) => current = f,
             None => return Ok(None),
@@ -253,6 +261,7 @@ pub async fn resolve_item(
     root: &str,
     root_updated_at: &str,
     resource: &Resource,
+    cache: &FolderCache,
 ) -> Result<Option<DriveItem>> {
     if resource.components.is_empty() {
         return Ok(Some(DriveItem::Folder(FolderItem {
@@ -265,14 +274,14 @@ pub async fn resolve_item(
     // Resolve the parent chain (all but the last component).
     let parent_components = &resource.components[..resource.components.len() - 1];
     let parent =
-        match resolve_folder(api, token, root, root_updated_at, parent_components).await? {
+        match resolve_folder(api, token, root, root_updated_at, parent_components, cache).await? {
             Some(p) => p,
             None => return Ok(None),
         };
     let last = resource.components.last().unwrap();
 
     if resource.is_dir_hint {
-        let folders = list_folders(api, token, &parent.uuid).await?;
+        let folders = list_folders(api, token, &parent.uuid, cache).await?;
         return Ok(folders
             .into_iter()
             .find(|f| &f.plain_name == last)
@@ -285,7 +294,7 @@ pub async fn resolve_item(
         return Ok(Some(DriveItem::File(f)));
     }
     // Then folder.
-    let folders = list_folders(api, token, &parent.uuid).await?;
+    let folders = list_folders(api, token, &parent.uuid, cache).await?;
     Ok(folders
         .into_iter()
         .find(|f| &f.plain_name == last)

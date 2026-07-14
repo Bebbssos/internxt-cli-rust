@@ -6,6 +6,7 @@
 //! Plain HTTP by default. HTTPS (self-signed or custom cert) is available when
 //! built with the `webdav-tls` feature.
 
+mod cache;
 mod handlers;
 mod resource;
 mod xml;
@@ -56,6 +57,19 @@ pub struct WebdavConfig {
     pub custom_auth: Option<(String, String)>,
     /// Delete files permanently instead of moving them to trash.
     pub delete_permanently: bool,
+    /// Spool each PUT body to a temp file before uploading (instead of streaming
+    /// the live client body straight to network storage). More robust under
+    /// concurrent/slow clients; costs temp disk + a little latency.
+    pub spool: bool,
+    /// Directory for `--spool` temp files. `None` = system temp dir.
+    pub spool_dir: Option<PathBuf>,
+    /// Max PUT uploads running the network transfer at once. 0 = unlimited.
+    /// Setting 1 fully serializes uploads (one file finishes before the next
+    /// starts its transfer) — the safest option for clients that fan out many
+    /// parallel PUTs and overwhelm the storage backend.
+    pub max_concurrent_uploads: usize,
+    /// TTL (seconds) for the folder-listing cache. 0 disables caching.
+    pub cache_ttl: u64,
     /// TLS certificate (PEM). When omitted with `Https`, a self-signed cert is used.
     pub cert: Option<PathBuf>,
     /// TLS private key (PEM). Required alongside `cert`.
@@ -70,6 +84,12 @@ pub struct Ctx {
     pub config: WebdavConfig,
     pub root_folder: String,
     pub root_updated_at: String,
+    /// Short-TTL cache of folder listings, to collapse the repeated tree walks
+    /// that path resolution does under a burst of requests.
+    pub cache: cache::FolderCache,
+    /// Limits concurrent PUT network transfers when set (`--max-concurrent-uploads`).
+    /// `None` = unlimited.
+    pub upload_sem: Option<tokio::sync::Semaphore>,
 }
 
 impl Ctx {
@@ -80,6 +100,16 @@ impl Ctx {
     }
     fn set_creds(&self, creds: Credentials) {
         *self.creds.write().unwrap() = Arc::new(creds);
+    }
+
+    /// Acquire an upload slot, blocking while the concurrency limit is saturated.
+    /// Returns `None` when uploads are unlimited. The returned permit must be
+    /// held for the duration of the network transfer.
+    pub async fn acquire_upload(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        match &self.upload_sem {
+            Some(sem) => Some(sem.acquire().await.expect("upload semaphore never closed")),
+            None => None,
+        }
     }
 }
 
@@ -142,6 +172,15 @@ pub async fn run(config: WebdavConfig) -> Result<()> {
         }
     }
 
+    // Ensure the spool directory exists and is writable before we start serving.
+    if let Some(dir) = &config.spool_dir {
+        if !config.spool {
+            return Err(anyhow!("--spool-dir has no effect without --spool"));
+        }
+        std::fs::create_dir_all(dir)
+            .map_err(|e| anyhow!("spool directory {} is not usable: {e}", dir.display()))?;
+    }
+
     let creds = crate::auth::get_auth_details().await?;
     let root_folder = creds.root_folder().to_string();
     let root_updated_at = fetch_root_updated_at(&creds, &root_folder).await;
@@ -167,11 +206,16 @@ pub async fn run(config: WebdavConfig) -> Result<()> {
     let cert = config.cert.clone();
     let key = config.key.clone();
 
+    let cache = cache::FolderCache::new(config.cache_ttl);
+    let upload_sem = (config.max_concurrent_uploads > 0)
+        .then(|| tokio::sync::Semaphore::new(config.max_concurrent_uploads));
     let ctx = Arc::new(Ctx {
         creds: RwLock::new(Arc::new(creds)),
         config,
         root_folder,
         root_updated_at,
+        cache,
+        upload_sem,
     });
 
     // Keep the session token fresh for long-running servers: `get_auth_details`
@@ -246,6 +290,20 @@ async fn dispatch(State(ctx): State<Arc<Ctx>>, req: Request) -> Response {
     let method = req.method().clone();
     log(&format!("[{}] {}", method.as_str(), req.uri().path()));
 
+    // Opt-in wire-level debug: dump the request line + all headers so we can see
+    // exactly what a client (e.g. WinSCP) sends. Enable with INTERNXT_WEBDAV_DEBUG=1.
+    if std::env::var("INTERNXT_WEBDAV_DEBUG").is_ok() {
+        log(&format!(
+            "  >> {} {} {:?}",
+            method.as_str(),
+            req.uri(),
+            req.version()
+        ));
+        for (name, value) in req.headers() {
+            log(&format!("  >> {}: {}", name, value.to_str().unwrap_or("<binary>")));
+        }
+    }
+
     let result = match method.as_str() {
         "OPTIONS" => handlers::options(req),
         "PROPFIND" => handlers::propfind(&ctx, req).await,
@@ -255,23 +313,42 @@ async fn dispatch(State(ctx): State<Arc<Ctx>>, req: Request) -> Response {
         "MKCOL" => handlers::mkcol(&ctx, req).await,
         "DELETE" => handlers::delete(&ctx, req).await,
         "MOVE" => handlers::mv(&ctx, req).await,
-        "LOCK" => handlers::lock(req),
-        "UNLOCK" => Ok(status_response(StatusCode::NO_CONTENT)),
-        "COPY" => Err(AppError::new(
-            StatusCode::NOT_IMPLEMENTED,
-            "COPY is not implemented yet.",
-        )),
-        "PROPPATCH" => Err(AppError::new(
-            StatusCode::NOT_IMPLEMENTED,
-            "PROPPATCH is not implemented yet.",
-        )),
-        other => Err(AppError::new(
-            StatusCode::METHOD_NOT_ALLOWED,
-            format!("Method {other} not allowed"),
-        )),
+        "LOCK" => handlers::lock(req).await,
+        "UNLOCK" => {
+            // No body expected, but drain defensively to preserve keep-alive.
+            handlers::drain_body(req.into_body()).await;
+            Ok(status_response(StatusCode::NO_CONTENT))
+        }
+        "COPY" => {
+            handlers::unsupported(req, StatusCode::NOT_IMPLEMENTED, "COPY is not implemented yet.")
+                .await
+        }
+        "PROPPATCH" => {
+            handlers::unsupported(
+                req,
+                StatusCode::NOT_IMPLEMENTED,
+                "PROPPATCH is not implemented yet.",
+            )
+            .await
+        }
+        other => {
+            let msg = format!("Method {other} not allowed");
+            handlers::unsupported(req, StatusCode::METHOD_NOT_ALLOWED, msg).await
+        }
     };
 
-    result.unwrap_or_else(|e| e.into_response())
+    let resp = result.unwrap_or_else(|e| e.into_response());
+    if std::env::var("INTERNXT_WEBDAV_DEBUG").is_ok() {
+        log(&format!(
+            "  << {} response {}",
+            method.as_str(),
+            resp.status().as_u16()
+        ));
+        for (name, value) in resp.headers() {
+            log(&format!("  << {}: {}", name, value.to_str().unwrap_or("<binary>")));
+        }
+    }
+    resp
 }
 
 /// Enforce optional HTTP Basic auth. Returns `Some(401)` when the request is

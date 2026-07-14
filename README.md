@@ -74,7 +74,7 @@ All commands accept the global `--json` flag, which prints a single JSON result 
 | `delete-permanently-folder` | `delete:permanently:folder` | `-i, --id <FOLDER_ID>` | Permanently delete a folder. Cannot be undone. |
 | `sync-up` | `sync:up` | `-l, --local <DIR>`, `-r, --remote <FOLDER_ID>`, `--delete[=trash\|permanent]`, `--dry-run` | Make a remote folder match a local one (push): upload new/changed files, optionally trash/delete remote extras. |
 | `sync-down` | `sync:down` | `-l, --local <DIR>`, `-r, --remote <FOLDER_ID>`, `--delete`, `--dry-run` | Make a local folder match a remote one (pull): download new/changed files, optionally remove local extras. |
-| `webdav` | | `-l, --host <HOST>`, `-p, --port <PORT>`, `-s, --https`, `--cert/--key <PEM>`, `-c, --create-full-path`, `-a, --custom-auth` + `-u/-w`, `-d, --delete-permanently` | Serve your Drive over WebDAV in the foreground until Ctrl-C. Requires the `webdav` feature (on by default). |
+| `webdav` | | `-l, --host <HOST>`, `-p, --port <PORT>`, `-s, --https`, `--cert/--key <PEM>`, `-c, --create-full-path`, `-a, --custom-auth` + `-u/-w`, `-d, --delete-permanently`, `--spool`, `--spool-dir <DIR>`, `--max-concurrent-uploads <N>`, `--cache-ttl <SECS>`, `--no-cache` | Serve your Drive over WebDAV in the foreground until Ctrl-C. Requires the `webdav` feature (on by default). |
 
 ### Sync
 
@@ -91,11 +91,40 @@ internxt webdav --create-full-path              # auto-create missing parent fol
 internxt webdav --custom-auth -u alice -w secret  # require HTTP Basic auth from clients
 internxt webdav --https                         # HTTPS with a self-signed cert (needs `webdav-tls`)
 internxt webdav --https --cert cert.pem --key key.pem   # HTTPS with your own certificate
+internxt webdav --spool --spool-dir /var/tmp/inxt   # spool each upload to disk first (see below)
+internxt webdav --max-concurrent-uploads 2      # cap simultaneous upload transfers
+internxt webdav --cache-ttl 15                   # cache folder listings 15s (0 / --no-cache to disable)
 ```
 
 Supported methods: `OPTIONS`, `PROPFIND`, `GET`/`HEAD` (with `Range`), `PUT`, `MKCOL`, `DELETE`, `MOVE`, `LOCK`/`UNLOCK`. `COPY` and `PROPPATCH` return `501 Not Implemented` (as upstream). Transfers stream through the same encrypt/decrypt path as `upload-file`/`download-file`, so large files never load into RAM. `DELETE` trashes items by default (`--delete-permanently` to hard-delete). Paths are resolved by walking the folder tree, so it stays workspace-aware when a workspace is active.
 
-Notes / current limitations: HTTP by default (enable HTTPS with the `webdav-tls` feature); no local database cache (og uses sqlite); `--timeout` is accepted for parity but not yet wired to a request-timeout layer. A background task refreshes the session token hourly (same near-expiry refresh as the other commands), so a long-running server keeps working. The `webdav-config` / `webdav start|stop|status` subcommands are intentionally left for a possible future daemon mode.
+#### Options
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `-l, --host <HOST>` | `127.0.0.1` | Address to bind (and advertise). `0.0.0.0` accepts LAN clients. |
+| `-p, --port <PORT>` | `3005` | Listen port. |
+| `-s, --https` | off | Serve over HTTPS (needs the `webdav-tls` feature). Self-signed unless `--cert`/`--key` given. |
+| `--cert / --key <PEM>` | — | Your own TLS certificate + private key (both required together). |
+| `-c, --create-full-path` | off | Auto-create missing parent folders on `PUT` / `MKCOL`. |
+| `-a, --custom-auth` + `-u/-w` | off | Require HTTP Basic auth from clients (`--username` / `--password`). |
+| `-d, --delete-permanently` | off | Hard-delete on `DELETE` instead of moving to trash. |
+| `--spool` | off | Spool each `PUT` body to a temp file, then upload from disk, instead of streaming the live client body straight to storage. Costs temp disk + a little latency; more robust for slow/bursty clients whose pacing can otherwise trip storage socket timeouts. |
+| `--spool-dir <DIR>` | system temp | Directory for `--spool` temp files (created if missing; requires `--spool`). |
+| `--max-concurrent-uploads <N>` | `0` (unlimited) | Cap how many `PUT` transfers run at once. `1` fully serializes uploads, useful when a client fans out many parallel PUTs. |
+| `--cache-ttl <SECS>` | `5` | Cache folder listings this many seconds to speed path resolution under bursts of requests. `0` disables. Only folder listings are cached; file listings stay live, and folder changes invalidate. |
+| `--no-cache` | off | Disable the folder-listing cache (same as `--cache-ttl 0`). |
+| `-t, --timeout <MINS>` | `60` | Accepted for parity; not yet wired to a request-timeout layer. |
+
+#### Debug logging
+
+Set `INTERNXT_WEBDAV_DEBUG=1` to dump each request line, all request/response headers, and the response status to stderr — useful for diagnosing client-specific behaviour (e.g. WinSCP). It is off unless the variable is set:
+
+```sh
+INTERNXT_WEBDAV_DEBUG=1 internxt webdav --host 0.0.0.0 --port 8099 2>&1 | tee webdav-debug.log
+```
+
+Notes / current limitations: HTTP by default (enable HTTPS with the `webdav-tls` feature); no local **on-disk** database cache (og uses sqlite) — folder listings are cached in-process for `--cache-ttl` seconds only; `--timeout` is accepted for parity but not yet wired to a request-timeout layer. A background task refreshes the session token hourly (same near-expiry refresh as the other commands), so a long-running server keeps working. The `webdav-config` / `webdav start|stop|status` subcommands are intentionally left for a possible future daemon mode.
 
 ## Usage examples
 

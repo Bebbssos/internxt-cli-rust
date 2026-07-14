@@ -115,11 +115,43 @@ those to find upstream changes worth porting.
   Options are inline flags. axum `Router::fallback` catches all methods (incl. custom
   verbs PROPFIND/MKCOL/MOVE/LOCK/…) and dispatches by `req.method()`. Path→item
   resolution walks the folder tree via `get_folder_subfolders/subfiles` (workspace-aware),
-  no sqlite cache. GET/PUT stream through the shared `commands::{download_file_to_writer,
-  upload_stream_to_network}` (RAM-bounded); PUT with no Content-Length spools to a temp
-  file. DELETE trashes unless `--delete-permanently`. Default **HTTP**; **HTTPS** is the
+  no sqlite cache — but subfolder listings are cached in-process (`webdav/cache.rs`,
+  `FolderCache`, keyed by folder uuid) for `--cache-ttl` seconds (default 5, `--no-cache`
+  / `0` disables) to collapse the repeated tree walks a burst of requests does; file
+  listings stay live (no stale-file→duplicate-upload), and folder mutations invalidate.
+  Concurrent creation of the same folder (many parallel PUTs with `--create-full-path`, or
+  racing MKCOLs) is conflict-tolerant: `get_or_create_child` re-lists and adopts the
+  winner's folder instead of surfacing a 409/500 — important because an early error on a
+  large-bodied PUT makes hyper drop the (undrained) TCP connection, which WinSCP reports as
+  "connection aborted / Could not read status line". GET streams through the shared
+  `commands::download_file_to_writer` (RAM-bounded). PUT has two upload strategies:
+  **default streams** the live client body straight to network storage
+  (`upload_stream_to_network`, Content-Length known; falls back to spooling when no length
+  is declared) — RAM-bounded, no temp disk, lowest latency. **`--spool`** instead writes
+  the whole request body to a temp file (`spool_body`, dir = `--spool-dir` or system temp)
+  then uploads from disk (`upload_file_to_network`). Spooling is opt-in because it costs
+  temp disk + latency, but is more robust for concurrent/slow clients (WinSCP): it (a)
+  fully drains the client body up front, so a storage-side failure can't leave an undrained
+  body (that undrained body is what makes hyper abort the TCP connection — WinSCP "Could
+  not send request body / connection aborted"), and (b) feeds the storage PUT from local
+  disk continuously, avoiding the S3 `RequestTimeout` ("socket not read from or written to
+  within the timeout period") that a stalled / executor-starved live stream trips under a
+  concurrent upload burst. Temp file removed on drop. **`--max-concurrent-uploads N`**
+  (0 = unlimited) gates the PUT transfer section via a `tokio::Semaphore` on `Ctx`
+  (`acquire_upload`); `1` serializes uploads so a client that fans out many parallel PUTs
+  (WinSCP) can't overwhelm the storage backend — the permit is taken *before* the body is
+  read, so queued requests hold no open storage socket. DELETE trashes unless
+  `--delete-permanently`. Default **HTTP**; **HTTPS** is the
   separate **`webdav-tls`** feature (rustls via `axum-server` + `rcgen` self-signed or
-  `--cert`/`--key`). `COPY`/`PROPPATCH` → 501 (mirrors og). Response XML is hand-built
+  `--cert`/`--key`). `COPY`/`PROPPATCH` → 501, `UNLOCK`/unknown verbs handled (mirrors og).
+  **Every method that returns without consuming its request body drains it first**
+  (`handlers::drain_body` / `unsupported`; also `LOCK`) — WinSCP reuses connections and
+  *pipelines* (PUT → PROPPATCH → PROPPATCH → PROPFIND), and an undrained PROPPATCH body
+  makes hyper close the socket after the 501 (it can't resync a pipelined stream), which
+  RSTs WinSCP's next in-flight request → "connection aborted / Could not send request
+  body". This — not the earlier folder-race / storage-timeout theories — was the actual
+  cause of the WinSCP aborts; confirmed via `tshark` (server FIN/RST right after each
+  PROPPATCH 501). Response XML is hand-built
   in `xml.rs` to match og's `D:`-namespaced shape. Creds live behind an
   `RwLock<Arc<Credentials>>`; a background task calls `get_auth_details` hourly and
   swaps in the refreshed token, and each request snapshots via `ctx.creds()` — so a

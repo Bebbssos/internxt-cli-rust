@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::StatusCode;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use futures_util::TryStreamExt;
 use rand::RngExt;
 use serde_json::json;
@@ -70,6 +70,33 @@ pub fn options(req: Request) -> Result<Response, AppError> {
         .unwrap())
 }
 
+// ---- body draining (keep-alive correctness) ----
+
+/// Consume and discard a request body.
+///
+/// If a handler responds without reading the request body, hyper cannot resync
+/// the connection when the client has pipelined the next request behind it, so
+/// it closes the connection after the response. WinSCP reuses connections and
+/// pipelines (PUT → PROPPATCH → PROPPATCH → PROPFIND), so an undrained PROPPATCH
+/// body made the server FIN/RST the socket mid-flight → "connection aborted /
+/// Could not send request body". Draining the small bodies of the methods we
+/// don't otherwise consume keeps the connection alive.
+pub async fn drain_body(body: Body) {
+    let mut stream = body.into_data_stream();
+    while let Ok(Some(_)) = stream.try_next().await {}
+}
+
+/// Drain the request body, then return a status-only error response. Used for
+/// methods we don't implement (PROPPATCH / COPY / unknown verbs).
+pub async fn unsupported(
+    req: Request,
+    status: StatusCode,
+    message: impl Into<String>,
+) -> Result<Response, AppError> {
+    drain_body(req.into_body()).await;
+    Ok(AppError::new(status, message.into()).into_response())
+}
+
 // ---- PROPFIND ----
 
 pub async fn propfind(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
@@ -90,6 +117,7 @@ pub async fn propfind(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         &ctx.root_folder,
         &ctx.root_updated_at,
         &resource,
+        &ctx.cache,
     )
     .await?;
     let item = item.ok_or_else(|| AppError::not_found(""))?;
@@ -106,7 +134,7 @@ pub async fn propfind(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         DriveItem::Folder(folder) => {
             let mut out = xml::folder_response(&resource.url, &folder.plain_name, &folder.updated_at);
             if depth != "0" {
-                out.push_str(&folder_children(&api, token, &resource.url, &folder).await?);
+                out.push_str(&folder_children(&api, token, &resource.url, &folder, &ctx.cache).await?);
             }
             out
         }
@@ -121,6 +149,7 @@ async fn folder_children(
     token: &str,
     base_url: &str,
     folder: &FolderItem,
+    cache: &super::cache::FolderCache,
 ) -> Result<String> {
     // Ensure the base ends with '/' so child hrefs join cleanly.
     let base = if base_url.ends_with('/') {
@@ -129,7 +158,7 @@ async fn folder_children(
         format!("{base_url}/")
     };
 
-    let folders = resource::list_folders(api, token, &folder.uuid).await?;
+    let folders = resource::list_folders(api, token, &folder.uuid, cache).await?;
     let files = resource::list_files(api, token, &folder.uuid).await?;
 
     let mut out = String::new();
@@ -171,6 +200,7 @@ pub async fn get(ctx: &Ctx, req: Request, head_only: bool) -> Result<Response, A
         &ctx.root_folder,
         &ctx.root_updated_at,
         &resource,
+        &ctx.cache,
     )
     .await?;
 
@@ -290,6 +320,7 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         &ctx.root_folder,
         &ctx.root_updated_at,
         parent_components,
+        &ctx.cache,
     )
     .await?
     {
@@ -304,6 +335,7 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         &ctx.root_folder,
         &ctx.root_updated_at,
         &resource,
+        &ctx.cache,
     )
     .await?;
     let mut is_replacement = false;
@@ -326,29 +358,62 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
     let mnemonic = creds.mnemonic();
     let net = NetworkApi::new(creds.net_user(), creds.net_pass());
 
-    // Upload the body to the network, learning the size when it isn't declared.
-    let (file_id, size) = match content_length {
-        Some(0) => (String::new(), 0),
-        Some(sz) => {
-            let stream = req
-                .into_body()
-                .into_data_stream()
-                .map_err(std::io::Error::other);
-            let reader = StreamReader::new(stream);
-            let id =
-                commands::upload_stream_to_network(&net, &bucket, mnemonic, reader, sz, None).await?;
-            (id, sz)
+    // Gate on the upload-concurrency limit (if any). Held across the whole
+    // transfer so `--max-concurrent-uploads 1` serializes uploads: a burst of
+    // parallel PUTs queues here instead of all hitting the storage backend at
+    // once. Acquiring before the body is read means waiting requests don't yet
+    // hold an open storage socket, so nothing idles out while queued.
+    let _upload_permit = ctx.acquire_upload().await;
+
+    // Upload the body to network storage. Two strategies:
+    //
+    // * Default (`--spool` off): stream the live client body straight through,
+    //   learning the size from Content-Length. RAM-bounded, no temp disk, lowest
+    //   latency — but the storage PUT socket is coupled to the client's pacing.
+    // * `--spool` on: spool the request body to a temp file first, then upload
+    //   from disk. Costs disk + a little latency, but (a) fully drains the client
+    //   body up front so a storage-side failure can't leave an undrained body
+    //   (that is what makes hyper abort the TCP connection — WinSCP "Could not
+    //   send request body / connection aborted"), and (b) feeds the storage PUT
+    //   from local disk continuously, avoiding the S3 "RequestTimeout: socket not
+    //   read from or written to within the timeout period" that a stalled /
+    //   executor-starved live stream can trip under a concurrent upload burst.
+    let (file_id, size) = if ctx.config.spool {
+        let tmp = spool_body(req.into_body(), ctx.config.spool_dir.as_deref()).await?;
+        if tmp.size == 0 {
+            (String::new(), 0)
+        } else {
+            let id = commands::upload_file_to_network(
+                &net, &bucket, mnemonic, &tmp.path, tmp.size, None,
+            )
+            .await?;
+            (id, tmp.size)
         }
-        None => {
-            let tmp = spool_body(req.into_body()).await?;
-            if tmp.size == 0 {
-                (String::new(), 0)
-            } else {
-                let id = commands::upload_file_to_network(
-                    &net, &bucket, mnemonic, &tmp.path, tmp.size, None,
-                )
-                .await?;
-                (id, tmp.size)
+    } else {
+        match content_length {
+            Some(0) => (String::new(), 0),
+            Some(sz) => {
+                let stream = req
+                    .into_body()
+                    .into_data_stream()
+                    .map_err(std::io::Error::other);
+                let reader = StreamReader::new(stream);
+                let id = commands::upload_stream_to_network(&net, &bucket, mnemonic, reader, sz, None)
+                    .await?;
+                (id, sz)
+            }
+            // No declared length: fall back to spooling so we can learn the size.
+            None => {
+                let tmp = spool_body(req.into_body(), ctx.config.spool_dir.as_deref()).await?;
+                if tmp.size == 0 {
+                    (String::new(), 0)
+                } else {
+                    let id = commands::upload_file_to_network(
+                        &net, &bucket, mnemonic, &tmp.path, tmp.size, None,
+                    )
+                    .await?;
+                    (id, tmp.size)
+                }
             }
         }
     };
@@ -386,12 +451,15 @@ impl Drop for TempSpool {
     }
 }
 
-/// Copy a request body to a temp file to learn its length (chunked uploads with
-/// no Content-Length). Streaming to disk keeps RAM bounded.
-async fn spool_body(body: Body) -> Result<TempSpool> {
+/// Copy a request body to a temp file. Used to decouple the upload from the
+/// client (`--spool`) or to learn the length of a body sent without a
+/// Content-Length. Streaming to disk keeps RAM bounded. `dir` overrides the
+/// spool location (defaults to the system temp dir).
+async fn spool_body(body: Body, dir: Option<&Path>) -> Result<TempSpool> {
     let mut rnd = [0u8; 16];
     rand::rng().fill(&mut rnd);
-    let path = std::env::temp_dir().join(format!("internxt-webdav-{}.tmp", hex::encode(rnd)));
+    let base = dir.map(|d| d.to_path_buf()).unwrap_or_else(std::env::temp_dir);
+    let path = base.join(format!("internxt-webdav-{}.tmp", hex::encode(rnd)));
     let mut file = tokio::fs::File::create(&path).await?;
     let mut spool = TempSpool { path, size: 0 };
     let stream = body.into_data_stream().map_err(std::io::Error::other);
@@ -420,6 +488,7 @@ pub async fn mkcol(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         &ctx.root_folder,
         &ctx.root_updated_at,
         parent_components,
+        &ctx.cache,
     )
     .await?
     {
@@ -428,7 +497,7 @@ pub async fn mkcol(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
     };
 
     // Already exists? Treat as a no-op success (matches og).
-    let existing = resource::list_folders(&api, token, &parent.uuid)
+    let existing = resource::list_folders(&api, token, &parent.uuid, &ctx.cache)
         .await?
         .into_iter()
         .any(|f| f.plain_name == resource.name);
@@ -436,7 +505,9 @@ pub async fn mkcol(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         return Ok(multistatus_response(&xml::multistatus("")));
     }
 
-    api.create_folder(token, &resource.name, &parent.uuid).await?;
+    // Conflict-tolerant create: a racing MKCOL/PUT may create it first; adopt
+    // that instead of surfacing a 409/500 (which would abort the connection).
+    get_or_create_child(ctx, &api, token, &parent.uuid, &resource.name).await?;
 
     let mut resp = multistatus_response(&xml::multistatus(""));
     *resp.status_mut() = StatusCode::CREATED;
@@ -456,6 +527,7 @@ pub async fn delete(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         &ctx.root_folder,
         &ctx.root_updated_at,
         &resource,
+        &ctx.cache,
     )
     .await?
     .ok_or_else(|| {
@@ -465,7 +537,13 @@ pub async fn delete(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         ))
     })?;
 
+    let was_folder = item.is_folder();
     delete_or_trash(ctx, &api, token, &item).await?;
+    // A removed folder changes its parent's listing; parent uuid isn't known
+    // here, so clear the whole cache (deletes are far rarer than reads).
+    if was_folder {
+        ctx.cache.clear();
+    }
     Ok(status_response(StatusCode::NO_CONTENT))
 }
 
@@ -513,6 +591,7 @@ pub async fn mv(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         &ctx.root_folder,
         &ctx.root_updated_at,
         &resource,
+        &ctx.cache,
     )
     .await?
     .ok_or_else(|| {
@@ -535,6 +614,7 @@ pub async fn mv(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
             &ctx.root_folder,
             &ctx.root_updated_at,
             dest_parent_components,
+            &ctx.cache,
         )
         .await?
         {
@@ -560,6 +640,11 @@ pub async fn mv(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         }
     }
 
+    // Moving/renaming a folder changes the source and destination parent
+    // listings; the affected parent uuids aren't all known here, so clear.
+    if item.is_folder() {
+        ctx.cache.clear();
+    }
     Ok(status_response(StatusCode::NO_CONTENT))
 }
 
@@ -597,21 +682,25 @@ fn strip_destination_host(dest: &str) -> String {
 
 // ---- LOCK / UNLOCK ----
 
-pub fn lock(req: Request) -> Result<Response, AppError> {
+pub async fn lock(req: Request) -> Result<Response, AppError> {
     let token = format!("opaquelocktoken:{}", random_uuid());
-    let depth = req
-        .headers()
+    let (parts, body) = req.into_parts();
+    let depth = parts
+        .headers
         .get("depth")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("0")
         .to_string();
-    let timeout = req
-        .headers()
+    let timeout = parts
+        .headers
         .get("timeout")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("Second-300")
         .to_string();
-    let path = req.uri().path().to_string();
+    let path = parts.uri.path().to_string();
+    // LOCK carries a request body (the lock-info XML); drain it so hyper keeps
+    // the connection alive for the client's next (pipelined) request.
+    drain_body(body).await;
 
     log(&format!("[LOCK] Granted lock token {token} for {path}"));
     let body = xml::lock_discovery(&token, &path, &depth, &timeout);
@@ -643,24 +732,69 @@ async fn create_parents(
         updated_at: ctx.root_updated_at.clone(),
     };
     for comp in components {
-        let folders = resource::list_folders(api, token, &current.uuid).await?;
-        current = match folders.into_iter().find(|f| &f.plain_name == comp) {
-            Some(f) => f,
-            None => {
-                let v = api.create_folder(token, comp, &current.uuid).await?;
-                FolderItem {
+        current = get_or_create_child(ctx, api, token, &current.uuid, comp).await?;
+    }
+    Ok(current)
+}
+
+/// Number of attempts when creating a folder that may be racing another request.
+const FOLDER_CREATE_ATTEMPTS: usize = 6;
+
+/// Find the child folder `name` under `parent_uuid`, creating it if missing.
+///
+/// Concurrent uploads into a not-yet-existing folder (e.g. WinSCP fanning out a
+/// batch with `--create-full-path`) all try to create the same folder at once;
+/// the backend then answers one with success and the rest with 409/500. Left
+/// unhandled those become early PUT errors that drop the (large-bodied) TCP
+/// connection, which WinSCP reports as "connection aborted". So on any create
+/// failure we re-list (the winner's folder is now there) and adopt it, retrying
+/// a few times for transient backend errors.
+async fn get_or_create_child(
+    ctx: &Ctx,
+    api: &DriveApi,
+    token: &str,
+    parent_uuid: &str,
+    name: &str,
+) -> Result<FolderItem, AppError> {
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..FOLDER_CREATE_ATTEMPTS {
+        // On retries, bypass the cache so a concurrently-created folder is seen.
+        if attempt > 0 {
+            ctx.cache.invalidate(parent_uuid);
+        }
+        let folders = resource::list_folders(api, token, parent_uuid, &ctx.cache).await?;
+        if let Some(f) = folders.into_iter().find(|f| f.plain_name == name) {
+            return Ok(f);
+        }
+
+        match api.create_folder(token, name, parent_uuid).await {
+            Ok(v) => {
+                ctx.cache.invalidate(parent_uuid);
+                return Ok(FolderItem {
                     uuid: v
                         .get("uuid")
                         .and_then(|x| x.as_str())
                         .ok_or_else(|| anyhow!("created folder has no uuid"))?
                         .to_string(),
-                    plain_name: comp.clone(),
+                    plain_name: name.to_string(),
                     updated_at: now_rfc3339(),
-                }
+                });
             }
-        };
+            // Lost the race (already exists) or a transient backend error: loop
+            // back, re-list, and adopt the folder the winner created.
+            Err(e) => {
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    120 * (attempt as u64 + 1),
+                ))
+                .await;
+            }
+        }
     }
-    Ok(current)
+    // Exhausted attempts without seeing the folder appear.
+    Err(last_err
+        .map(AppError::from)
+        .unwrap_or_else(|| AppError::internal("failed to create folder")))
 }
 
 /// A 207 Multi-Status response with an XML body.

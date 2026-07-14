@@ -331,6 +331,27 @@ enum Commands {
         /// Delete files permanently instead of moving them to trash.
         #[arg(short = 'd', long, default_value_t = false)]
         delete_permanently: bool,
+        /// Spool each PUT body to a temp file before uploading, instead of
+        /// streaming the live client body straight to storage. More robust for
+        /// concurrent/slow clients (e.g. WinSCP) that otherwise trip storage
+        /// socket timeouts; costs temp disk + a little latency.
+        #[arg(long, default_value_t = false)]
+        spool: bool,
+        /// Directory for --spool temp files (default: system temp dir).
+        #[arg(long, requires = "spool")]
+        spool_dir: Option<String>,
+        /// Max PUT uploads transferring at once (0 = unlimited). Set 1 to fully
+        /// serialize uploads — helps clients (e.g. WinSCP) that fan out many
+        /// parallel PUTs and trip storage timeouts / connection aborts.
+        #[arg(long, default_value_t = 0)]
+        max_concurrent_uploads: usize,
+        /// Cache folder listings for this many seconds to speed path resolution
+        /// under bursts of requests. 0 disables the cache.
+        #[arg(long, default_value_t = 5)]
+        cache_ttl: u64,
+        /// Disable the folder-listing cache (same as --cache-ttl 0).
+        #[arg(long, default_value_t = false)]
+        no_cache: bool,
     },
     /// One-way sync: make a local folder match a remote Drive folder (pull).
     #[command(alias = "sync:down")]
@@ -552,6 +573,11 @@ async fn run(cli: Cli) -> Result<()> {
             username,
             password,
             delete_permanently,
+            spool,
+            spool_dir,
+            max_concurrent_uploads,
+            cache_ttl,
+            no_cache,
         } => {
             let custom = if custom_auth {
                 match (username, password) {
@@ -577,6 +603,10 @@ async fn run(cli: Cli) -> Result<()> {
                 create_full_path,
                 custom_auth: custom,
                 delete_permanently,
+                spool,
+                spool_dir: spool_dir.map(std::path::PathBuf::from),
+                max_concurrent_uploads,
+                cache_ttl: if no_cache { 0 } else { cache_ttl },
                 cert: cert.map(std::path::PathBuf::from),
                 key: key.map(std::path::PathBuf::from),
             };
