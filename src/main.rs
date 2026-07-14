@@ -291,12 +291,40 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+    /// Serve your Internxt Drive over a network protocol (runs until Ctrl-C).
+    ///
+    /// Pick a protocol subcommand (currently `webdav`; sftp/smb may follow).
+    #[cfg(feature = "webdav")]
+    #[command(subcommand)]
+    Serve(ServeCommands),
+    /// One-way sync: make a local folder match a remote Drive folder (pull).
+    #[command(alias = "sync:down")]
+    SyncDown {
+        /// The local directory to sync into.
+        #[arg(short, long)]
+        local: String,
+        /// The remote folder uuid to sync from. Leave empty for the root folder.
+        #[arg(short, long)]
+        remote: Option<String>,
+        /// Delete local files not present remotely. Optional value: `remove`
+        /// (default; OS trash not yet supported).
+        #[arg(long, num_args = 0..=1, default_missing_value = "default")]
+        delete: Option<String>,
+        /// Print the planned actions without transferring anything.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+}
+
+/// Protocol subcommands for `serve`.
+#[cfg(feature = "webdav")]
+#[derive(Subcommand)]
+enum ServeCommands {
     /// Serve your Internxt Drive over WebDAV (runs until Ctrl-C).
     ///
     /// Options are passed inline (no separate config command). Plain HTTP by
     /// default; use `--https` for HTTPS (self-signed unless `--cert`/`--key`
     /// are given; requires the `webdav-tls` feature).
-    #[cfg(feature = "webdav")]
     Webdav {
         /// Host to bind (and advertise). Use 0.0.0.0 to accept LAN clients.
         #[arg(short = 'l', long, default_value = "127.0.0.1")]
@@ -352,23 +380,6 @@ enum Commands {
         /// Disable the folder-listing cache (same as --cache-ttl 0).
         #[arg(long, default_value_t = false)]
         no_cache: bool,
-    },
-    /// One-way sync: make a local folder match a remote Drive folder (pull).
-    #[command(alias = "sync:down")]
-    SyncDown {
-        /// The local directory to sync into.
-        #[arg(short, long)]
-        local: String,
-        /// The remote folder uuid to sync from. Leave empty for the root folder.
-        #[arg(short, long)]
-        remote: Option<String>,
-        /// Delete local files not present remotely. Optional value: `remove`
-        /// (default; OS trash not yet supported).
-        #[arg(long, num_args = 0..=1, default_missing_value = "default")]
-        delete: Option<String>,
-        /// Print the planned actions without transferring anything.
-        #[arg(long, default_value_t = false)]
-        dry_run: bool,
     },
 }
 
@@ -561,7 +572,7 @@ async fn run(cli: Cli) -> Result<()> {
             dry_run,
         } => sync::sync_down(&local, remote.as_deref(), delete.as_deref(), dry_run).await?,
         #[cfg(feature = "webdav")]
-        Commands::Webdav {
+        Commands::Serve(ServeCommands::Webdav {
             host,
             port,
             https,
@@ -578,7 +589,7 @@ async fn run(cli: Cli) -> Result<()> {
             max_concurrent_uploads,
             cache_ttl,
             no_cache,
-        } => {
+        }) => {
             let custom = if custom_auth {
                 match (username, password) {
                     (Some(u), Some(p)) => Some((u, p)),

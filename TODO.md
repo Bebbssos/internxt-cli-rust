@@ -29,9 +29,9 @@ diff upstream against them to find changes worth pulling in.
 - `config` — show/set config
 - `logs`
 - `webdav-config`, `webdav start|stop|status`, `add-cert` — the daemon-style WebDAV
-  management commands. The `webdav` **server itself is ported** (foreground command,
-  see README); these subcommands are intentionally deferred pending a decision on
-  whether to add a background/daemon mode. Command names are left free for them.
+  management commands. The **server itself is ported** as `serve webdav` (foreground
+  command, see README); these subcommands are intentionally deferred pending a decision
+  on whether to add a background/daemon mode. Command names are left free for them.
 
 ## Feature gaps in already-ported commands
 

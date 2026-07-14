@@ -12,7 +12,7 @@ them into RAM), plus **upload-folder** (recursive) and the drive-management comm
 (**logout, whoami, list, create-folder, move/rename/trash/restore file+folder,
 trash-list, trash-clear, delete-permanently**), **workspaces** (list/use/unset,
 with workspace-scoped upload/download/list/etc), one-way folder **sync**
-(**sync-up** / **sync-down**), and a foreground **WebDAV server** (**webdav**).
+(**sync-up** / **sync-down**), and a foreground **WebDAV server** (**serve webdav**).
 All commands support a global **`--json`** flag. Not affiliated with Internxt.
 
 Roadmap + what's missing: see [TODO.md](TODO.md).
@@ -110,8 +110,10 @@ those to find upstream changes worth porting.
   public per-client constants from the upstream `.env.template`, not user data.
   `og/` and `target/` are git-ignored.
 
-- **WebDAV** (`src/webdav/`, feature `webdav`, default-on): a **foreground** `webdav`
+- **WebDAV** (`src/webdav/`, feature `webdav`, default-on): a **foreground** `serve webdav`
   command (runs until Ctrl-C) — deliberately *not* og's pm2 daemon + `webdav-config`.
+  Nested under a `serve <proto>` parent (clap subcommand) so `serve sftp`/`serve smb` can
+  be added later; the `Webdav` variant now lives in the `ServeCommands` enum in `main.rs`.
   Options are inline flags. axum `Router::fallback` catches all methods (incl. custom
   verbs PROPFIND/MKCOL/MOVE/LOCK/…) and dispatches by `req.method()`. Path→item
   resolution walks the folder tree via `get_folder_subfolders/subfiles` (workspace-aware),
@@ -177,8 +179,8 @@ target/release/internxt workspaces-list
 target/release/internxt workspaces-use -i <workspace-uuid>
 target/release/internxt workspaces-use --personal   # or: workspaces-unset
 
-# webdav: serve Drive over WebDAV in the foreground (Ctrl-C to stop)
-target/release/internxt webdav --host 0.0.0.0 --port 8080
+# serve webdav: serve Drive over WebDAV in the foreground (Ctrl-C to stop)
+target/release/internxt serve webdav --host 0.0.0.0 --port 8080
 cargo build --release --features webdav-tls   # add HTTPS (--https, self-signed or --cert/--key)
 ```
 
