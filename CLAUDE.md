@@ -130,7 +130,15 @@ those to find upstream changes worth porting.
   winner's folder instead of surfacing a 409/500 — important because an early error on a
   large-bodied PUT makes hyper drop the (undrained) TCP connection, which WinSCP reports as
   "connection aborted / Could not read status line". GET streams through the shared
-  `commands::download_file_to_writer` (RAM-bounded). PUT has two upload strategies:
+  `commands::download_file_to_writer` (RAM-bounded) and honours HTTP `Range:` (`Accept-Ranges:
+  bytes`) — a range request is a **true ranged download**: `download_file_to_writer`'s `range`
+  arg seeks the CTR keystream (`Ctr::seek`) to the window start and fetches only the covering
+  shards, byte-ranging the boundary shards over HTTP (`NetworkApi::download_shard_range_stream`,
+  expects `206`). Shards are one continuous CTR stream sliced by ordered `index`; per-shard
+  `size` (now deserialized on `DownloadShard`) maps a file offset to shard + in-shard byte range.
+  Works for **single- and multi-shard** files (og only did single-shard ranges); if a multi-shard
+  file's per-shard sizes are absent it falls back to decrypt-from-0-and-skip-prefix. PUT has two
+  upload strategies:
   **default streams** the live client body straight to network storage
   (`upload_stream_to_network`, Content-Length known; falls back to spooling when no length
   is declared) — RAM-bounded, no temp disk, lowest latency. **`--spool`** instead writes
@@ -181,8 +189,11 @@ those to find upstream changes worth porting.
   streaming reader (`ReadHandle`): a spawned `download_file_to_writer` decrypts into a duplex
   pipe, `read_at` serves forward reads from it (small forward gaps are skipped in-stream) and
   only a **backward** seek restarts the stream — so a sequential read of a huge file is one
-  continuous decrypt (verified: a 40 MB multi-shard file reads back byte-exact), while random
-  access is correct but re-downloads-and-skips. **Writes** use the whole-file model (Internxt
+  continuous decrypt (verified: a 40 MB multi-shard file reads back byte-exact). A restart is a
+  **true ranged seek** (see `download_file_to_writer` range path below): the CTR keystream is
+  seeked to the offset and only the covering shards are fetched (boundary shards byte-ranged over
+  HTTP), so a backward/random seek into a huge file no longer re-downloads the prefix. **Writes**
+  use the whole-file model (Internxt
   has no partial update): a write/`create` handle is backed by a temp file (`--spool-dir` or
   system temp); existing content is **materialized lazily** (downloaded into the temp file on
   first read/write, skipped when the open is immediately truncated to 0 — so `>file` costs no

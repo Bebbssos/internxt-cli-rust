@@ -603,37 +603,88 @@ where
     shards.sort_by_key(|s| s.index);
 
     let mut ctr = Ctr::new(&key, iv);
-    // Bytes still to skip / still to emit for a range request.
-    let (mut to_skip, mut remaining) = match range {
-        Some((start, len)) => (start, Some(len)),
-        None => (0, None),
-    };
 
-    'shards: for shard in &shards {
-        let resp = net.download_shard_stream(&shard.url).await?;
-        let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let mut bytes = chunk?.to_vec();
-            ctr.apply(&mut bytes);
-            let mut slice: &[u8] = &bytes;
-            if to_skip > 0 {
-                let drop = (to_skip as usize).min(slice.len());
-                slice = &slice[drop..];
-                to_skip -= drop as u64;
+    let (start, end) = match range {
+        // Exclusive byte window `[start, end)`, clamped to the file size.
+        Some((start, len)) => {
+            let start = start.min(links.size);
+            (start, start.saturating_add(len).min(links.size))
+        }
+        // Whole file.
+        None => (0, links.size),
+    };
+    if end <= start {
+        out.flush().await?;
+        return Ok(());
+    }
+
+    // The whole file is one continuous CTR stream sliced into shards (ordered by
+    // `index`). With per-shard sizes we can seek the keystream to `start`, skip
+    // shards entirely below the window, and byte-range the boundary shards over
+    // HTTP — so a partial read only fetches the covered bytes. A single-shard
+    // file needs no per-shard size (the shard spans the whole file); a
+    // multi-shard file whose sizes the API omitted falls back to decrypting
+    // from byte 0 and discarding the prefix (correct, but re-fetches it).
+    let sizes_known = shards.len() == 1 || shards.iter().all(|s| s.size > 0);
+
+    if sizes_known {
+        ctr.seek(start);
+        let mut base: u64 = 0;
+        for shard in &shards {
+            let ssize = if shards.len() == 1 { links.size } else { shard.size };
+            let shard_start = base;
+            let shard_end = base + ssize; // exclusive
+            base = shard_end;
+            if shard_end <= start {
+                continue; // entirely before the window
             }
-            if let Some(rem) = remaining.as_mut() {
-                if *rem == 0 {
+            if shard_start >= end {
+                break; // entirely after the window
+            }
+            let ov_start = start.max(shard_start);
+            let ov_end = end.min(shard_end); // exclusive
+            let local_start = ov_start - shard_start;
+            let local_end_incl = ov_end - shard_start - 1; // inclusive, S3 semantics
+            let whole = local_start == 0 && ov_end == shard_end;
+            let resp = if whole {
+                net.download_shard_stream(&shard.url).await?
+            } else {
+                net.download_shard_range_stream(&shard.url, local_start, local_end_incl)
+                    .await?
+            };
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let mut bytes = chunk?.to_vec();
+                ctr.apply(&mut bytes);
+                out.write_all(&bytes).await?;
+            }
+        }
+    } else {
+        // Fallback: multi-shard file with unknown sizes. Decrypt continuously
+        // from the start and skip the prefix bytes before `start`.
+        let mut to_skip = start;
+        let mut remaining = end - start;
+        'shards: for shard in &shards {
+            let resp = net.download_shard_stream(&shard.url).await?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let mut bytes = chunk?.to_vec();
+                ctr.apply(&mut bytes);
+                let mut slice: &[u8] = &bytes;
+                if to_skip > 0 {
+                    let drop = (to_skip as usize).min(slice.len());
+                    slice = &slice[drop..];
+                    to_skip -= drop as u64;
+                }
+                let take = (remaining as usize).min(slice.len());
+                slice = &slice[..take];
+                remaining -= take as u64;
+                if !slice.is_empty() {
+                    out.write_all(slice).await?;
+                }
+                if remaining == 0 {
                     break 'shards;
                 }
-                let take = (*rem as usize).min(slice.len());
-                slice = &slice[..take];
-                *rem -= take as u64;
-            }
-            if !slice.is_empty() {
-                out.write_all(slice).await?;
-            }
-            if remaining == Some(0) {
-                break 'shards;
             }
         }
     }

@@ -206,4 +206,30 @@ impl NetworkApi {
         }
         Ok(resp)
     }
+
+    /// GET a byte range `[start, end]` (inclusive, S3 semantics) of a shard.
+    /// Shard URLs are presigned S3 GETs, which honour `Range` — so a partial
+    /// read fetches only the covered bytes instead of the whole shard.
+    pub async fn download_shard_range_stream(
+        &self,
+        url: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<Response> {
+        let resp = self
+            .client
+            .get(url)
+            .header("Range", format!("bytes={start}-{end}"))
+            .send()
+            .await?;
+        // 206 Partial Content on success; a server ignoring Range yields 200
+        // with the whole body, which would break our offset math — reject it.
+        if resp.status().as_u16() != 206 {
+            return Err(anyhow!(
+                "downloadShard range failed: expected HTTP 206, got {}",
+                resp.status()
+            ));
+        }
+        Ok(resp)
+    }
 }

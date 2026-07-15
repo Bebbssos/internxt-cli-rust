@@ -134,6 +134,11 @@ pub struct DownloadLinksResponse {
 pub struct DownloadShard {
     pub index: i64,
     pub url: String,
+    /// Ciphertext byte length of this shard. Shards concatenate (ordered by
+    /// `index`) into one continuous CTR stream, so this lets a range request
+    /// skip whole shards and byte-range the boundary ones.
+    #[serde(default)]
+    pub size: u64,
 }
 
 // ---- Drive DTOs ----

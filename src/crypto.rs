@@ -1,7 +1,7 @@
 //! Crypto primitives ported 1:1 from og/cli crypto.service.ts, og/lib aes,
 //! and og/inxt-js crypto utils. Byte-for-byte compatible with the node CLI.
 
-use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, StreamCipher};
+use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, StreamCipher, StreamCipherSeek};
 use aes_gcm::aead::consts::U16;
 use aes_gcm::aead::Aead;
 use aes_gcm::{AesGcm, KeyInit, Nonce};
@@ -398,6 +398,31 @@ mod tests {
         let enc = encrypt_text_with_key("round trip me", SECRET);
         assert_eq!(decrypt_text_with_key(&enc, SECRET).unwrap(), "round trip me");
     }
+
+    /// Ctr::seek must reproduce the exact keystream position of a continuous
+    /// decrypt — this is what lets a range download skip the prefix. Encrypt a
+    /// buffer as one stream, then for a spread of offsets (incl. mid-AES-block,
+    /// which exercises the sub-block skip) decrypt from that offset and compare
+    /// to the plaintext tail.
+    #[test]
+    fn ctr_seek_matches_continuous() {
+        let index = hex::decode(INDEX_HEX).unwrap();
+        let iv = &index[0..16];
+        let key = generate_file_key(MNEMONIC, BUCKET, &index).unwrap();
+
+        let plain: Vec<u8> = (0..5000u32).map(|i| (i * 31 + 7) as u8).collect();
+        let mut cipher = plain.clone();
+        Ctr::new(&key, iv).apply(&mut cipher); // continuous encrypt
+
+        // 0 and 16 = block-aligned; 1/15/17/1234/4999 = mid-block.
+        for &off in &[0usize, 1, 15, 16, 17, 1234, 4999] {
+            let mut window = cipher[off..].to_vec();
+            let mut ctr = Ctr::new(&key, iv);
+            ctr.seek(off as u64);
+            ctr.apply(&mut window);
+            assert_eq!(window, plain[off..], "seek mismatch at offset {off}");
+        }
+    }
 }
 
 /// Streaming AES-256-CTR state for chunked encrypt/decrypt.
@@ -409,5 +434,11 @@ impl Ctr {
     }
     pub fn apply(&mut self, data: &mut [u8]) {
         self.0.apply_keystream(data);
+    }
+    /// Seek the keystream to byte `pos` (CTR is seekable: block = pos/16,
+    /// counter = iv + block). The next `apply` decrypts as if `pos` bytes had
+    /// already been processed — lets a range download skip the prefix entirely.
+    pub fn seek(&mut self, pos: u64) {
+        self.0.seek(pos);
     }
 }
