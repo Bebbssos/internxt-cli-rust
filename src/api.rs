@@ -210,6 +210,28 @@ impl DriveApi {
         Ok(serde_json::from_value(v)?)
     }
 
+    /// PUT /files/{uuid} — replace an existing file's content in place (keeps the
+    /// same uuid/name/folder, swaps `fileId` + `size`). Mirrors og
+    /// storage.replaceFile; avoids the 409 that createFileEntry raises for a
+    /// duplicate name in the same folder.
+    pub async fn replace_file(
+        &self,
+        token: &str,
+        uuid: &str,
+        file_id: &str,
+        size: u64,
+    ) -> Result<DriveFileData> {
+        let resp = self
+            .client
+            .put(self.url(&format!("/files/{uuid}")))
+            .headers(self.auth_headers(token)?)
+            .json(&json!({ "fileId": file_id, "size": size }))
+            .send()
+            .await?;
+        let v = Self::check(resp, "replaceFile").await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
     /// GET /workspaces/ — available + pending workspaces (WorkspacesResponse).
     pub async fn get_workspaces(&self, token: &str) -> Result<Value> {
         let resp = self

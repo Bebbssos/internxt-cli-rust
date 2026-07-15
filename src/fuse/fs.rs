@@ -472,6 +472,21 @@ impl Inner {
         self.handles.lock().unwrap().get(&fh).cloned()
     }
 
+    /// Any open write handle for `ino`. Used by setattr to apply an O_TRUNC
+    /// truncate that the kernel delivers as a fh-less setattr (FATTR_FH unset)
+    /// *after* the write handle was opened — without this the handle keeps its
+    /// stale base_size and a following write re-materializes the old content.
+    fn find_write_handle(&self, ino: u64) -> Option<Arc<WriteHandle>> {
+        self.handles
+            .lock()
+            .unwrap()
+            .values()
+            .find_map(|h| match h.as_ref() {
+                Handle::Write(wh) if wh.ino == ino => Some(wh.clone()),
+                _ => None,
+            })
+    }
+
     fn take_handle(&self, fh: u64) -> Option<Arc<Handle>> {
         self.handles.lock().unwrap().remove(&fh)
     }
@@ -507,34 +522,33 @@ impl Inner {
                 .await?
         };
         let now = now_rfc3339();
-        let created = api
-            .create_file_entry(
-                token,
-                &wh.plain,
-                &wh.ftype,
-                size,
-                &wh.parent_uuid,
-                &file_id,
-                &wh.bucket,
-                &now,
-                &now,
-            )
-            .await?;
-
+        // If this handle wraps an existing Drive file, replace its content in
+        // place (PUT /files/{uuid}) — keeps the same uuid/name/folder and swaps
+        // fileId+size. createFileEntry would 409 ("File already exists") on the
+        // duplicate name, so replace instead of the old create-then-trash dance.
         let old = wh.existing_uuid.lock().unwrap().take();
-        if let Some(old_uuid) = old {
-            if self.config.delete_permanently {
-                let _ = api.delete_file(token, &old_uuid).await;
-            } else {
-                let _ = api
-                    .trash_items(token, json!([{ "uuid": old_uuid, "type": "file" }]))
-                    .await;
+        let result_uuid = match old {
+            Some(old_uuid) => api.replace_file(token, &old_uuid, &file_id, size).await?.uuid,
+            None => {
+                api.create_file_entry(
+                    token,
+                    &wh.plain,
+                    &wh.ftype,
+                    size,
+                    &wh.parent_uuid,
+                    &file_id,
+                    &wh.bucket,
+                    &now,
+                    &now,
+                )
+                .await?
+                .uuid
             }
-        }
+        };
 
         let mut t = self.inodes.lock().unwrap();
         if let Some(nd) = t.map.get_mut(&wh.ino) {
-            nd.uuid = created.uuid;
+            nd.uuid = result_uuid;
             nd.file_id = if file_id.is_empty() { None } else { Some(file_id) };
             nd.size = size;
             nd.updated_at = now;
@@ -652,9 +666,21 @@ impl Filesystem for InxtFs {
         let inner = self.inner.clone();
         self.rt.spawn(async move {
             log(&format!("[SETATTR] {} size={size:?}", inner.path_of(ino.0)));
-            // Truncate against an open write handle.
-            if let (Some(sz), Some(fh)) = (size, fh) {
-                if let Some(Handle::Write(wh)) = inner.get_handle(fh.0).as_deref() {
+            // Truncate against an open write handle. Prefer the handle the
+            // kernel passed; fall back to any open write handle for this inode,
+            // because an O_TRUNC open delivers the truncate as a fh-less setattr
+            // (kernel strips O_TRUNC from open and issues a separate size=0
+            // setattr with FATTR_FH unset). Missing that would leave the handle
+            // holding the old base_size, so the next write re-downloads the old
+            // content and the save appends new-then-old.
+            if let Some(sz) = size {
+                let wh = fh
+                    .and_then(|fh| match inner.get_handle(fh.0).as_deref() {
+                        Some(Handle::Write(wh)) => Some(wh.clone()),
+                        _ => None,
+                    })
+                    .or_else(|| inner.find_write_handle(ino.0));
+                if let Some(wh) = wh {
                     let res: Result<()> = async {
                         if sz == 0 {
                             *wh.materialized.lock().await = true;
