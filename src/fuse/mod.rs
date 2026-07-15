@@ -18,17 +18,13 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use fuser::{MountOption, SessionACL};
 
-use crate::api::DriveApi;
-use crate::serve::cache::FolderCache;
-use crate::serve::creds::{spawn_refresh, SharedCreds};
-
-/// Runtime configuration for a `mount` run (built from CLI flags).
+/// Runtime configuration for the FUSE backend (built from CLI flags). The
+/// credential holder, folder cache, upload limiter and root folder are supplied
+/// by the `serve` orchestrator (shared with any sibling backends), so they are
+/// not part of this struct.
 pub struct MountConfig {
     /// Local directory to mount onto (must exist and be empty-ish).
     pub mountpoint: PathBuf,
-    /// Drive folder uuid to expose as the mount root. `None` = the account/
-    /// workspace root folder.
-    pub folder_uuid: Option<String>,
     /// TTL (seconds) for the folder-listing cache *and* the kernel attribute /
     /// entry cache. 0 disables both (always live, slower).
     pub cache_ttl: u64,
@@ -36,8 +32,6 @@ pub struct MountConfig {
     pub delete_permanently: bool,
     /// Directory for the per-write temp buffers. `None` = system temp dir.
     pub spool_dir: Option<PathBuf>,
-    /// Max file uploads running the network transfer at once. 0 = unlimited.
-    pub max_concurrent_uploads: usize,
     /// Mount read-only (reject all mutations at the kernel level).
     pub read_only: bool,
     /// Allow other users (and root) to access the mount (`allow_other`). Needed
@@ -46,8 +40,14 @@ pub struct MountConfig {
     pub allow_other: bool,
 }
 
-/// Mount the Drive and block until interrupted (Ctrl-C), then unmount.
-pub async fn run(config: MountConfig) -> Result<()> {
+/// Mount the Drive and run until `shutdown` resolves, then unmount. Credentials,
+/// the folder cache, the upload limiter and the root folder come from the
+/// `serve` orchestrator and are shared with any sibling backends.
+pub async fn serve(
+    shared: Arc<crate::serve::run::Shared>,
+    config: MountConfig,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     if !config.mountpoint.is_dir() {
         return Err(anyhow!(
             "mountpoint {} does not exist or is not a directory",
@@ -59,29 +59,16 @@ pub async fn run(config: MountConfig) -> Result<()> {
             .map_err(|e| anyhow!("spool directory {} is not usable: {e}", dir.display()))?;
     }
 
-    let creds = crate::auth::get_auth_details().await?;
-    let root_uuid = config
-        .folder_uuid
-        .clone()
-        .unwrap_or_else(|| creds.root_folder().to_string());
-    let root_updated_at = fetch_folder_updated_at(&creds, &root_uuid).await;
-
-    let cache = Arc::new(FolderCache::new(config.cache_ttl));
-    let upload_sem = (config.max_concurrent_uploads > 0)
-        .then(|| Arc::new(tokio::sync::Semaphore::new(config.max_concurrent_uploads)));
-    let shared = Arc::new(SharedCreds::new(creds));
-    spawn_refresh(shared.clone());
-
     let read_only = config.read_only;
     let allow_other = config.allow_other;
     let mountpoint = config.mountpoint.clone();
 
     let inner = Arc::new(fs::Inner::new(
-        shared,
-        cache,
-        root_uuid,
-        root_updated_at,
-        upload_sem,
+        shared.creds.clone(),
+        shared.cache.clone(),
+        shared.root_folder.clone(),
+        shared.root_updated_at.clone(),
+        shared.upload_sem.clone(),
         config,
     ));
     let filesystem = fs::InxtFs::new(inner, tokio::runtime::Handle::current());
@@ -115,39 +102,23 @@ pub async fn run(config: MountConfig) -> Result<()> {
         mountpoint.display(),
         if read_only { " (read-only)" } else { "" }
     ));
-    crate::output::status("Press Ctrl-C to unmount.");
 
-    let _ = tokio::signal::ctrl_c().await;
-    crate::output::status("\nUnmounting (Ctrl-C again to force).");
+    // Wait for the orchestrator's shutdown signal (single Ctrl-C for all
+    // backends), then unmount.
+    shutdown.await;
+    crate::output::status(&format!("\nUnmounting {}.", mountpoint.display()));
 
     // Unmounting drops the background session, which unmounts and joins the
     // session thread. If an in-flight kernel op is wedged that can block, so we
-    // race it against a second Ctrl-C and a timeout, force-exiting if either
-    // fires. A forced exit may leave a stale mount needing `fusermount3 -u`.
+    // race it against a timeout, force-exiting if it fires. A forced exit may
+    // leave a stale mount needing `fusermount3 -u`.
     let unmount = tokio::task::spawn_blocking(move || drop(session));
     tokio::select! {
         _ = unmount => {}
-        _ = tokio::signal::ctrl_c() => {
-            eprintln!("Forced exit; run `fusermount3 -u <mountpoint>` if the mount lingers.");
-            std::process::exit(1);
-        }
         _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => {
-            eprintln!("Unmount timed out; forcing exit. Run `fusermount3 -u <mountpoint>` if the mount lingers.");
+            eprintln!("Unmount of {} timed out; forcing exit. Run `fusermount3 -u <mountpoint>` if the mount lingers.", mountpoint.display());
             std::process::exit(1);
         }
     }
     Ok(())
-}
-
-/// Best-effort fetch of a folder's `updatedAt` for the mount root's attributes.
-async fn fetch_folder_updated_at(creds: &crate::models::Credentials, uuid: &str) -> String {
-    let api = DriveApi::for_credentials(creds);
-    match api.get_folder_meta(&creds.token, uuid).await {
-        Ok(v) => v
-            .get("updatedAt")
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(fs::now_rfc3339),
-        Err(_) => fs::now_rfc3339(),
-    }
 }

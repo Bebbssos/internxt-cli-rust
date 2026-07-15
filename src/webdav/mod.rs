@@ -24,7 +24,6 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
-use crate::api::DriveApi;
 use crate::config;
 use crate::models::Credentials;
 use crate::serve::creds::SharedCreds;
@@ -52,19 +51,15 @@ pub struct WebdavConfig {
     pub custom_auth: Option<(String, String)>,
     /// Delete files permanently instead of moving them to trash.
     pub delete_permanently: bool,
+    /// Serve read-only: reject every mutating method (PUT / MKCOL / DELETE /
+    /// MOVE / COPY / PROPPATCH) with 403.
+    pub read_only: bool,
     /// Spool each PUT body to a temp file before uploading (instead of streaming
     /// the live client body straight to network storage). More robust under
     /// concurrent/slow clients; costs temp disk + a little latency.
     pub spool: bool,
     /// Directory for `--spool` temp files. `None` = system temp dir.
     pub spool_dir: Option<PathBuf>,
-    /// Max PUT uploads running the network transfer at once. 0 = unlimited.
-    /// Setting 1 fully serializes uploads (one file finishes before the next
-    /// starts its transfer) — the safest option for clients that fan out many
-    /// parallel PUTs and overwhelm the storage backend.
-    pub max_concurrent_uploads: usize,
-    /// TTL (seconds) for the folder-listing cache. 0 disables caching.
-    pub cache_ttl: u64,
     /// TLS certificate (PEM). When omitted with `Https`, a self-signed cert is used.
     pub cert: Option<PathBuf>,
     /// TLS private key (PEM). Required alongside `cert`.
@@ -80,11 +75,12 @@ pub struct Ctx {
     pub root_folder: String,
     pub root_updated_at: String,
     /// Short-TTL cache of folder listings, to collapse the repeated tree walks
-    /// that path resolution does under a burst of requests.
-    pub cache: cache::FolderCache,
+    /// that path resolution does under a burst of requests. Shared with the
+    /// other serve backends running in the same process.
+    pub cache: Arc<cache::FolderCache>,
     /// Limits concurrent PUT network transfers when set (`--max-concurrent-uploads`).
-    /// `None` = unlimited.
-    pub upload_sem: Option<tokio::sync::Semaphore>,
+    /// `None` = unlimited. Shared (process-wide cap) across serve backends.
+    pub upload_sem: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl Ctx {
@@ -153,8 +149,14 @@ pub(crate) fn log(msg: &str) {
     eprintln!("{msg}");
 }
 
-/// Run the WebDAV server until interrupted (Ctrl-C / SIGTERM).
-pub async fn run(config: WebdavConfig) -> Result<()> {
+/// Run the WebDAV backend until `shutdown` resolves. Credentials, the folder
+/// cache and the upload limiter are supplied by the `serve` orchestrator and
+/// shared with any sibling backends.
+pub async fn serve(
+    shared: Arc<crate::serve::run::Shared>,
+    config: WebdavConfig,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     // Validate custom-auth completeness up front.
     if let Some((u, p)) = &config.custom_auth {
         if u.trim().is_empty() || p.trim().is_empty() {
@@ -166,23 +168,19 @@ pub async fn run(config: WebdavConfig) -> Result<()> {
 
     // Ensure the spool directory exists and is writable before we start serving.
     if let Some(dir) = &config.spool_dir {
-        if !config.spool {
-            return Err(anyhow!("--spool-dir has no effect without --spool"));
-        }
         std::fs::create_dir_all(dir)
             .map_err(|e| anyhow!("spool directory {} is not usable: {e}", dir.display()))?;
     }
 
-    let creds = crate::auth::get_auth_details().await?;
-    let root_folder = creds.root_folder().to_string();
-    let root_updated_at = fetch_root_updated_at(&creds, &root_folder).await;
+    let root_folder = shared.root_folder.clone();
+    let root_updated_at = shared.root_updated_at.clone();
 
     let scheme = match config.protocol {
         Protocol::Http => "http",
         Protocol::Https => "https",
     };
     let banner = format!(
-        "Internxt {} WebDAV server listening at {scheme}://{}:{}{}",
+        "Internxt {} WebDAV server listening at {scheme}://{}:{}{}{}",
         config::CLIENT_VERSION,
         config.host,
         config.port,
@@ -191,6 +189,7 @@ pub async fn run(config: WebdavConfig) -> Result<()> {
         } else {
             ""
         },
+        if config.read_only { " (read-only)" } else { "" },
     );
     let host = config.host.clone();
     let port = config.port;
@@ -198,26 +197,18 @@ pub async fn run(config: WebdavConfig) -> Result<()> {
     let cert = config.cert.clone();
     let key = config.key.clone();
 
-    let cache = cache::FolderCache::new(config.cache_ttl);
-    let upload_sem = (config.max_concurrent_uploads > 0)
-        .then(|| tokio::sync::Semaphore::new(config.max_concurrent_uploads));
     let ctx = Arc::new(Ctx {
-        creds: Arc::new(SharedCreds::new(creds)),
+        creds: shared.creds.clone(),
         config,
         root_folder,
         root_updated_at,
-        cache,
-        upload_sem,
+        cache: shared.cache.clone(),
+        upload_sem: shared.upload_sem.clone(),
     });
-
-    // Keep the session token fresh for long-running servers: `get_auth_details`
-    // refreshes near expiry and persists, and we swap the result in.
-    crate::serve::creds::spawn_refresh(ctx.creds.clone());
 
     let app = Router::new().fallback(dispatch).with_state(ctx);
 
     crate::output::status(&banner);
-    crate::output::status("Press Ctrl-C to stop.");
 
     match protocol {
         Protocol::Http => {
@@ -225,36 +216,21 @@ pub async fn run(config: WebdavConfig) -> Result<()> {
                 .await
                 .map_err(|e| anyhow!("failed to bind {host}:{port}: {e}"))?;
             axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown_signal())
+                .with_graceful_shutdown(shutdown)
                 .await?;
         }
         Protocol::Https => {
-            serve_https(&host, port, cert, key, app).await?;
+            tokio::select! {
+                res = serve_https(&host, port, cert, key, app) => res?,
+                _ = shutdown => {}
+            }
         }
     }
     Ok(())
 }
 
-/// Best-effort fetch of the root folder's `updatedAt` for PROPFIND on `/`.
-async fn fetch_root_updated_at(creds: &Credentials, root: &str) -> String {
-    let api = DriveApi::for_credentials(creds);
-    match api.get_folder_meta(&creds.token, root).await {
-        Ok(v) => v
-            .get("updatedAt")
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(now_rfc3339),
-        Err(_) => now_rfc3339(),
-    }
-}
-
 pub(crate) fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
-}
-
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
-    crate::output::status("\nShutting down WebDAV server.");
 }
 
 /// Root request dispatcher: authenticates then routes by HTTP method (including
@@ -279,6 +255,24 @@ async fn dispatch(State(ctx): State<Arc<Ctx>>, req: Request) -> Response {
         for (name, value) in req.headers() {
             log(&format!("  >> {}: {}", name, value.to_str().unwrap_or("<binary>")));
         }
+    }
+
+    // Read-only mode: reject every mutating verb up front (draining the body so
+    // keep-alive survives), before any handler touches the Drive.
+    if ctx.config.read_only
+        && matches!(
+            method.as_str(),
+            "PUT" | "MKCOL" | "DELETE" | "MOVE" | "COPY" | "PROPPATCH"
+        )
+    {
+        let resp = handlers::unsupported(
+            req,
+            StatusCode::FORBIDDEN,
+            "Server is running in read-only mode.",
+        )
+        .await
+        .unwrap_or_else(|e| e.into_response());
+        return resp;
     }
 
     let result = match method.as_str() {

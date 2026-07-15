@@ -12,10 +12,12 @@ them into RAM), plus **upload-folder** (recursive) and the drive-management comm
 (**logout, whoami, list, create-folder, move/rename/trash/restore file+folder,
 trash-list, trash-clear, delete-permanently**), **workspaces** (list/use/unset,
 with workspace-scoped upload/download/list/etc), one-way folder **sync**
-(**sync-up** / **sync-down**), a foreground **WebDAV server** (**serve webdav**),
-and a foreground **FUSE mount** (**mount**, Unix only) that exposes the Drive as a
-local read-write filesystem. All commands support a global **`--json`** flag. Not
-affiliated with Internxt.
+(**sync-up** / **sync-down**), a foreground multi-protocol **serve** command
+(**serve webdav,fuse,…** — runs one or more Drive-exposing backends at once,
+sharing creds/cache/upload-limit) covering a **WebDAV server** and a **FUSE mount**
+(Unix only) that exposes the Drive as a local read-write filesystem, plus a
+top-level **mount** convenience command (FUSE only). All commands support a global
+**`--json`** flag. Not affiliated with Internxt.
 
 Roadmap + what's missing: see [TODO.md](TODO.md).
 
@@ -62,7 +64,7 @@ those to find upstream changes worth porting.
 | `src/network.rs` | bridge/network client (`NETWORK_URL`), streaming PUT/GET |
 | `src/commands.rs` | upload-file/download-file/upload-folder orchestration (streaming + multipart + recursive) |
 | `src/sync.rs` | sync-up/sync-down: one-way folder reconcile (local↔remote tree diff, size+mtime change detection, optional `--delete`) |
-| `src/serve/` | code shared by the serve backends (webdav + fuse): `tree.rs` (protocol-agnostic Drive-tree walk: `FileItem`/`FolderItem`/`DriveItem`, `list_folders`/`list_files`/`resolve_folder`), `cache.rs` (`FolderCache` TTL listing cache), `creds.rs` (`SharedCreds` + hourly token refresh) |
+| `src/serve/` | code shared by the serve backends (webdav + fuse): `run.rs` (the `serve` **orchestrator**: parses the comma-list of protocols, builds one `Shared` bundle — `SharedCreds`+cache+global upload semaphore+root — fetched/created once, spawns each backend as a task, and owns the single Ctrl-C that shuts them all down via a `watch` flag), `tree.rs` (protocol-agnostic Drive-tree walk: `FileItem`/`FolderItem`/`DriveItem`, `list_folders`/`list_files`/`resolve_folder`), `cache.rs` (`FolderCache` TTL listing cache), `creds.rs` (`SharedCreds` + hourly token refresh) |
 | `src/webdav/` | WebDAV server (feature `webdav`): `mod.rs` (axum server + dispatch + auth + TLS), `handlers.rs` (method handlers), `resource.rs` (WebDAV URL parsing + `resolve_item`; re-exports `serve::tree`), `xml.rs` (response XML) |
 | `src/fuse/` | FUSE mount (feature `fuse`, Unix only): `mod.rs` (`MountConfig` + `fuser::spawn_mount2` + Ctrl-C unmount), `fs.rs` (`fuser::Filesystem` impl: inode table, sync-callback→tokio bridge, streaming reads, temp-file write buffering) |
 | `src/drive_ops.rs` | logout, whoami, list, create/move/rename/trash/delete folder+file |
@@ -114,11 +116,25 @@ those to find upstream changes worth porting.
   public per-client constants from the upstream `.env.template`, not user data.
   `og/` and `target/` are git-ignored.
 
-- **WebDAV** (`src/webdav/`, feature `webdav`, default-on): a **foreground** `serve webdav`
-  command (runs until Ctrl-C) — deliberately *not* og's pm2 daemon + `webdav-config`.
-  Nested under a `serve <proto>` parent (clap subcommand) so `serve sftp`/`serve smb` can
-  be added later; the `Webdav` variant now lives in the `ServeCommands` enum in `main.rs`.
-  Options are inline flags. axum `Router::fallback` catches all methods (incl. custom
+- **serve orchestration** (`src/serve/run.rs`): `serve` takes a **comma-separated
+  positional protocol list** (`serve webdav`, `serve webdav,fuse`) — *not* a clap
+  subcommand — so several backends run in one foreground process. **Shared** knobs are
+  bare flags (`-i/--folder-uuid`, `--cache-ttl`/`--no-cache`, `-d/--delete-permanently`,
+  `--spool`, `--spool-dir`, `--max-concurrent-uploads`, `--read-only`) and back one shared
+  `SharedCreds` (+one refresh task), one `FolderCache`, and one **global** upload
+  `Semaphore` across all backends; **protocol-specific** knobs are prefixed
+  (`--webdav-host/-port/-https/-cert/-key/-timeout/-create-full-path/-custom-auth/-username/-password`,
+  `--fuse-mountpoint/-allow-other`). `--read-only` and `--spool` are now shared and honored
+  by both backends (WebDAV rejects mutating verbs — PUT/MKCOL/DELETE/MOVE/COPY/PROPPATCH — with
+  403 when read-only; FUSE writes always spool so `--spool` is a no-op there). Each backend is
+  `webdav::serve` / `fuse::serve`, which take the `Arc<Shared>` bundle + a shutdown future
+  (built from a `watch` flag) instead of creating their own creds/cache/refresh or owning
+  Ctrl-C. The top-level `mount` command is a thin wrapper that calls the same orchestrator
+  with a single-`fuse` protocol list. Unknown / not-yet-implemented (`smb`/`sftp`) / feature-off
+  protocols in the list error at parse time.
+- **WebDAV** (`src/webdav/`, feature `webdav`, default-on): a **foreground** WebDAV
+  backend under `serve` (`serve webdav`, runs until Ctrl-C) — deliberately *not* og's pm2
+  daemon + `webdav-config`. axum `Router::fallback` catches all methods (incl. custom
   verbs PROPFIND/MKCOL/MOVE/LOCK/…) and dispatches by `req.method()`. Path→item
   resolution walks the folder tree via `get_folder_subfolders/subfiles` (workspace-aware),
   no sqlite cache — but subfolder listings are cached in-process (`webdav/cache.rs`,
@@ -200,12 +216,15 @@ those to find upstream changes worth porting.
   download), writes patch the temp file, and on the final `release` the temp is uploaded whole
   (`upload_file_to_network`) and a **new** Drive file entry replaces the old (create-then-trash,
   or delete permanently with `--delete-permanently`). `mkdir`/`rmdir`/`unlink`/`rename` map to
-  the Drive REST ops (workspace-aware); mutations invalidate the shared `FolderCache`. Reuses
-  webdav's `--cache-ttl`/`--no-cache` (also used as the kernel attr/entry TTL),
-  `--delete-permanently`, `--spool-dir`, `--max-concurrent-uploads`; adds `--folder-uuid`
-  (mount a subfolder, root default), `--read-only`, `--allow-other` (needs `user_allow_other`
-  in `/etc/fuse.conf`; only then is `AutoUnmount` added, since it requires an allow-other ACL).
-  `serve smb`/`serve sftp` could reuse `serve::{tree,cache,creds}` the same way.
+  the Drive REST ops (workspace-aware); mutations invalidate the shared `FolderCache`. Uses
+  the shared serve flags: `--cache-ttl`/`--no-cache` (also the kernel attr/entry TTL),
+  `-d/--delete-permanently`, `--spool-dir`, `--max-concurrent-uploads`, `-i/--folder-uuid`
+  (mount a subfolder, root default), `--read-only`; plus fuse-only `--fuse-allow-other` (needs
+  `user_allow_other` in `/etc/fuse.conf`; only then is `AutoUnmount` added, since it requires an
+  allow-other ACL). Under `mount` these are the bare flag names (`--allow-other`, etc.); under
+  `serve` the fuse-only ones are `--fuse-`-prefixed. `serve smb`/`serve sftp` would add a
+  `smb`/`sftp` arm to `serve::run` and a `serve::serve`-style backend reusing
+  `serve::{run::Shared,tree,cache,creds}` the same way.
 
 ## Build / test / run
 
@@ -226,9 +245,11 @@ target/release/internxt workspaces-list
 target/release/internxt workspaces-use -i <workspace-uuid>
 target/release/internxt workspaces-use --personal   # or: workspaces-unset
 
-# serve webdav: serve Drive over WebDAV in the foreground (Ctrl-C to stop)
-target/release/internxt serve webdav --host 0.0.0.0 --port 8080
-cargo build --release --features webdav-tls   # add HTTPS (--https, self-signed or --cert/--key)
+# serve: one or more protocols in the foreground (comma-list; Ctrl-C stops all)
+target/release/internxt serve webdav --webdav-host 0.0.0.0 --webdav-port 8080
+target/release/internxt serve webdav,fuse --fuse-mountpoint ~/drive   # both at once, shared cache/creds
+target/release/internxt serve webdav,fuse --fuse-mountpoint ~/drive --read-only -i <folder-uuid>
+cargo build --release --features webdav-tls   # add HTTPS (--webdav-https, self-signed or --webdav-cert/--webdav-key)
 
 # mount: expose Drive as a local filesystem via FUSE (Unix only; Ctrl-C to unmount)
 mkdir -p ~/drive && target/release/internxt mount ~/drive

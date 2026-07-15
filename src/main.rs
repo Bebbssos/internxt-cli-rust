@@ -295,12 +295,103 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
-    /// Serve your Internxt Drive over a network protocol (runs until Ctrl-C).
+    /// Serve your Internxt Drive over one or more protocols (runs until Ctrl-C).
     ///
-    /// Pick a protocol subcommand (currently `webdav`; sftp/smb may follow).
-    #[cfg(feature = "webdav")]
-    #[command(subcommand)]
-    Serve(ServeCommands),
+    /// Protocols are given as a comma-separated list, e.g. `serve webdav` or
+    /// `serve webdav,fuse`. All selected backends share one credential holder,
+    /// one folder cache and one global upload limit. Shared knobs are bare flags
+    /// (`--cache-ttl`, `--folder-uuid`, `--delete-permanently`, `--spool`,
+    /// `--spool-dir`, `--max-concurrent-uploads`, `--read-only`); protocol
+    /// specific knobs are prefixed (`--webdav-port`, `--fuse-mountpoint`, …).
+    #[cfg(any(feature = "webdav", all(unix, feature = "fuse")))]
+    Serve {
+        /// Comma-separated protocols to serve (known: webdav, fuse).
+        #[arg(value_name = "PROTOCOLS")]
+        protocols: String,
+
+        // ---- shared ----
+        /// Drive folder uuid to expose as the root of every backend. Omit for
+        /// the account / workspace root.
+        #[arg(short = 'i', long)]
+        folder_uuid: Option<String>,
+        /// Cache folder listings for this many seconds (also the FUSE kernel
+        /// attr/entry TTL). Shared by all backends.
+        #[arg(long, default_value_t = 5)]
+        cache_ttl: u64,
+        /// Disable caching (same as --cache-ttl 0).
+        #[arg(long, default_value_t = false)]
+        no_cache: bool,
+        /// Delete files permanently instead of moving them to trash.
+        #[arg(short = 'd', long, default_value_t = false)]
+        delete_permanently: bool,
+        /// Spool each upload body to a temp file before uploading (WebDAV PUT;
+        /// FUSE writes always spool). More robust for concurrent/slow clients.
+        #[arg(long, default_value_t = false)]
+        spool: bool,
+        /// Directory for spool temp files (default: system temp dir).
+        #[arg(long)]
+        spool_dir: Option<String>,
+        /// Max uploads transferring at once, across all backends (0 = unlimited).
+        #[arg(long, default_value_t = 0)]
+        max_concurrent_uploads: usize,
+        /// Serve read-only: reject all writes/mutations on every backend.
+        #[arg(long, default_value_t = false)]
+        read_only: bool,
+
+        // ---- webdav ----
+        /// WebDAV: host to bind (and advertise). 0.0.0.0 accepts LAN clients.
+        #[cfg(feature = "webdav")]
+        #[arg(long, default_value = "127.0.0.1")]
+        webdav_host: String,
+        /// WebDAV: port to listen on.
+        #[cfg(feature = "webdav")]
+        #[arg(long, default_value_t = 3005)]
+        webdav_port: u16,
+        /// WebDAV: serve over HTTPS instead of plain HTTP.
+        #[cfg(feature = "webdav")]
+        #[arg(long, default_value_t = false)]
+        webdav_https: bool,
+        /// WebDAV: TLS certificate (PEM). With --webdav-https and no cert, a
+        /// self-signed cert is generated.
+        #[cfg(feature = "webdav")]
+        #[arg(long, requires = "webdav_https")]
+        webdav_cert: Option<String>,
+        /// WebDAV: TLS private key (PEM). Required alongside --webdav-cert.
+        #[cfg(feature = "webdav")]
+        #[arg(long, requires = "webdav_cert")]
+        webdav_key: Option<String>,
+        /// WebDAV: server request timeout in minutes (0 = none).
+        #[cfg(feature = "webdav")]
+        #[arg(long, default_value_t = 60)]
+        webdav_timeout: u64,
+        /// WebDAV: auto-create missing parent folders on PUT / MKCOL.
+        #[cfg(feature = "webdav")]
+        #[arg(long, default_value_t = false)]
+        webdav_create_full_path: bool,
+        /// WebDAV: require HTTP Basic auth (needs --webdav-username/--webdav-password).
+        #[cfg(feature = "webdav")]
+        #[arg(long, default_value_t = false)]
+        webdav_custom_auth: bool,
+        /// WebDAV: username for --webdav-custom-auth.
+        #[cfg(feature = "webdav")]
+        #[arg(long)]
+        webdav_username: Option<String>,
+        /// WebDAV: password for --webdav-custom-auth.
+        #[cfg(feature = "webdav")]
+        #[arg(long)]
+        webdav_password: Option<String>,
+
+        // ---- fuse ----
+        /// FUSE: local directory to mount onto (required when `fuse` is served).
+        #[cfg(all(unix, feature = "fuse"))]
+        #[arg(long, value_name = "MOUNTPOINT")]
+        fuse_mountpoint: Option<String>,
+        /// FUSE: allow other users (and root) to access the mount (needs
+        /// user_allow_other in /etc/fuse.conf on Linux).
+        #[cfg(all(unix, feature = "fuse"))]
+        #[arg(long, default_value_t = false)]
+        fuse_allow_other: bool,
+    },
     /// Mount your Internxt Drive as a local filesystem via FUSE (runs until Ctrl-C).
     ///
     /// Unix only (Linux / macOS / FreeBSD). Requires a FUSE driver at runtime
@@ -353,73 +444,6 @@ enum Commands {
         /// Print the planned actions without transferring anything.
         #[arg(long, default_value_t = false)]
         dry_run: bool,
-    },
-}
-
-/// Protocol subcommands for `serve`.
-#[cfg(feature = "webdav")]
-#[derive(Subcommand)]
-enum ServeCommands {
-    /// Serve your Internxt Drive over WebDAV (runs until Ctrl-C).
-    ///
-    /// Options are passed inline (no separate config command). Plain HTTP by
-    /// default; use `--https` for HTTPS (self-signed unless `--cert`/`--key`
-    /// are given; requires the `webdav-tls` feature).
-    Webdav {
-        /// Host to bind (and advertise). Use 0.0.0.0 to accept LAN clients.
-        #[arg(short = 'l', long, default_value = "127.0.0.1")]
-        host: String,
-        /// Port to listen on.
-        #[arg(short, long, default_value_t = 3005)]
-        port: u16,
-        /// Serve over HTTPS instead of plain HTTP.
-        #[arg(short = 's', long, default_value_t = false)]
-        https: bool,
-        /// TLS certificate (PEM). With --https and no --cert, a self-signed cert is generated.
-        #[arg(long, requires = "https")]
-        cert: Option<String>,
-        /// TLS private key (PEM). Required alongside --cert.
-        #[arg(long, requires = "cert")]
-        key: Option<String>,
-        /// Server request timeout in minutes (0 = none). Reserved for long transfers.
-        #[arg(short, long, default_value_t = 60)]
-        timeout: u64,
-        /// Auto-create missing parent folders on PUT / MKCOL.
-        #[arg(short = 'c', long, default_value_t = false)]
-        create_full_path: bool,
-        /// Require HTTP Basic auth from clients (needs --username and --password).
-        #[arg(short = 'a', long, default_value_t = false)]
-        custom_auth: bool,
-        /// Username for --custom-auth.
-        #[arg(short = 'u', long)]
-        username: Option<String>,
-        /// Password for --custom-auth.
-        #[arg(short = 'w', long)]
-        password: Option<String>,
-        /// Delete files permanently instead of moving them to trash.
-        #[arg(short = 'd', long, default_value_t = false)]
-        delete_permanently: bool,
-        /// Spool each PUT body to a temp file before uploading, instead of
-        /// streaming the live client body straight to storage. More robust for
-        /// concurrent/slow clients (e.g. WinSCP) that otherwise trip storage
-        /// socket timeouts; costs temp disk + a little latency.
-        #[arg(long, default_value_t = false)]
-        spool: bool,
-        /// Directory for --spool temp files (default: system temp dir).
-        #[arg(long, requires = "spool")]
-        spool_dir: Option<String>,
-        /// Max PUT uploads transferring at once (0 = unlimited). Set 1 to fully
-        /// serialize uploads — helps clients (e.g. WinSCP) that fan out many
-        /// parallel PUTs and trip storage timeouts / connection aborts.
-        #[arg(long, default_value_t = 0)]
-        max_concurrent_uploads: usize,
-        /// Cache folder listings for this many seconds to speed path resolution
-        /// under bursts of requests. 0 disables the cache.
-        #[arg(long, default_value_t = 5)]
-        cache_ttl: u64,
-        /// Disable the folder-listing cache (same as --cache-ttl 0).
-        #[arg(long, default_value_t = false)]
-        no_cache: bool,
     },
 }
 
@@ -611,57 +635,114 @@ async fn run(cli: Cli) -> Result<()> {
             delete,
             dry_run,
         } => sync::sync_down(&local, remote.as_deref(), delete.as_deref(), dry_run).await?,
-        #[cfg(feature = "webdav")]
-        Commands::Serve(ServeCommands::Webdav {
-            host,
-            port,
-            https,
-            cert,
-            key,
-            timeout,
-            create_full_path,
-            custom_auth,
-            username,
-            password,
+        #[cfg(any(feature = "webdav", all(unix, feature = "fuse")))]
+        Commands::Serve {
+            protocols,
+            folder_uuid,
+            cache_ttl,
+            no_cache,
             delete_permanently,
             spool,
             spool_dir,
             max_concurrent_uploads,
-            cache_ttl,
-            no_cache,
-        }) => {
-            let custom = if custom_auth {
-                match (username, password) {
-                    (Some(u), Some(p)) => Some((u, p)),
-                    _ => {
-                        return Err(anyhow::anyhow!(
-                            "--custom-auth requires --username and --password"
-                        ))
+            read_only,
+            #[cfg(feature = "webdav")]
+            webdav_host,
+            #[cfg(feature = "webdav")]
+            webdav_port,
+            #[cfg(feature = "webdav")]
+            webdav_https,
+            #[cfg(feature = "webdav")]
+            webdav_cert,
+            #[cfg(feature = "webdav")]
+            webdav_key,
+            #[cfg(feature = "webdav")]
+            webdav_timeout,
+            #[cfg(feature = "webdav")]
+            webdav_create_full_path,
+            #[cfg(feature = "webdav")]
+            webdav_custom_auth,
+            #[cfg(feature = "webdav")]
+            webdav_username,
+            #[cfg(feature = "webdav")]
+            webdav_password,
+            #[cfg(all(unix, feature = "fuse"))]
+            fuse_mountpoint,
+            #[cfg(all(unix, feature = "fuse"))]
+            fuse_allow_other,
+        } => {
+            let protocols = serve::run::parse_protocols(&protocols)?;
+            let cache_ttl = if no_cache { 0 } else { cache_ttl };
+            let spool_dir = spool_dir.map(std::path::PathBuf::from);
+            // `spool` only affects the WebDAV backend (FUSE writes always spool);
+            // acknowledge it on builds without WebDAV so it isn't flagged unused.
+            #[cfg(not(feature = "webdav"))]
+            let _ = spool;
+
+            #[cfg(feature = "webdav")]
+            let webdav = if protocols.contains(&serve::run::Protocol::Webdav) {
+                let custom = if webdav_custom_auth {
+                    match (webdav_username, webdav_password) {
+                        (Some(u), Some(p)) => Some((u, p)),
+                        _ => {
+                            return Err(anyhow::anyhow!(
+                                "--webdav-custom-auth requires --webdav-username and --webdav-password"
+                            ))
+                        }
                     }
-                }
+                } else {
+                    None
+                };
+                Some(webdav::WebdavConfig {
+                    host: webdav_host,
+                    port: webdav_port,
+                    protocol: if webdav_https {
+                        webdav::Protocol::Https
+                    } else {
+                        webdav::Protocol::Http
+                    },
+                    timeout_minutes: webdav_timeout,
+                    create_full_path: webdav_create_full_path,
+                    custom_auth: custom,
+                    delete_permanently,
+                    read_only,
+                    spool,
+                    spool_dir: spool_dir.clone(),
+                    cert: webdav_cert.map(std::path::PathBuf::from),
+                    key: webdav_key.map(std::path::PathBuf::from),
+                })
             } else {
                 None
             };
-            let config = webdav::WebdavConfig {
-                host,
-                port,
-                protocol: if https {
-                    webdav::Protocol::Https
-                } else {
-                    webdav::Protocol::Http
-                },
-                timeout_minutes: timeout,
-                create_full_path,
-                custom_auth: custom,
-                delete_permanently,
-                spool,
-                spool_dir: spool_dir.map(std::path::PathBuf::from),
-                max_concurrent_uploads,
-                cache_ttl: if no_cache { 0 } else { cache_ttl },
-                cert: cert.map(std::path::PathBuf::from),
-                key: key.map(std::path::PathBuf::from),
+
+            #[cfg(all(unix, feature = "fuse"))]
+            let fuse = if protocols.contains(&serve::run::Protocol::Fuse) {
+                let mountpoint = fuse_mountpoint.ok_or_else(|| {
+                    anyhow::anyhow!("serving `fuse` requires --fuse-mountpoint <MOUNTPOINT>")
+                })?;
+                Some(fuse::MountConfig {
+                    mountpoint: std::path::PathBuf::from(mountpoint),
+                    cache_ttl,
+                    delete_permanently,
+                    spool_dir: spool_dir.clone(),
+                    read_only,
+                    allow_other: fuse_allow_other,
+                })
+            } else {
+                None
             };
-            webdav::run(config).await?;
+
+            let config = serve::run::ServeConfig {
+                protocols,
+                folder_uuid,
+                cache_ttl,
+                max_concurrent_uploads,
+                #[cfg(feature = "webdav")]
+                webdav,
+                #[cfg(all(unix, feature = "fuse"))]
+                fuse,
+            };
+            serve::run::run(config).await?;
         }
         #[cfg(all(unix, feature = "fuse"))]
         Commands::Mount {
@@ -675,17 +756,25 @@ async fn run(cli: Cli) -> Result<()> {
             read_only,
             allow_other,
         } => {
-            let config = fuse::MountConfig {
+            let cache_ttl = if no_cache { 0 } else { cache_ttl };
+            let mount = fuse::MountConfig {
                 mountpoint: std::path::PathBuf::from(mountpoint),
-                folder_uuid,
-                cache_ttl: if no_cache { 0 } else { cache_ttl },
+                cache_ttl,
                 delete_permanently,
                 spool_dir: spool_dir.map(std::path::PathBuf::from),
-                max_concurrent_uploads,
                 read_only,
                 allow_other,
             };
-            fuse::run(config).await?;
+            let config = serve::run::ServeConfig {
+                protocols: vec![serve::run::Protocol::Fuse],
+                folder_uuid,
+                cache_ttl,
+                max_concurrent_uploads,
+                #[cfg(feature = "webdav")]
+                webdav: None,
+                fuse: Some(mount),
+            };
+            serve::run::run(config).await?;
         }
     }
     Ok(())
