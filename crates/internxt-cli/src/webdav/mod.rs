@@ -24,8 +24,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
-use crate::config;
-use crate::models::Credentials;
+use internxt_core::config;
+use internxt_core::models::Credentials;
 use crate::serve::creds::SharedCreds;
 
 /// Transport for the WebDAV listener.

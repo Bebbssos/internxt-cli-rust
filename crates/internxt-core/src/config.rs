@@ -1,7 +1,8 @@
 //! Static configuration. Mirrors og/cli .env.template defaults.
 //! Values can be overridden via environment variables of the same name.
-
-use std::path::PathBuf;
+//!
+//! Only API endpoints + app constants live here — no filesystem paths. Where the
+//! front-end stores credentials is the front-end's concern (it owns persistence).
 
 pub fn get(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -32,13 +33,3 @@ pub fn desktop_header() -> String {
 
 pub const CLIENT_NAME: &str = "internxt-cli";
 pub const CLIENT_VERSION: &str = "1.6.5";
-
-pub fn data_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("no home dir")
-        .join(".internxt-cli")
-}
-
-pub fn credentials_file() -> PathBuf {
-    data_dir().join(".inxtcli")
-}

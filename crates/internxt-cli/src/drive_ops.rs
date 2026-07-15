@@ -5,9 +5,9 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Local};
 use serde_json::{json, Value};
 
-use crate::api::DriveApi;
+use internxt_core::api::DriveApi;
 use crate::auth;
-use crate::config;
+use internxt_core::config;
 use crate::output;
 
 /// Resolve a folder uuid flag, falling back to the user's root folder when empty.
@@ -90,7 +90,7 @@ pub async fn logout() -> Result<()> {
     };
     // Best effort: invalidate server-side, then always clear local credentials.
     let _ = DriveApi::for_credentials(&creds).logout(&creds.token).await;
-    let path = config::credentials_file();
+    let path = auth::credentials_file();
     if path.exists() {
         std::fs::remove_file(&path)?;
     }

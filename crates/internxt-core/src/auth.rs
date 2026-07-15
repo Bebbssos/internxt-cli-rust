@@ -5,7 +5,6 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde_json::Value;
 
 use crate::api::DriveApi;
-use crate::config;
 use crate::crypto;
 use crate::models::{Credentials, UserInfo};
 
@@ -14,11 +13,16 @@ use crate::models::{Credentials, UserInfo};
 /// `tfa` is a ready-to-use TOTP code; `tfa_token` is a TOTP *secret* from which
 /// a code is generated and which takes priority over `tfa` (mirrors the node
 /// CLI `--twofactortoken` flag).
+///
+/// `on_need_2fa` is invoked only when the account requires 2FA and no code was
+/// supplied — the caller decides how to obtain it (prompt the user, error out in
+/// non-interactive mode, …). Core never touches the terminal.
 pub async fn login(
     email: &str,
     password: &str,
     tfa: Option<&str>,
     tfa_token: Option<&str>,
+    on_need_2fa: impl FnOnce() -> Result<String>,
 ) -> Result<Credentials> {
     let email = email.to_lowercase();
     let api = DriveApi::new();
@@ -32,22 +36,15 @@ pub async fn login(
     let encrypted_password_hash = crypto::encrypt_text(&hash);
 
     // 2b. obtain 2FA code if the account requires it. A TOTP secret token takes
-    // priority over a literal code; otherwise prompt (unless non-interactive).
+    // priority over a literal code; otherwise ask the caller (`on_need_2fa`).
     let tfa_owned: Option<String> = if !tfa_enabled {
         None
     } else if let Some(token) = tfa_token.filter(|t| !t.trim().is_empty()) {
         Some(crypto::totp_now(token.trim())?)
     } else if let Some(code) = tfa.filter(|t| !t.trim().is_empty()) {
         Some(code.to_string())
-    } else if crate::output::is_non_interactive() {
-        return Err(anyhow!("No value provided for required flag: twofactor"));
     } else {
-        use std::io::Write;
-        print!("What is your two-factor code? ");
-        std::io::stdout().flush().ok();
-        let mut s = String::new();
-        std::io::stdin().read_line(&mut s)?;
-        Some(s.trim().to_string())
+        Some(on_need_2fa()?)
     };
 
     // 3. login access (without keys)
@@ -100,7 +97,6 @@ pub async fn login(
 /// password in the SSO flow to decrypt it). ecc-only workspaces still work;
 /// hybrid (Kyber) workspaces require a legacy login. Mirrors og/cli
 /// universal-link.service.ts, which likewise never obtains a usable kyber key.
-#[cfg(feature = "sso")]
 pub async fn build_sso_credentials(
     mnemonic: &str,
     token: &str,
@@ -174,13 +170,18 @@ fn jwt_expiration(token: &str) -> Option<i64> {
 
 const TWO_DAYS_SECS: i64 = 2 * 24 * 60 * 60;
 
-/// Reads stored credentials and, mirroring node's `getAuthDetails`, validates
-/// the token and refreshes it when it is within two days of expiry. Use this
-/// at the start of any command that talks to the API so the stored session
-/// stays valid; `read_credentials` is the plain (non-refreshing) accessor.
-pub async fn get_auth_details() -> Result<Credentials> {
-    let mut creds = read_credentials()?;
-
+/// Validates and, mirroring node's `getAuthDetails`, refreshes credentials when
+/// the token is within two days of expiry. Pure: takes the current credentials
+/// and returns the (possibly-updated) ones plus a `changed` flag — persistence is
+/// the front-end's job (core does no filesystem I/O). The front-end reads the
+/// stored creds, calls this, and re-saves when `changed`.
+///
+/// `on_warn` receives best-effort diagnostic messages (a token/workspace refresh
+/// that failed but left a still-valid session); core never prints them itself.
+pub async fn refresh_credentials(
+    mut creds: Credentials,
+    on_warn: impl Fn(&str),
+) -> Result<(Credentials, bool)> {
     let exp = jwt_expiration(&creds.token)
         .ok_or_else(|| anyhow!("Stored credentials are invalid. Run `internxt login` again."))?;
     if !crypto::validate_mnemonic(&creds.user.mnemonic) {
@@ -211,7 +212,7 @@ pub async fn get_auth_details() -> Result<Credentials> {
             // Refresh is best-effort: the current token is still valid (not yet
             // expired), so keep using it rather than failing the command.
             Err(e) => {
-                crate::output::status(&format!("warning: token refresh failed: {e}"));
+                on_warn(&format!("token refresh failed: {e}"));
             }
         }
     }
@@ -234,17 +235,13 @@ pub async fn get_auth_details() -> Result<Credentials> {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    crate::output::status(&format!("warning: workspace refresh failed: {e}"));
+                    on_warn(&format!("workspace refresh failed: {e}"));
                 }
             }
         }
     }
 
-    if changed {
-        save_credentials(&creds)?;
-    }
-
-    Ok(creds)
+    Ok((creds, changed))
 }
 
 /// Re-fetches a workspace's network credentials + token header. Returns
@@ -277,27 +274,6 @@ fn field(user: &Value, key: &str) -> Result<String> {
         .as_str()
         .map(|s| s.to_string())
         .ok_or_else(|| anyhow!("missing user.{key}"))
-}
-
-/// Save credentials encrypted (CryptoJS AES with APP_CRYPTO_SECRET), like the node CLI.
-pub fn save_credentials(creds: &Credentials) -> Result<()> {
-    let dir = config::data_dir();
-    std::fs::create_dir_all(&dir)?;
-    let plain = serde_json::to_string(creds)?;
-    let encrypted = crypto::encrypt_text(&plain);
-    let path = config::credentials_file();
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, encrypted)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
-}
-
-pub fn read_credentials() -> Result<Credentials> {
-    let path = config::credentials_file();
-    let encrypted = std::fs::read_to_string(&path)
-        .map_err(|_| anyhow!("Not logged in. Run `internxt login` first."))?;
-    let plain = crypto::decrypt_text(&encrypted)?;
-    Ok(serde_json::from_str(&plain)?)
 }
 
 #[cfg(test)]

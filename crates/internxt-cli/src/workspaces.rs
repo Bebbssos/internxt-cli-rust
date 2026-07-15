@@ -1,15 +1,15 @@
 //! Workspace commands: list, use, unset. Mirrors og/cli workspaces-* commands
 //! and workspace.service. Decrypts each workspace mnemonic with the user's
-//! ecc/kyber private keys (see [`crate::crypto::decrypt_workspace_key`]).
+//! ecc/kyber private keys (see [`internxt_core::crypto::decrypt_workspace_key`]).
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
-use crate::api::DriveApi;
+use internxt_core::api::DriveApi;
 use crate::auth;
-use crate::crypto;
+use internxt_core::crypto;
 use crate::drive_ops::{human_file_size, print_table};
-use crate::models::{Credentials, WorkspaceContext};
+use internxt_core::models::{Credentials, WorkspaceContext};
 use crate::output;
 
 /// `availableWorkspaces` entries from GET /workspaces/.

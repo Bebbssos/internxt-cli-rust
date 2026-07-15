@@ -40,10 +40,9 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, DuplexStream};
 use tokio::runtime::Handle as RtHandle;
 
 use super::MountConfig;
-use crate::api::DriveApi;
-use crate::commands;
-use crate::models::Credentials;
-use crate::network::NetworkApi;
+use internxt_core::api::DriveApi;
+use internxt_core::models::Credentials;
+use internxt_core::network::NetworkApi;
 use crate::serve::cache::FolderCache;
 use crate::serve::creds::SharedCreds;
 use crate::serve::tree::{self, FileItem, FolderItem};
@@ -152,7 +151,7 @@ impl ReadHandle {
             } else {
                 Some((start, size.saturating_sub(start)))
             };
-            if let Err(e) = commands::download_file_to_writer(
+            if let Err(e) = internxt_core::transfer::download_file_to_writer(
                 &net, &mnemonic, &bucket, &file_id, &mut writer, range,
             )
             .await
@@ -245,7 +244,7 @@ impl WriteHandle {
                 let net = NetworkApi::new(&self.net_user, &self.net_pass);
                 let mut f = self.file.lock().await;
                 f.seek(std::io::SeekFrom::Start(0)).await?;
-                commands::download_file_to_writer(
+                internxt_core::transfer::download_file_to_writer(
                     &net,
                     &self.mnemonic,
                     &self.base_bucket,
@@ -518,7 +517,7 @@ impl Inner {
         let file_id = if size == 0 {
             String::new()
         } else {
-            commands::upload_file_to_network(&net, &wh.bucket, &wh.mnemonic, &wh.temp_path, size, None)
+            internxt_core::transfer::upload_file_to_network(&net, &wh.bucket, &wh.mnemonic, &wh.temp_path, size, None)
                 .await?
         };
         let now = now_rfc3339();

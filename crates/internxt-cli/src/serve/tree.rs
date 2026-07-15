@@ -11,7 +11,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::cache::FolderCache;
-use crate::api::DriveApi;
+use internxt_core::api::DriveApi;
 
 /// A resolved Drive file.
 #[derive(Clone, Debug)]

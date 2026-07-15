@@ -9,7 +9,7 @@
 use anyhow::Result;
 
 use super::cache::FolderCache;
-use crate::api::DriveApi;
+use internxt_core::api::DriveApi;
 // Re-export the shared tree types/functions so existing `resource::…` references
 // throughout the webdav module keep resolving.
 pub use crate::serve::tree::{list_files, list_folders, resolve_folder, DriveItem, FolderItem};

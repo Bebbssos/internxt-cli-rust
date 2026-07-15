@@ -5,6 +5,24 @@
 use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+/// Adapts an indicatif [`ProgressBar`] to core's [`internxt_core::ProgressSink`],
+/// so the streaming transfer primitives can drive the terminal bar without
+/// depending on indicatif.
+struct BarSink(ProgressBar);
+
+impl internxt_core::ProgressSink for BarSink {
+    fn inc(&self, bytes: u64) {
+        self.0.inc(bytes);
+    }
+}
+
+/// Wrap a progress bar as a shared [`internxt_core::ProgressSink`] to hand to a
+/// core transfer. Clones the bar handle (cheap; shares the underlying state).
+pub fn bar_sink(pb: &ProgressBar) -> Arc<dyn internxt_core::ProgressSink> {
+    Arc::new(BarSink(pb.clone()))
+}
 
 static JSON: AtomicBool = AtomicBool::new(false);
 static NON_INTERACTIVE: AtomicBool = AtomicBool::new(false);

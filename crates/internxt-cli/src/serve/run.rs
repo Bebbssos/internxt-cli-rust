@@ -14,8 +14,8 @@ use anyhow::{anyhow, Result};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-use crate::api::DriveApi;
-use crate::models::Credentials;
+use internxt_core::api::DriveApi;
+use internxt_core::models::Credentials;
 use crate::serve::cache::FolderCache;
 use crate::serve::creds::{spawn_refresh, SharedCreds};
 

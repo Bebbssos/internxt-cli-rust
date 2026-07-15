@@ -1,0 +1,42 @@
+[package]
+name = "internxt-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "AGPL-3.0-or-later"
+description = "Internxt Drive engine: auth, crypto, Drive REST + streaming network transfers"
+repository = "https://github.com/Bebbssos/internxt-cli-rust"
+
+[lib]
+name = "internxt_core"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+hex = "0.4"
+base64 = "0.22"
+base32 = "0.5"
+rand = "0.10"
+futures-util = "0.3"
+bytes = "1"
+
+# crypto
+aes = "0.9"
+cbc = { version = "0.2", features = ["alloc"] }
+ctr = "0.10"
+aes-gcm = "0.10"
+pbkdf2 = "0.13"
+sha1 = "0.11"
+sha2 = "0.11"
+ripemd = "0.2"
+md-5 = "0.11"
+hmac = "0.13"
+cipher = "0.5"
+bip39 = "2"
+pgp = "0.19"
+safe_pqc_kyber = { version = "0.6", default-features = false, features = ["kyber512", "std"] }
+blake3 = "1"

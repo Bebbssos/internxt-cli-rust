@@ -1,34 +1,27 @@
 //! upload-file and download-file. Fully streaming — never holds a whole file in RAM.
 
 use anyhow::{anyhow, Result};
-use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use rand::RngExt;
-use sha2::{Digest, Sha256};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Instant, SystemTime};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::auth;
-use crate::config;
-use crate::crypto::{self, Ctr};
-use crate::network::{NetworkApi, PartRef};
-use crate::{api::DriveApi, models::DriveFileData};
+use internxt_core::api::DriveApi;
+use internxt_core::config;
+use internxt_core::crypto::{self, Ctr};
+use internxt_core::models::DriveFileData;
+use internxt_core::network::NetworkApi;
+use internxt_core::transfer::{
+    create_folder_with_retry, upload_file_to_network, upload_stream_to_network,
+};
 
-const MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
-const PART_SIZE: usize = 15 * 1024 * 1024; // 15MB
-const READ_CHUNK: usize = 1024 * 1024; // 1MB stream granularity
-const UPLOAD_CONCURRENCY: usize = 10;
 const MAX_CONCURRENT_FILE_UPLOADS: usize = 10;
-const FOLDER_CREATE_RETRIES: usize = 2;
-const RETRY_DELAYS_MS: [u64; 3] = [500, 1000, 2000];
 
 fn to_rfc3339(t: SystemTime) -> String {
     let dt: DateTime<Utc> = t.into();
@@ -80,8 +73,17 @@ pub async fn upload_file(
     if size > 0 {
         let net = NetworkApi::new(creds.net_user(), creds.net_pass());
         crate::output::status("Preparing network...");
-        file_id =
-            upload_file_to_network(&net, creds.bucket(), creds.mnemonic(), path, size, None).await?;
+        let pb = crate::output::progress_bar(size, "Uploading");
+        file_id = upload_file_to_network(
+            &net,
+            creds.bucket(),
+            creds.mnemonic(),
+            path,
+            size,
+            Some(crate::output::bar_sink(&pb)),
+        )
+        .await?;
+        pb.finish_and_clear();
     }
 
     let creation = to_rfc3339(meta.created().unwrap_or_else(|_| SystemTime::now()));
@@ -104,7 +106,7 @@ pub async fn upload_file(
 /// If `size_hint` is provided the body streams straight through (single-part, true
 /// streaming); otherwise stdin is spooled to a temp file to learn its length first.
 async fn upload_from_stdin(
-    creds: &crate::models::Credentials,
+    creds: &internxt_core::models::Credentials,
     name: Option<&str>,
     size_hint: Option<u64>,
     folder_uuid: &str,
@@ -128,15 +130,17 @@ async fn upload_from_stdin(
         Some(0) => (String::new(), 0),
         Some(sz) => {
             crate::output::status(&format!("Uploading {sz} bytes from stdin..."));
+            let pb = crate::output::progress_bar(sz, "Uploading");
             let id = upload_stream_to_network(
                 &net,
                 creds.bucket(),
                 creds.mnemonic(),
                 tokio::io::stdin(),
                 sz,
-                None,
+                Some(crate::output::bar_sink(&pb)),
             )
             .await?;
+            pb.finish_and_clear();
             (id, sz)
         }
         None => {
@@ -146,15 +150,17 @@ async fn upload_from_stdin(
                 (String::new(), 0)
             } else {
                 crate::output::status(&format!("Uploading {} bytes from stdin...", tmp.size));
+                let pb = crate::output::progress_bar(tmp.size, "Uploading");
                 let id = upload_file_to_network(
                     &net,
                     creds.bucket(),
                     creds.mnemonic(),
                     &tmp.path,
                     tmp.size,
-                    None,
+                    Some(crate::output::bar_sink(&pb)),
                 )
                 .await?;
+                pb.finish_and_clear();
                 (id, tmp.size)
             }
             // tmp dropped here -> temp file deleted
@@ -168,7 +174,7 @@ async fn upload_from_stdin(
 /// Create the drive file entry and emit the success line. Shared by both upload paths.
 #[allow(clippy::too_many_arguments)]
 async fn finish_file_entry(
-    creds: &crate::models::Credentials,
+    creds: &internxt_core::models::Credentials,
     stem: &str,
     file_type: &str,
     size: u64,
@@ -232,225 +238,6 @@ async fn spool_stdin_to_temp() -> Result<TempSpool> {
     file.flush().await?;
     spool.size = size;
     Ok(spool)
-}
-
-/// Encrypt + upload a file's bytes to the network, returning the network file id.
-/// Picks single-part or multipart based on size. Shared by upload-file / upload-folder.
-/// `pb` = an optional shared progress bar to report byte progress into (used by
-/// folder uploads to share one overall bar). When `None`, a per-transfer bar is
-/// created and finished internally.
-pub async fn upload_file_to_network(
-    net: &NetworkApi,
-    bucket: &str,
-    mnemonic: &str,
-    path: &Path,
-    size: u64,
-    pb: Option<&indicatif::ProgressBar>,
-) -> Result<String> {
-    let mut index = [0u8; 32];
-    rand::rng().fill(&mut index);
-    let iv = index[0..16].to_vec();
-    let key = crypto::generate_file_key(mnemonic, bucket, &index)?;
-
-    if size > MULTIPART_THRESHOLD {
-        upload_multipart(net, bucket, size, path, &key, &iv, &index, pb).await
-    } else {
-        let file = tokio::fs::File::open(path).await?;
-        upload_single(net, bucket, size, file, &key, &iv, &index, pb).await
-    }
-}
-
-/// Encrypt + upload `size` bytes from an arbitrary reader (e.g. stdin), returning
-/// the network file id. Always single-part: the source isn't seekable, so multipart
-/// (which re-slices a buffered stream) doesn't apply — the size must be known.
-pub async fn upload_stream_to_network<R>(
-    net: &NetworkApi,
-    bucket: &str,
-    mnemonic: &str,
-    reader: R,
-    size: u64,
-    pb: Option<&indicatif::ProgressBar>,
-) -> Result<String>
-where
-    R: AsyncRead + Unpin + Send + 'static,
-{
-    let mut index = [0u8; 32];
-    rand::rng().fill(&mut index);
-    let iv = index[0..16].to_vec();
-    let key = crypto::generate_file_key(mnemonic, bucket, &index)?;
-    upload_single(net, bucket, size, reader, &key, &iv, &index, pb).await
-}
-
-/// Single presigned-URL upload, body streamed straight from a reader through CTR.
-async fn upload_single<R>(
-    net: &NetworkApi,
-    bucket: &str,
-    size: u64,
-    reader: R,
-    key: &[u8; 32],
-    iv: &[u8],
-    index: &[u8],
-    pb: Option<&indicatif::ProgressBar>,
-) -> Result<String>
-where
-    R: AsyncRead + Unpin + Send + 'static,
-{
-    let start = net.start_upload(bucket, size, 1).await?;
-    let slot = start
-        .uploads
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("no upload slot returned"))?;
-    let url = slot.url.ok_or_else(|| anyhow!("no upload url returned"))?;
-
-    let hasher = Arc::new(Mutex::new(Sha256::new()));
-    // Own a bar only if the caller didn't supply a shared one.
-    let owned_pb = pb.is_none().then(|| crate::output::progress_bar(size, "Uploading"));
-    let pb = pb.unwrap_or_else(|| owned_pb.as_ref().unwrap());
-
-    // Streaming state moved into the body producer.
-    struct St<R> {
-        reader: R,
-        ctr: Ctr,
-        hasher: Arc<Mutex<Sha256>>,
-        pb: indicatif::ProgressBar,
-    }
-    let st = St {
-        reader,
-        ctr: Ctr::new(key, iv),
-        hasher: hasher.clone(),
-        pb: pb.clone(),
-    };
-
-    let body = futures_util::stream::unfold(st, |mut st| async move {
-        let mut buf = vec![0u8; READ_CHUNK];
-        match st.reader.read(&mut buf).await {
-            Ok(0) => None,
-            Ok(n) => {
-                buf.truncate(n);
-                st.ctr.apply(&mut buf);
-                st.hasher.lock().unwrap().update(&buf);
-                st.pb.inc(n as u64);
-                Some((Ok::<Bytes, std::io::Error>(Bytes::from(buf)), st))
-            }
-            Err(e) => Some((Err(e), st)),
-        }
-    });
-
-    net.put_stream(&url, size, body).await?;
-    if let Some(p) = &owned_pb {
-        p.finish_and_clear();
-    }
-
-    let digest = hasher.lock().unwrap().clone().finalize();
-    let hash = hex::encode(crypto::ripemd160(&digest));
-
-    let finish = net
-        .finish_upload(bucket, &hex::encode(index), &hash, &slot.uuid)
-        .await?;
-    Ok(finish.id)
-}
-
-/// Multipart upload: continuous CTR stream sliced into 15MB parts, PUT concurrently.
-async fn upload_multipart(
-    net: &NetworkApi,
-    bucket: &str,
-    size: u64,
-    path: &Path,
-    key: &[u8; 32],
-    iv: &[u8],
-    index: &[u8],
-    pb: Option<&indicatif::ProgressBar>,
-) -> Result<String> {
-    let num_parts = size.div_ceil(PART_SIZE as u64) as u32;
-    let start = net.start_upload(bucket, size, num_parts).await?;
-    let slot = start
-        .uploads
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("no upload slot returned"))?;
-    let urls = slot.urls.ok_or_else(|| anyhow!("no upload urls returned"))?;
-    let upload_id = slot
-        .upload_id
-        .ok_or_else(|| anyhow!("no UploadId returned"))?;
-
-    let mut hasher = Sha256::new();
-    let mut ctr = Ctr::new(key, iv);
-    let mut file = tokio::fs::File::open(path).await?;
-
-    let sem = Arc::new(tokio::sync::Semaphore::new(UPLOAD_CONCURRENCY));
-    let owned_pb = pb.is_none().then(|| crate::output::progress_bar(size, "Uploading"));
-    let pb = pb.unwrap_or_else(|| owned_pb.as_ref().unwrap());
-    let mut handles = Vec::new();
-    let mut part_buf: Vec<u8> = Vec::with_capacity(PART_SIZE);
-    let mut part_number: u32 = 1;
-    let mut read_buf = vec![0u8; READ_CHUNK];
-
-    loop {
-        let n = file.read(&mut read_buf).await?;
-        if n == 0 {
-            break;
-        }
-        let mut chunk = read_buf[..n].to_vec();
-        ctr.apply(&mut chunk);
-        hasher.update(&chunk);
-        part_buf.extend_from_slice(&chunk);
-
-        while part_buf.len() >= PART_SIZE {
-            let rest = part_buf.split_off(PART_SIZE);
-            let body = std::mem::replace(&mut part_buf, rest);
-            dispatch_part(net, &urls, &sem, &pb, &mut handles, part_number, body).await?;
-            part_number += 1;
-        }
-    }
-    if !part_buf.is_empty() {
-        let body = std::mem::take(&mut part_buf);
-        dispatch_part(net, &urls, &sem, &pb, &mut handles, part_number, body).await?;
-    }
-
-    let mut parts = Vec::with_capacity(handles.len());
-    for h in handles {
-        let p = h.await.map_err(|e| anyhow!("part task panicked: {e}"))??;
-        parts.push(p);
-    }
-    parts.sort_by_key(|p| p.part_number);
-    if let Some(p) = &owned_pb {
-        p.finish_and_clear();
-    }
-
-    let digest = hasher.finalize();
-    let hash = hex::encode(crypto::ripemd160(&digest));
-
-    let finish = net
-        .finish_multipart_upload(bucket, &hex::encode(index), &hash, &slot.uuid, &upload_id, &parts)
-        .await?;
-    Ok(finish.id)
-}
-
-async fn dispatch_part(
-    net: &NetworkApi,
-    urls: &[String],
-    sem: &Arc<tokio::sync::Semaphore>,
-    pb: &indicatif::ProgressBar,
-    handles: &mut Vec<tokio::task::JoinHandle<Result<PartRef>>>,
-    part_number: u32,
-    body: Vec<u8>,
-) -> Result<()> {
-    let url = urls
-        .get((part_number - 1) as usize)
-        .ok_or_else(|| anyhow!("missing presigned url for part {part_number}"))?
-        .clone();
-    let permit = sem.clone().acquire_owned().await.unwrap();
-    let net = net.clone();
-    let pb = pb.clone();
-    let len = body.len() as u64;
-    handles.push(tokio::spawn(async move {
-        let _permit = permit;
-        let etag = net.put_part(&url, body).await?;
-        pb.inc(len);
-        Ok(PartRef { part_number, etag })
-    }));
-    Ok(())
 }
 
 /// Download + decrypt a file by uuid. Writes to a file under `directory` (default),
@@ -572,126 +359,6 @@ pub async fn download_file(
     Ok(())
 }
 
-/// Stream a network file's decrypted bytes into an arbitrary writer. Reusable
-/// core behind `download-file` and the WebDAV GET handler.
-///
-/// `range` optionally restricts output to a byte window `(start, len)`: the CTR
-/// stream is still decrypted from the beginning (CTR is continuous), but bytes
-/// before `start` are discarded and output stops once `len` bytes are written.
-/// No progress bar / status output — the caller owns that.
-pub async fn download_file_to_writer<W>(
-    net: &NetworkApi,
-    mnemonic: &str,
-    bucket: &str,
-    file_id: &str,
-    out: &mut W,
-    range: Option<(u64, u64)>,
-) -> Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    let links = net.get_download_links(bucket, file_id).await?;
-    if matches!(links.version, None | Some(1)) {
-        return Err(anyhow!("File version 1 not supported"));
-    }
-
-    let index = hex::decode(&links.index)?;
-    let iv = &index[0..16];
-    let key = crypto::generate_file_key(mnemonic, bucket, &index)?;
-
-    let mut shards = links.shards.clone();
-    shards.sort_by_key(|s| s.index);
-
-    let mut ctr = Ctr::new(&key, iv);
-
-    let (start, end) = match range {
-        // Exclusive byte window `[start, end)`, clamped to the file size.
-        Some((start, len)) => {
-            let start = start.min(links.size);
-            (start, start.saturating_add(len).min(links.size))
-        }
-        // Whole file.
-        None => (0, links.size),
-    };
-    if end <= start {
-        out.flush().await?;
-        return Ok(());
-    }
-
-    // The whole file is one continuous CTR stream sliced into shards (ordered by
-    // `index`). With per-shard sizes we can seek the keystream to `start`, skip
-    // shards entirely below the window, and byte-range the boundary shards over
-    // HTTP — so a partial read only fetches the covered bytes. A single-shard
-    // file needs no per-shard size (the shard spans the whole file); a
-    // multi-shard file whose sizes the API omitted falls back to decrypting
-    // from byte 0 and discarding the prefix (correct, but re-fetches it).
-    let sizes_known = shards.len() == 1 || shards.iter().all(|s| s.size > 0);
-
-    if sizes_known {
-        ctr.seek(start);
-        let mut base: u64 = 0;
-        for shard in &shards {
-            let ssize = if shards.len() == 1 { links.size } else { shard.size };
-            let shard_start = base;
-            let shard_end = base + ssize; // exclusive
-            base = shard_end;
-            if shard_end <= start {
-                continue; // entirely before the window
-            }
-            if shard_start >= end {
-                break; // entirely after the window
-            }
-            let ov_start = start.max(shard_start);
-            let ov_end = end.min(shard_end); // exclusive
-            let local_start = ov_start - shard_start;
-            let local_end_incl = ov_end - shard_start - 1; // inclusive, S3 semantics
-            let whole = local_start == 0 && ov_end == shard_end;
-            let resp = if whole {
-                net.download_shard_stream(&shard.url).await?
-            } else {
-                net.download_shard_range_stream(&shard.url, local_start, local_end_incl)
-                    .await?
-            };
-            let mut stream = resp.bytes_stream();
-            while let Some(chunk) = stream.next().await {
-                let mut bytes = chunk?.to_vec();
-                ctr.apply(&mut bytes);
-                out.write_all(&bytes).await?;
-            }
-        }
-    } else {
-        // Fallback: multi-shard file with unknown sizes. Decrypt continuously
-        // from the start and skip the prefix bytes before `start`.
-        let mut to_skip = start;
-        let mut remaining = end - start;
-        'shards: for shard in &shards {
-            let resp = net.download_shard_stream(&shard.url).await?;
-            let mut stream = resp.bytes_stream();
-            while let Some(chunk) = stream.next().await {
-                let mut bytes = chunk?.to_vec();
-                ctr.apply(&mut bytes);
-                let mut slice: &[u8] = &bytes;
-                if to_skip > 0 {
-                    let drop = (to_skip as usize).min(slice.len());
-                    slice = &slice[drop..];
-                    to_skip -= drop as u64;
-                }
-                let take = (remaining as usize).min(slice.len());
-                slice = &slice[..take];
-                remaining -= take as u64;
-                if !slice.is_empty() {
-                    out.write_all(slice).await?;
-                }
-                if remaining == 0 {
-                    break 'shards;
-                }
-            }
-        }
-    }
-    out.flush().await?;
-    Ok(())
-}
-
 // ---- upload-folder ----
 
 /// One scanned filesystem entry. `rel` is relative to the parent of the upload root,
@@ -771,35 +438,6 @@ fn scan_dir(
     0
 }
 
-/// Create a folder, retrying transient failures; returns None if it already exists.
-pub(crate) async fn create_folder_with_retry(
-    api: &DriveApi,
-    token: &str,
-    name: &str,
-    parent_uuid: &str,
-) -> Result<Option<String>> {
-    for attempt in 0..=FOLDER_CREATE_RETRIES {
-        match api.create_folder(token, name, parent_uuid).await {
-            Ok(v) => {
-                let uuid = v["uuid"].as_str().unwrap_or_default().to_string();
-                return Ok(Some(uuid));
-            }
-            Err(e) => {
-                if e.to_string().to_lowercase().contains("already exists") {
-                    return Ok(None);
-                }
-                if attempt < FOLDER_CREATE_RETRIES {
-                    tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAYS_MS[attempt]))
-                        .await;
-                } else {
-                    return Err(e);
-                }
-            }
-        }
-    }
-    Ok(None)
-}
-
 /// Network-upload + create-entry for a single scanned file.
 async fn upload_one_file(
     net: &NetworkApi,
@@ -822,7 +460,15 @@ async fn upload_one_file(
 
     let mut file_id = String::new();
     if size > 0 {
-        file_id = upload_file_to_network(net, bucket, mnemonic, &file.abs, size, Some(pb)).await?;
+        file_id = upload_file_to_network(
+            net,
+            bucket,
+            mnemonic,
+            &file.abs,
+            size,
+            Some(crate::output::bar_sink(pb)),
+        )
+        .await?;
     }
 
     let creation = to_rfc3339(meta.created().unwrap_or_else(|_| SystemTime::now()));

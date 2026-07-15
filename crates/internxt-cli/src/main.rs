@@ -1,13 +1,8 @@
-mod api;
 mod auth;
 mod commands;
-mod config;
-mod crypto;
 mod drive_ops;
 #[cfg(all(unix, feature = "fuse"))]
 mod fuse;
-mod models;
-mod network;
 mod output;
 #[cfg(any(feature = "webdav", feature = "fuse"))]
 mod serve;

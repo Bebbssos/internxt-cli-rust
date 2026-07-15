@@ -19,9 +19,8 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use super::resource::{self, DriveItem, FolderItem, Resource};
 use super::xml;
 use super::{log, now_rfc3339, status_response, AppError, Ctx};
-use crate::api::DriveApi;
-use crate::commands;
-use crate::network::NetworkApi;
+use internxt_core::api::DriveApi;
+use internxt_core::network::NetworkApi;
 
 /// Split a filename into (stem, extension-without-dot).
 fn split_name(name: &str) -> (String, String) {
@@ -252,7 +251,7 @@ pub async fn get(ctx: &Ctx, req: Request, head_only: bool) -> Result<Response, A
     let (mut writer, reader) = tokio::io::duplex(256 * 1024);
     tokio::spawn(async move {
         if let Err(e) =
-            commands::download_file_to_writer(&net, &mnemonic, &bucket, &file_id, &mut writer, range)
+            internxt_core::transfer::download_file_to_writer(&net, &mnemonic, &bucket, &file_id, &mut writer, range)
                 .await
         {
             log(&format!("[GET] download error: {e:#}"));
@@ -383,7 +382,7 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         if tmp.size == 0 {
             (String::new(), 0)
         } else {
-            let id = commands::upload_file_to_network(
+            let id = internxt_core::transfer::upload_file_to_network(
                 &net, &bucket, mnemonic, &tmp.path, tmp.size, None,
             )
             .await?;
@@ -398,7 +397,7 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
                     .into_data_stream()
                     .map_err(std::io::Error::other);
                 let reader = StreamReader::new(stream);
-                let id = commands::upload_stream_to_network(&net, &bucket, mnemonic, reader, sz, None)
+                let id = internxt_core::transfer::upload_stream_to_network(&net, &bucket, mnemonic, reader, sz, None)
                     .await?;
                 (id, sz)
             }
@@ -408,7 +407,7 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
                 if tmp.size == 0 {
                     (String::new(), 0)
                 } else {
-                    let id = commands::upload_file_to_network(
+                    let id = internxt_core::transfer::upload_file_to_network(
                         &net, &bucket, mnemonic, &tmp.path, tmp.size, None,
                     )
                     .await?;

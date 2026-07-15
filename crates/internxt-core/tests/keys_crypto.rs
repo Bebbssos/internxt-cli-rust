@@ -3,21 +3,14 @@
 //!
 //! Regenerate vectors with:  NODE_PATH=og/node_modules node scripts/ref-keys.js > scripts/ref-keys.json
 //! The test is skipped (passes) when the vector file is absent, so `cargo test`
-//! works without `og/` fetched. Internal modules are exercised via a tiny shim
-//! binary's public API is not available here, so we re-test through the public
-//! `internxt` crate path is not exported; instead we duplicate nothing and rely
-//! on the integration surface below.
+//! works without `og/` fetched. Exercised through the public `internxt_core` API.
 
+use internxt_core::crypto;
 use std::path::Path;
 
-// The crate is a binary; expose crypto by including the source module directly.
-#[path = "../src/config.rs"]
-mod config;
-#[path = "../src/crypto.rs"]
-mod crypto;
-
 fn load_vectors() -> Option<serde_json::Value> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/ref-keys.json");
+    // Vectors live at the repo root (../../ from this crate's manifest dir).
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/ref-keys.json");
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }

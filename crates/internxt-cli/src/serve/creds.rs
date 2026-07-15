@@ -8,7 +8,7 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use crate::models::Credentials;
+use internxt_core::models::Credentials;
 
 /// How often the background task re-checks / refreshes the session token. The
 /// underlying `get_auth_details` only hits the network when the token is within

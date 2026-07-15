@@ -1771,50 +1771,66 @@ dependencies = [
 ]
 
 [[package]]
-name = "internxt"
+name = "internxt-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-server",
+ "base64",
+ "bytes",
+ "chrono",
+ "clap",
+ "dirs",
+ "filetime",
+ "fuser",
+ "futures-util",
+ "hex",
+ "indicatif",
+ "internxt-core",
+ "libc",
+ "mime_guess",
+ "open",
+ "rand 0.10.1",
+ "rcgen",
+ "rpassword",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "internxt-core"
 version = "0.1.0"
 dependencies = [
  "aes 0.9.1",
  "aes-gcm",
  "anyhow",
- "axum",
- "axum-server",
  "base32",
  "base64",
  "bip39",
  "blake3",
  "bytes",
  "cbc",
- "chrono",
  "cipher 0.5.2",
- "clap",
  "ctr 0.10.1",
- "dirs",
- "filetime",
- "fuser",
  "futures-util",
  "hex",
  "hmac 0.13.0",
- "indicatif",
- "libc",
  "md-5 0.11.0",
- "mime_guess",
- "open",
  "pbkdf2",
  "pgp",
  "rand 0.10.1",
- "rcgen",
  "reqwest",
  "ripemd 0.2.0",
- "rpassword",
- "rustls-pemfile",
  "safe_pqc_kyber",
  "serde",
  "serde_json",
  "sha1 0.11.0",
  "sha2 0.11.0",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]

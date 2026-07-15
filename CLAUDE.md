@@ -51,31 +51,54 @@ those to find upstream changes worth porting.
 - Workspaces (list/use/unset, creds, folder/trash routing) → `og/cli/src/commands/workspaces-*.ts`, `og/cli/src/services/drive/workspace.service.ts`, `og/sdk/src/workspaces/`
 - Workspace mnemonic decrypt (PGP ecc + Kyber512 hybrid + blake3) → `og/cli/src/services/keys.service.ts`, `og/cli/src/utils/crypto.utils.ts`
 
-## Rust layout
+## Workspace layout
+
+Cargo **workspace** with two crates (root `Cargo.toml` = `[workspace]`, `members =
+crates/internxt-core`, `crates/internxt-cli`; the bin `internxt` is built by the cli crate):
+
+- **`crates/internxt-core`** (lib `internxt_core`) — the Internxt Drive **engine**:
+  *how Internxt works* (endpoints, payloads, encryption) as a protocol-agnostic library.
+  No terminal output, no clap, no indicatif, no prompts, no browser — a CLI, a
+  WebDAV/FUSE server or a future GUI all build on it without touching API/crypto details.
+- **`crates/internxt-cli`** (bin `internxt`) — the **front-end**: clap dispatch, the
+  upload/download/folder-upload UX, drive-ops/workspaces command wrappers, sync, and the
+  WebDAV + FUSE + serve backends. Depends on `internxt-core`; supplies everything human-facing.
+
+**The core↔front-end seams** (core deliberately leaves these to the caller):
+- byte progress → the [`ProgressSink`] trait (`inc(bytes)`); front-end wraps indicatif via
+  `output::bar_sink`. Transfer primitives take `Option<Arc<dyn ProgressSink>>` (`None` = discard).
+- `auth::login`'s **2FA code** → injected `on_need_2fa` closure (cli prompts / errors in `-x`).
+- `sso::login`'s **browser-open + URL display** → injected `on_login_url` closure (cli prints + `open`s).
+- `auth::get_auth_details`'s best-effort **refresh warnings** → injected `on_warn` closure.
+- cli keeps thin shim modules `auth`/`sso` (`crates/internxt-cli/src/{auth,sso}.rs`) that wrap
+  the core fns with these callbacks, so the rest of the cli calls `auth::*` / `sso::*` unchanged.
 
 | File | Responsibility |
 |---|---|
-| `src/main.rs` | clap CLI dispatch (all subcommands) |
-| `src/config.rs` | API URLs + app constants (public; env-overridable), paths |
-| `src/crypto.rs` | passToHash, CryptoJS AES-CBC, lib AES-GCM, GenerateFileKey, AES-256-CTR, hashes, workspace-key decrypt (PGP/Kyber512/blake3) |
-| `src/auth.rs` | legacy login flow (+ ecc/kyber key decrypt), SSO credential build, credential save/read, token + workspace-cred refresh |
-| `src/sso.rs` | web-based SSO login (feature `sso`): local axum callback server + browser open, universal-link flow |
-| `src/api.rs` | Drive REST client (`DRIVE_NEW_API_URL`); workspace-aware via `for_credentials` (`x-internxt-workspace` header + `/workspaces/{id}/…` routing) |
-| `src/network.rs` | bridge/network client (`NETWORK_URL`), streaming PUT/GET |
-| `src/commands.rs` | upload-file/download-file/upload-folder orchestration (streaming + multipart + recursive) |
-| `src/sync.rs` | sync-up/sync-down: one-way folder reconcile (local↔remote tree diff, size+mtime change detection, optional `--delete`) |
-| `src/serve/` | code shared by the serve backends (webdav + fuse): `run.rs` (the `serve` **orchestrator**: parses the comma-list of protocols, builds one `Shared` bundle — `SharedCreds`+cache+global upload semaphore+root — fetched/created once, spawns each backend as a task, and owns the single Ctrl-C that shuts them all down via a `watch` flag), `tree.rs` (protocol-agnostic Drive-tree walk: `FileItem`/`FolderItem`/`DriveItem`, `list_folders`/`list_files`/`resolve_folder`), `cache.rs` (`FolderCache` TTL listing cache), `creds.rs` (`SharedCreds` + hourly token refresh) |
-| `src/webdav/` | WebDAV server (feature `webdav`): `mod.rs` (axum server + dispatch + auth + TLS), `handlers.rs` (method handlers), `resource.rs` (WebDAV URL parsing + `resolve_item`; re-exports `serve::tree`), `xml.rs` (response XML) |
-| `src/fuse/` | FUSE mount (feature `fuse`, Unix only): `mod.rs` (`MountConfig` + `fuser::spawn_mount2` + Ctrl-C unmount), `fs.rs` (`fuser::Filesystem` impl: inode table, sync-callback→tokio bridge, streaming reads, temp-file write buffering) |
-| `src/drive_ops.rs` | logout, whoami, list, create/move/rename/trash/delete folder+file |
-| `src/workspaces.rs` | workspaces list/use/unset; decrypts workspace mnemonic |
-| `src/output.rs` | global `--json` vs human output switch (`emit`/`status`/`emit_error`) |
-| `src/models.rs` | serde DTOs; `Credentials` workspace/keys + net/bucket/mnemonic helpers |
+| **core** `config.rs` | API URLs + app constants (public; env-overridable), paths |
+| **core** `crypto.rs` | passToHash, CryptoJS AES-CBC, lib AES-GCM, GenerateFileKey, AES-256-CTR, hashes, workspace-key decrypt (PGP/Kyber512/blake3) |
+| **core** `auth.rs` | legacy login flow (+ ecc/kyber key decrypt; `on_need_2fa` callback), SSO credential build, credential save/read, token + workspace-cred refresh (`on_warn` callback) |
+| **core** `sso.rs` | web-based SSO universal-link **flow logic** (no axum/tokio-net; wasm-portable): build login URL, decode callback, build creds. Local callback transport behind the `SsoCallbackServer` trait; `on_login_url` callback (native axum server + browser-open live in cli) |
+| **core** `api.rs` | Drive REST client (`DRIVE_NEW_API_URL`); workspace-aware via `for_credentials` (`x-internxt-workspace` header + `/workspaces/{id}/…` routing) |
+| **core** `network.rs` | bridge/network client (`NETWORK_URL`), streaming PUT/GET |
+| **core** `transfer.rs` | streaming network transfer primitives: `upload_file_to_network`, `upload_stream_to_network`, `download_file_to_writer` (ranged), `create_folder_with_retry`; single-part + multipart; `ProgressSink` progress |
+| **core** `progress.rs` | `ProgressSink` trait + `noop_sink` (byte-progress seam) |
+| **core** `models.rs` | serde DTOs; `Credentials` workspace/keys + net/bucket/mnemonic helpers |
+| **cli** `main.rs` | clap CLI dispatch (all subcommands) |
+| **cli** `auth.rs` / `sso.rs` | thin shims over core auth/sso, injecting 2FA prompt / browser-open / warnings |
+| **cli** `commands.rs` | upload-file/download-file/upload-folder orchestration (arg handling, progress bars, `--json` output) on top of `internxt_core::transfer` |
+| **cli** `sync.rs` | sync-up/sync-down: one-way folder reconcile (local↔remote tree diff, size+mtime change detection, optional `--delete`) |
+| **cli** `serve/` | code shared by the serve backends (webdav + fuse): `run.rs` (the `serve` **orchestrator**: parses the comma-list of protocols, builds one `Shared` bundle — `SharedCreds`+cache+global upload semaphore+root — fetched/created once, spawns each backend as a task, and owns the single Ctrl-C that shuts them all down via a `watch` flag), `tree.rs` (protocol-agnostic Drive-tree walk: `FileItem`/`FolderItem`/`DriveItem`, `list_folders`/`list_files`/`resolve_folder`), `cache.rs` (`FolderCache` TTL listing cache), `creds.rs` (`SharedCreds` + hourly token refresh) |
+| **cli** `webdav/` | WebDAV server (feature `webdav`): `mod.rs` (axum server + dispatch + auth + TLS), `handlers.rs` (method handlers), `resource.rs` (WebDAV URL parsing + `resolve_item`; re-exports `serve::tree`), `xml.rs` (response XML) |
+| **cli** `fuse/` | FUSE mount (feature `fuse`, Unix only): `mod.rs` (`MountConfig` + `fuser::spawn_mount2` + Ctrl-C unmount), `fs.rs` (`fuser::Filesystem` impl: inode table, sync-callback→tokio bridge, streaming reads, temp-file write buffering) |
+| **cli** `drive_ops.rs` | logout, whoami, list, create/move/rename/trash/delete folder+file |
+| **cli** `workspaces.rs` | workspaces list/use/unset; decrypts workspace mnemonic (via `internxt_core::crypto`) |
+| **cli** `output.rs` | global `--json` vs human output switch (`emit`/`status`/`emit_error`); `bar_sink` (indicatif→`ProgressSink` adapter) |
 
 ## Key facts / decisions
 
-- **Crypto is byte-for-byte compatible with node.** Verified by tests in `src/crypto.rs`
-  against `scripts/ref.js`, plus `tests/keys_crypto.rs` against `scripts/ref-keys.json`
+- **Crypto is byte-for-byte compatible with node.** Verified by tests in `crates/internxt-core/src/crypto.rs`
+  against `scripts/ref.js`, plus `crates/internxt-core/tests/keys_crypto.rs` against `scripts/ref-keys.json`
   (workspace key crypto: PGP ecc + Kyber512 + blake3). Run `cargo test`.
   **If you touch crypto, re-run these.** Regenerate the keys vectors with
   `NODE_PATH=og/node_modules node scripts/ref-keys.js > scripts/ref-keys.json`
@@ -86,12 +109,15 @@ those to find upstream changes worth porting.
 - **Subcommands**: `login` = SSO when built with the `sso` feature (default) else legacy;
   `login-legacy` = always email/password; `login-sso` = always SSO (errors if built
   `--no-default-features`). aliases `login:legacy` / `login:sso`.
-- **SSO login** (`src/sso.rs`, feature `sso`): binds a local axum server on `0.0.0.0:port`
-  (random port if unset), opens the browser at `{DRIVE_WEB_URL}/login?universalLink=true&redirectUri={b64}`,
-  waits for the `/callback` GET carrying base64 `mnemonic`/`newToken`/`privateKey`,
-  redirects the browser to `auth-link-ok`/`auth-link-error`, then builds creds via
-  `refreshUserCredentials` (`GET /users/cli/refresh`). `--host` sets the address the
-  browser uses (for cross-device login); `--port` fixes the callback port. **Kyber key is
+- **SSO login** (cli feature `sso`): the **flow logic** lives in `crates/internxt-core/src/sso.rs`
+  (no axum/tokio-net — wasm-portable): it builds `{DRIVE_WEB_URL}/login?universalLink=true&redirectUri={b64}`,
+  decodes the callback's base64 `mnemonic`/`newToken`/`privateKey`, and builds creds via
+  `refreshUserCredentials` (`GET /users/cli/refresh`). The **local callback transport** is
+  behind the core `SsoCallbackServer` trait (`redirect_uri()` + async `wait() -> SsoCallback`);
+  the **native impl** — a temporary local axum server on `0.0.0.0:port` (random port if unset),
+  serving `/callback` and redirecting the browser to `auth-link-ok`/`auth-link-error` — plus the
+  browser-open live in `crates/internxt-cli/src/sso.rs`. `--host` sets the address the browser
+  uses (for cross-device login); `--port` fixes the callback port. **Kyber key is
   dropped in SSO** (link never carries it, refresh returns it encrypted, no password to
   decrypt) — ecc-only workspaces work; hybrid-Kyber workspaces need `login-legacy`.
 - **Workspaces**: `workspaces use` decrypts the workspace mnemonic
@@ -116,7 +142,7 @@ those to find upstream changes worth porting.
   public per-client constants from the upstream `.env.template`, not user data.
   `og/` and `target/` are git-ignored.
 
-- **serve orchestration** (`src/serve/run.rs`): `serve` takes a **comma-separated
+- **serve orchestration** (`crates/internxt-cli/src/serve/run.rs`): `serve` takes a **comma-separated
   positional protocol list** (`serve webdav`, `serve webdav,fuse`) — *not* a clap
   subcommand — so several backends run in one foreground process. **Shared** knobs are
   bare flags (`-i/--folder-uuid`, `--cache-ttl`/`--no-cache`, `-d/--delete-permanently`,
@@ -132,7 +158,7 @@ those to find upstream changes worth porting.
   Ctrl-C. The top-level `mount` command is a thin wrapper that calls the same orchestrator
   with a single-`fuse` protocol list. Unknown / not-yet-implemented (`smb`/`sftp`) / feature-off
   protocols in the list error at parse time.
-- **WebDAV** (`src/webdav/`, feature `webdav`, default-on): a **foreground** WebDAV
+- **WebDAV** (`crates/internxt-cli/src/webdav/`, feature `webdav`, default-on): a **foreground** WebDAV
   backend under `serve` (`serve webdav`, runs until Ctrl-C) — deliberately *not* og's pm2
   daemon + `webdav-config`. axum `Router::fallback` catches all methods (incl. custom
   verbs PROPFIND/MKCOL/MOVE/LOCK/…) and dispatches by `req.method()`. Path→item
@@ -188,7 +214,7 @@ those to find upstream changes worth porting.
   snapshots via `ctx.creds()` — so a long-running server survives token expiry.
   `webdav-config` / `webdav start|stop|status` names are left free for a future daemon mode.
 
-- **FUSE mount** (`src/fuse/`, feature `fuse`, default-on, **Unix only**): a **foreground**
+- **FUSE mount** (`crates/internxt-cli/src/fuse/`, feature `fuse`, default-on, **Unix only**): a **foreground**
   `mount <MOUNTPOINT>` command (runs until Ctrl-C, then unmounts) that exposes the Drive as
   a local **read-write** filesystem via the `fuser` crate. `fuse` is default-on but declared
   under `[target.'cfg(unix)'.dependencies]` and all code is gated `#[cfg(all(unix, feature =
@@ -262,7 +288,7 @@ target/release/internxt mount ~/drive -i <folder-uuid>       # mount a subfolder
 - Match the node CLI's observable behaviour (endpoints, payloads, file locations) so the
   two are interchangeable. When in doubt, read `og/` and mirror it.
 - Keep transfers streaming — never read a whole file into memory.
-- Endpoints/constants belong in `src/config.rs`, env-overridable.
+- Endpoints/constants belong in `crates/internxt-core/src/config.rs`, env-overridable.
 
 ## License
 

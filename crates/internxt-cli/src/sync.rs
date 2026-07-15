@@ -18,12 +18,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
 
-use crate::api::DriveApi;
+use internxt_core::api::DriveApi;
 use crate::auth;
-use crate::commands::{create_folder_with_retry, upload_file_to_network};
-use crate::crypto::{self, Ctr};
-use crate::models::Credentials;
-use crate::network::NetworkApi;
+use internxt_core::transfer::{create_folder_with_retry, upload_file_to_network};
+use internxt_core::crypto::{self, Ctr};
+use internxt_core::models::Credentials;
+use internxt_core::network::NetworkApi;
 use crate::output;
 
 /// Files whose mtimes differ by more than this many seconds are "changed"
@@ -565,9 +565,15 @@ async fn upload_one(
 
     let mut file_id = String::new();
     if size > 0 {
-        file_id =
-            upload_file_to_network(net, creds.bucket(), creds.mnemonic(), abs, size, Some(pb))
-                .await?;
+        file_id = upload_file_to_network(
+            net,
+            creds.bucket(),
+            creds.mnemonic(),
+            abs,
+            size,
+            Some(crate::output::bar_sink(pb)),
+        )
+        .await?;
     }
     api.create_file_entry(
         &creds.token,
