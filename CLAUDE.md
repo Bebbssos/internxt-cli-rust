@@ -69,23 +69,33 @@ crates/internxt-core`, `crates/internxt-cli`; the bin `internxt` is built by the
   `output::bar_sink`. Transfer primitives take `Option<Arc<dyn ProgressSink>>` (`None` = discard).
 - `auth::login`'s **2FA code** → injected `on_need_2fa` closure (cli prompts / errors in `-x`).
 - `sso::login`'s **browser-open + URL display** → injected `on_login_url` closure (cli prints + `open`s).
-- `auth::get_auth_details`'s best-effort **refresh warnings** → injected `on_warn` closure.
+- token-refresh best-effort **warnings** → injected `on_warn` closure on `auth::refresh_credentials`.
+- **credential persistence** → entirely cli. Core `auth::refresh_credentials(creds, on_warn)` is
+  pure (takes creds, returns refreshed creds + a `changed` flag, no fs). cli `auth.rs` owns the
+  file (`~/.internxt-cli/.inxtcli`, CryptoJS-AES via core `crypto::{encrypt,decrypt}_text`),
+  `read`/`save`/path helpers, and the read→refresh→save-if-changed `get_auth_details`.
+- **filesystem/native transfers** → core `fs` feature (default on): the path-based
+  `upload_file_to_network` / multipart / `create_folder_with_retry` (`tokio::fs`/`spawn`/`time`).
+  Building core `--no-default-features` leaves only the portable surface (crypto/api/network +
+  the generic streaming `upload_stream_to_network` / `download_file_to_writer`). cli always
+  enables `fs` (it depends on core with default features).
 - cli keeps thin shim modules `auth`/`sso` (`crates/internxt-cli/src/{auth,sso}.rs`) that wrap
-  the core fns with these callbacks, so the rest of the cli calls `auth::*` / `sso::*` unchanged.
+  the core fns with these callbacks + persistence, so the rest of the cli calls `auth::*` /
+  `sso::*` unchanged.
 
 | File | Responsibility |
 |---|---|
 | **core** `config.rs` | API URLs + app constants (public; env-overridable), paths |
 | **core** `crypto.rs` | passToHash, CryptoJS AES-CBC, lib AES-GCM, GenerateFileKey, AES-256-CTR, hashes, workspace-key decrypt (PGP/Kyber512/blake3) |
-| **core** `auth.rs` | legacy login flow (+ ecc/kyber key decrypt; `on_need_2fa` callback), SSO credential build, credential save/read, token + workspace-cred refresh (`on_warn` callback) |
+| **core** `auth.rs` | legacy login flow (+ ecc/kyber key decrypt; `on_need_2fa` callback), SSO credential build, pure `refresh_credentials` (token + workspace-cred refresh; `on_warn` callback; no fs). Persistence lives in cli |
 | **core** `sso.rs` | web-based SSO universal-link **flow logic** (no axum/tokio-net; wasm-portable): build login URL, decode callback, build creds. Local callback transport behind the `SsoCallbackServer` trait; `on_login_url` callback (native axum server + browser-open live in cli) |
 | **core** `api.rs` | Drive REST client (`DRIVE_NEW_API_URL`); workspace-aware via `for_credentials` (`x-internxt-workspace` header + `/workspaces/{id}/…` routing) |
 | **core** `network.rs` | bridge/network client (`NETWORK_URL`), streaming PUT/GET |
-| **core** `transfer.rs` | streaming network transfer primitives: `upload_file_to_network`, `upload_stream_to_network`, `download_file_to_writer` (ranged), `create_folder_with_retry`; single-part + multipart; `ProgressSink` progress |
+| **core** `transfer.rs` | streaming network transfer primitives; `ProgressSink` progress. **Portable (always on):** generic `upload_stream_to_network<R: AsyncRead>`, `download_file_to_writer<W: AsyncWrite>` (ranged) — no fs/spawn. **`fs` feature (default on):** path-based `upload_file_to_network`, multipart, `create_folder_with_retry` — pull `tokio::fs`/`spawn`/`time` (not wasm-buildable) |
 | **core** `progress.rs` | `ProgressSink` trait + `noop_sink` (byte-progress seam) |
 | **core** `models.rs` | serde DTOs; `Credentials` workspace/keys + net/bucket/mnemonic helpers |
 | **cli** `main.rs` | clap CLI dispatch (all subcommands) |
-| **cli** `auth.rs` / `sso.rs` | thin shims over core auth/sso, injecting 2FA prompt / browser-open / warnings |
+| **cli** `auth.rs` / `sso.rs` | shims over core auth/sso: credential persistence (`~/.internxt-cli/.inxtcli`, path/read/save), 2FA prompt, browser-open, refresh warnings |
 | **cli** `commands.rs` | upload-file/download-file/upload-folder orchestration (arg handling, progress bars, `--json` output) on top of `internxt_core::transfer` |
 | **cli** `sync.rs` | sync-up/sync-down: one-way folder reconcile (local↔remote tree diff, size+mtime change detection, optional `--delete`) |
 | **cli** `serve/` | code shared by the serve backends (webdav + fuse): `run.rs` (the `serve` **orchestrator**: parses the comma-list of protocols, builds one `Shared` bundle — `SharedCreds`+cache+global upload semaphore+root — fetched/created once, spawns each backend as a task, and owns the single Ctrl-C that shuts them all down via a `watch` flag), `tree.rs` (protocol-agnostic Drive-tree walk: `FileItem`/`FolderItem`/`DriveItem`, `list_folders`/`list_files`/`resolve_folder`), `cache.rs` (`FolderCache` TTL listing cache), `creds.rs` (`SharedCreds` + hourly token refresh) |

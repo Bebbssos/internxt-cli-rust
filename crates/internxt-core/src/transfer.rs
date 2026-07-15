@@ -10,26 +10,41 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use rand::RngExt;
 use sha2::{Digest, Sha256};
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::api::DriveApi;
 use crate::crypto::{self, Ctr};
-use crate::network::{NetworkApi, PartRef};
+use crate::network::NetworkApi;
 use crate::progress::{noop_sink, ProgressSink};
 
-const MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
-const PART_SIZE: usize = 15 * 1024 * 1024; // 15MB
+// fs-only deps (the path-based / multipart / folder-create helpers).
+#[cfg(feature = "fs")]
+use crate::api::DriveApi;
+#[cfg(feature = "fs")]
+use crate::network::PartRef;
+#[cfg(feature = "fs")]
+use std::path::Path;
+
 const READ_CHUNK: usize = 1024 * 1024; // 1MB stream granularity
+#[cfg(feature = "fs")]
+const MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
+#[cfg(feature = "fs")]
+const PART_SIZE: usize = 15 * 1024 * 1024; // 15MB
+#[cfg(feature = "fs")]
 const UPLOAD_CONCURRENCY: usize = 10;
+#[cfg(feature = "fs")]
 const FOLDER_CREATE_RETRIES: usize = 2;
+#[cfg(feature = "fs")]
 const RETRY_DELAYS_MS: [u64; 3] = [500, 1000, 2000];
 
 /// Encrypt + upload a file's bytes to the network, returning the network file id.
 /// Picks single-part or multipart based on size. Shared by upload-file / upload-folder.
 /// `pb` = an optional progress sink to report byte progress into (e.g. a shared
 /// bar for folder uploads). When `None`, progress is discarded.
+///
+/// Requires the `fs` feature (reads from a filesystem path). For a non-fs source
+/// use [`upload_stream_to_network`].
+#[cfg(feature = "fs")]
 pub async fn upload_file_to_network(
     net: &NetworkApi,
     bucket: &str,
@@ -139,6 +154,7 @@ where
 }
 
 /// Multipart upload: continuous CTR stream sliced into 15MB parts, PUT concurrently.
+#[cfg(feature = "fs")]
 #[allow(clippy::too_many_arguments)]
 async fn upload_multipart(
     net: &NetworkApi,
@@ -210,6 +226,7 @@ async fn upload_multipart(
     Ok(finish.id)
 }
 
+#[cfg(feature = "fs")]
 async fn dispatch_part(
     net: &NetworkApi,
     urls: &[String],
@@ -358,6 +375,9 @@ where
 }
 
 /// Create a folder, retrying transient failures; returns None if it already exists.
+///
+/// Requires the `fs` feature (uses `tokio::time` for retry backoff).
+#[cfg(feature = "fs")]
 pub async fn create_folder_with_retry(
     api: &DriveApi,
     token: &str,

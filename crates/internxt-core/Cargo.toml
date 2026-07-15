@@ -11,6 +11,16 @@ repository = "https://github.com/Bebbssos/internxt-cli-rust"
 name = "internxt_core"
 path = "src/lib.rs"
 
+[features]
+default = ["fs"]
+# Native filesystem + runtime-bound transfer helpers: the path-based upload
+# (`upload_file_to_network`), multipart upload, and `create_folder_with_retry`.
+# These pull in `tokio::fs` / `tokio::spawn` / `tokio::time`, which don't exist on
+# targets like wasm. Disable to compile only the portable surface (crypto, api,
+# network, and the generic streaming `upload_stream_to_network` /
+# `download_file_to_writer`, which take an in-memory reader/writer).
+fs = []
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", features = ["json", "stream"] }
