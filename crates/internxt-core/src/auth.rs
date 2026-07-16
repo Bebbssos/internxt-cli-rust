@@ -1,4 +1,5 @@
-//! Login flow + credential persistence. Mirrors og/cli auth.service + config.service.
+//! Login flow + credential refresh. Mirrors og/cli auth.service. Persistence is
+//! the front-end's concern — nothing here touches the filesystem.
 
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};

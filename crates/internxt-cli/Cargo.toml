@@ -45,7 +45,7 @@ chrono = "0.4"
 indicatif = "0.18"
 filetime = "0.2.29"
 
-# sso: browser launcher (the local callback server lives in internxt-core)
+# sso: browser launcher + the local axum callback server (the flow logic lives in internxt-core)
 open = { version = "5", optional = true }
 
 # webdav: axum server + stream <-> AsyncRead adapters + MIME lookup

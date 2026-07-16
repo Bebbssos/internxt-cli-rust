@@ -8,7 +8,9 @@ An unofficial Rust port of the [Internxt CLI](https://github.com/internxt/cli), 
 
 ## Status
 
-Implemented: authentication (legacy + web-based SSO), streaming file transfers, recursive folder upload, one-way folder sync (`sync-up` / `sync-down`), workspaces (list/use/unset with workspace-scoped transfers), a foreground **WebDAV server** (`serve webdav`), automatic token refresh near expiry, and the full set of drive-management commands (list, create/move/rename, trash + restore, permanent delete). Every command supports `--json` for scripting.
+Implemented: authentication (legacy + web-based SSO), streaming file transfers, recursive folder upload, one-way folder sync (`sync-up` / `sync-down`), workspaces (list/use/unset with workspace-scoped transfers), a foreground multi-protocol **`serve`** (a **WebDAV server** and, on Unix, a **FUSE mount** — run either or both at once), a top-level **`mount`** convenience command (FUSE), automatic token refresh near expiry, and the full set of drive-management commands (list, create/move/rename, trash + restore, permanent delete). Every command supports `--json` for scripting.
+
+Built as a Cargo workspace: a reusable **`internxt-core`** engine crate (protocol-agnostic — auth, crypto, Drive REST, streaming transfers) and the **`internxt-cli`** front-end. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Crypto is byte-for-byte compatible with the node CLI (verified by cross-check tests, see `cargo test`).
 
@@ -18,7 +20,7 @@ Not yet ported: thumbnails and the `config` command.
 
 This is intended to be a **mostly drop-in replacement** for the official [`@internxt/cli`](https://www.npmjs.com/package/@internxt/cli): for the implemented commands the names, aliases, flags, endpoints, payloads, credential file location/format (`~/.internxt-cli/.inxtcli`) and crypto all match, so the two are interchangeable for everyday `login` / `upload` / `download` / list / move / rename / trash workflows.
 
-It is *not* a 100% replacement — anything in "Not yet ported" above is simply absent. The **WebDAV server** works differently by design (see the [WebDAV](#webdav) section): it runs in the foreground with options passed inline, rather than as a pm2-managed background service configured via `webdav-config`. Beyond that, the known **behavioural differences (breaking changes)** are:
+It is *not* a 100% replacement — anything in "Not yet ported" above is simply absent. The **WebDAV server** works differently by design (see the [serve](#serve-webdav--fuse) section): it runs in the foreground with options passed inline, rather than as a pm2-managed background service configured via `webdav-config`. Beyond that, the known **behavioural differences (breaking changes)** are:
 
 - **`login` defaults to SSO.** Built with the default `sso` feature, `login` runs the web-browser callback flow (like the official CLI); `login-legacy` runs email + password + optional 2FA, and `login-sso` forces SSO. Build `--no-default-features` for a smaller binary where `login` falls back to legacy and `login-sso` errors. The SSO flow drops the kyber private key (hybrid-Kyber workspaces need `login-legacy`).
 - **`--json` output schema differs.** We emit a simplified `{ "success": true, ... }` object per command rather than the exact oclif JSON envelope. Field names mostly match, but don't assume byte-identical structure.
@@ -30,16 +32,16 @@ It is *not* a 100% replacement — anything in "Not yet ported" above is simply 
 
 ```sh
 cargo build --release
-# binary at target/release/internxt (SSO + WebDAV over HTTP enabled by default)
+# binary at target/release/internxt (SSO + WebDAV over HTTP + FUSE enabled by default)
 
 # add HTTPS support to the WebDAV server (pulls in a rustls TLS stack):
 cargo build --release --features webdav-tls
 
-# smaller binary without SSO login or WebDAV (drops axum + open):
+# smaller binary without SSO login, WebDAV or FUSE (drops axum + open + fuser):
 cargo build --release --no-default-features
 ```
 
-Feature flags: `sso` (web-based login) and `webdav` (WebDAV server, HTTP) are on by default; `webdav-tls` adds HTTPS. Disable any of them for a smaller binary.
+Feature flags: `sso` (web-based login), `webdav` (WebDAV server, HTTP) and `fuse` (FUSE mount, Unix) are on by default; `webdav-tls` adds HTTPS. Disable any of them for a smaller binary. The `fuse` feature needs `libfuse3-dev` + `pkg-config` at build time on Unix (it is inert on Windows, so default builds still compile there).
 
 ## Commands
 
@@ -74,57 +76,90 @@ All commands accept the global `--json` flag, which prints a single JSON result 
 | `delete-permanently-folder` | `delete:permanently:folder` | `-i, --id <FOLDER_ID>` | Permanently delete a folder. Cannot be undone. |
 | `sync-up` | `sync:up` | `-l, --local <DIR>`, `-r, --remote <FOLDER_ID>`, `--delete[=trash\|permanent]`, `--dry-run` | Make a remote folder match a local one (push): upload new/changed files, optionally trash/delete remote extras. |
 | `sync-down` | `sync:down` | `-l, --local <DIR>`, `-r, --remote <FOLDER_ID>`, `--delete`, `--dry-run` | Make a local folder match a remote one (pull): download new/changed files, optionally remove local extras. |
-| `serve webdav` | | `-l, --host <HOST>`, `-p, --port <PORT>`, `-s, --https`, `--cert/--key <PEM>`, `-c, --create-full-path`, `-a, --custom-auth` + `-u/-w`, `-d, --delete-permanently`, `--spool`, `--spool-dir <DIR>`, `--max-concurrent-uploads <N>`, `--cache-ttl <SECS>`, `--no-cache` | Serve your Drive over WebDAV in the foreground until Ctrl-C. Requires the `webdav` feature (on by default). |
+| `serve <PROTOCOLS>` | | comma-list of `webdav` / `fuse`; shared: `-i, --folder-uuid`, `--cache-ttl`/`--no-cache`, `-d, --delete-permanently`, `--spool`, `--spool-dir`, `--max-concurrent-uploads`, `--read-only`; `--webdav-*` and `--fuse-*` prefixed per protocol | Run one or more Drive backends in the foreground until Ctrl-C, sharing creds/cache/upload-limit. `serve webdav`, `serve fuse`, `serve webdav,fuse`. |
+| `mount <MOUNTPOINT>` | | `-i, --folder-uuid`, `--read-only`, `-d, --delete-permanently`, `--spool-dir`, `--max-concurrent-uploads`, `--cache-ttl`/`--no-cache`, `--allow-other` | Expose your Drive as a local read-write filesystem via FUSE (Unix only; Ctrl-C to unmount). Thin wrapper over `serve fuse`. |
 
 ### Sync
 
 `sync-up` and `sync-down` do a single **one-way** reconcile pass then exit (not a daemon). The source side always wins — there is no bidirectional mode and no conflict resolution. Files are keyed by relative path; change detection compares size, then `modificationTime` (±2s tolerance). `--dry-run` prints the plan without transferring; `--json` emits a summary object with counts + per-action list. Downloaded files are stamped with the remote modification time so repeat runs are idempotent. `--delete` is opt-in and off by default; it prunes both extra files **and** extra folders (deleting the top-most extra folder cascades its whole subtree).
 
-### WebDAV
+### serve (WebDAV + FUSE)
 
-`serve webdav` serves your Drive (or the active workspace) over WebDAV so it can be mounted by any WebDAV client (Finder, Windows Explorer, `rclone`, Cyberduck, …). Unlike the official CLI — which runs the server as a pm2-managed background service configured through a separate `webdav-config` command — this port runs it **in the foreground as a normal command**: all options are passed inline, and the server runs until you stop it with Ctrl-C. It lives under the `serve` command so other protocols (e.g. `serve sftp`, `serve smb`) can be added the same way later.
+`serve` runs one or more Drive backends in the **foreground** until Ctrl-C. Pass a comma-separated protocol list; `webdav` and `fuse` (Unix) are supported. Running both at once shares one set of credentials, one folder-listing cache and one global upload limit. Shared flags are bare (`--cache-ttl`, `--read-only`, …); protocol-specific flags are prefixed (`--webdav-*`, `--fuse-*`).
+
+Unlike the official CLI — which runs WebDAV as a pm2-managed background service configured through a separate `webdav-config` command — this port runs it inline as a normal foreground command. Other protocols (`serve sftp`, `serve smb`) can be added the same way later.
 
 ```sh
-internxt serve webdav                                 # http://127.0.0.1:3005
-internxt serve webdav --host 0.0.0.0 --port 8080      # accept clients on your LAN
-internxt serve webdav --create-full-path              # auto-create missing parent folders on upload
-internxt serve webdav --custom-auth -u alice -w secret  # require HTTP Basic auth from clients
-internxt serve webdav --https                         # HTTPS with a self-signed cert (needs `webdav-tls`)
-internxt serve webdav --https --cert cert.pem --key key.pem   # HTTPS with your own certificate
-internxt serve webdav --spool --spool-dir /var/tmp/inxt   # spool each upload to disk first (see below)
-internxt serve webdav --max-concurrent-uploads 2      # cap simultaneous upload transfers
-internxt serve webdav --cache-ttl 15                   # cache folder listings 15s (0 / --no-cache to disable)
+internxt serve webdav                                    # http://127.0.0.1:3005
+internxt serve webdav --webdav-host 0.0.0.0 --webdav-port 8080   # accept LAN clients
+internxt serve webdav --webdav-create-full-path          # auto-create missing parent folders on upload
+internxt serve webdav --webdav-custom-auth --webdav-username alice --webdav-password secret
+internxt serve webdav --webdav-https                     # HTTPS, self-signed cert (needs `webdav-tls`)
+internxt serve webdav --webdav-https --webdav-cert cert.pem --webdav-key key.pem
+internxt serve fuse --fuse-mountpoint ~/drive            # FUSE mount (Unix)
+internxt serve webdav,fuse --fuse-mountpoint ~/drive     # both at once, shared cache/creds
+internxt serve webdav --read-only -i <folder-uuid>       # read-only, rooted at a subfolder
+internxt serve webdav --spool --spool-dir /var/tmp/inxt  # spool each upload to disk first (see below)
+internxt serve webdav --max-concurrent-uploads 2         # cap simultaneous upload transfers
+internxt serve webdav --cache-ttl 15                     # cache folder listings 15s (0 / --no-cache to disable)
 ```
 
-Supported methods: `OPTIONS`, `PROPFIND`, `GET`/`HEAD` (with `Range`), `PUT`, `MKCOL`, `DELETE`, `MOVE`, `LOCK`/`UNLOCK`. `COPY` and `PROPPATCH` return `501 Not Implemented` (as upstream). Transfers stream through the same encrypt/decrypt path as `upload-file`/`download-file`, so large files never load into RAM. `DELETE` trashes items by default (`--delete-permanently` to hard-delete). Paths are resolved by walking the folder tree, so it stays workspace-aware when a workspace is active.
+WebDAV supported methods: `OPTIONS`, `PROPFIND`, `GET`/`HEAD` (with `Range`), `PUT`, `MKCOL`, `DELETE`, `MOVE`, `LOCK`/`UNLOCK`. `COPY` and `PROPPATCH` return `501 Not Implemented` (as upstream). Transfers stream through the same encrypt/decrypt path as `upload-file`/`download-file`, so large files never load into RAM. `DELETE` trashes items by default (`--delete-permanently` to hard-delete). Paths are resolved by walking the folder tree, so it stays workspace-aware when a workspace is active.
 
-#### Options
+#### Shared flags (any protocol)
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `-l, --host <HOST>` | `127.0.0.1` | Address to bind (and advertise). `0.0.0.0` accepts LAN clients. |
-| `-p, --port <PORT>` | `3005` | Listen port. |
-| `-s, --https` | off | Serve over HTTPS (needs the `webdav-tls` feature). Self-signed unless `--cert`/`--key` given. |
-| `--cert / --key <PEM>` | — | Your own TLS certificate + private key (both required together). |
-| `-c, --create-full-path` | off | Auto-create missing parent folders on `PUT` / `MKCOL`. |
-| `-a, --custom-auth` + `-u/-w` | off | Require HTTP Basic auth from clients (`--username` / `--password`). |
-| `-d, --delete-permanently` | off | Hard-delete on `DELETE` instead of moving to trash. |
-| `--spool` | off | Spool each `PUT` body to a temp file, then upload from disk, instead of streaming the live client body straight to storage. Costs temp disk + a little latency; more robust for slow/bursty clients whose pacing can otherwise trip storage socket timeouts. |
-| `--spool-dir <DIR>` | system temp | Directory for `--spool` temp files (created if missing; requires `--spool`). |
-| `--max-concurrent-uploads <N>` | `0` (unlimited) | Cap how many `PUT` transfers run at once. `1` fully serializes uploads, useful when a client fans out many parallel PUTs. |
-| `--cache-ttl <SECS>` | `5` | Cache folder listings this many seconds to speed path resolution under bursts of requests. `0` disables. Only folder listings are cached; file listings stay live, and folder changes invalidate. |
+| `-i, --folder-uuid <UUID>` | account/workspace root | Expose a subfolder as the root of every backend. |
+| `-d, --delete-permanently` | off | Hard-delete instead of moving to trash. |
+| `--read-only` | off | Reject all writes/mutations on every backend. |
+| `--spool` | off | Spool each upload body to a temp file, then upload from disk, instead of streaming the live client body straight to storage. Costs temp disk + a little latency; more robust for slow/bursty clients. (FUSE always spools; no-op there.) |
+| `--spool-dir <DIR>` | system temp | Directory for spool temp files (created if missing). |
+| `--max-concurrent-uploads <N>` | `0` (unlimited) | Cap how many upload transfers run at once, across all backends. `1` fully serializes. |
+| `--cache-ttl <SECS>` | `5` | Cache folder listings this many seconds (also the FUSE kernel attr/entry TTL). `0` disables. Only folder listings are cached; file listings stay live, and folder changes invalidate. |
 | `--no-cache` | off | Disable the folder-listing cache (same as `--cache-ttl 0`). |
-| `-t, --timeout <MINS>` | `60` | Accepted for parity; not yet wired to a request-timeout layer. |
 
-#### Debug logging
+#### WebDAV flags (`--webdav-*`)
 
-Set `INTERNXT_WEBDAV_DEBUG=1` to dump each request line, all request/response headers, and the response status to stderr — useful for diagnosing client-specific behaviour (e.g. WinSCP). It is off unless the variable is set:
+| Flag | Default | Purpose |
+|---|---|---|
+| `--webdav-host <HOST>` | `127.0.0.1` | Address to bind (and advertise). `0.0.0.0` accepts LAN clients. |
+| `--webdav-port <PORT>` | `3005` | Listen port. |
+| `--webdav-https` | off | Serve over HTTPS (needs the `webdav-tls` feature). Self-signed unless a cert/key is given. |
+| `--webdav-cert / --webdav-key <PEM>` | — | Your own TLS certificate + private key (both required together). |
+| `--webdav-create-full-path` | off | Auto-create missing parent folders on `PUT` / `MKCOL`. |
+| `--webdav-custom-auth` + `--webdav-username/--webdav-password` | off | Require HTTP Basic auth from clients. |
+| `--webdav-timeout <MINS>` | `60` | Accepted for parity; not yet wired to a request-timeout layer. |
+
+#### FUSE flags (`--fuse-*`)
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--fuse-mountpoint <DIR>` | — | Local directory to mount onto (required when `fuse` is served). |
+| `--fuse-allow-other` | off | Let other users (and root) access the mount (needs `user_allow_other` in `/etc/fuse.conf` on Linux). |
+
+#### Debug logging (WebDAV)
+
+Set `INTERNXT_WEBDAV_DEBUG=1` to dump each request line, all request/response headers, and the response status to stderr — useful for diagnosing client-specific behaviour (e.g. WinSCP):
 
 ```sh
-INTERNXT_WEBDAV_DEBUG=1 internxt serve webdav --host 0.0.0.0 --port 8099 2>&1 | tee webdav-debug.log
+INTERNXT_WEBDAV_DEBUG=1 internxt serve webdav --webdav-host 0.0.0.0 --webdav-port 8099 2>&1 | tee webdav-debug.log
 ```
 
-Notes / current limitations: HTTP by default (enable HTTPS with the `webdav-tls` feature); no local **on-disk** database cache (og uses sqlite) — folder listings are cached in-process for `--cache-ttl` seconds only; `--timeout` is accepted for parity but not yet wired to a request-timeout layer. A background task refreshes the session token hourly (same near-expiry refresh as the other commands), so a long-running server keeps working. The `webdav-config` / `webdav start|stop|status` subcommands are intentionally left for a possible future daemon mode.
+Notes / current limitations: HTTP by default (enable HTTPS with the `webdav-tls` feature); no local **on-disk** database cache (og uses sqlite) — folder listings are cached in-process for `--cache-ttl` seconds only; `--webdav-timeout` is accepted for parity but not yet wired. A background task refreshes the session token hourly, so a long-running server survives token expiry. The `webdav-config` / `webdav start|stop|status` names are left for a possible future daemon mode.
+
+### mount (FUSE)
+
+On Unix, `mount <MOUNTPOINT>` exposes your Drive as a local **read-write** filesystem — a thin wrapper over `serve fuse` where the shared flags use their bare names.
+
+```sh
+mkdir -p ~/drive && internxt mount ~/drive              # Ctrl-C to unmount
+internxt mount ~/drive --read-only                      # browse/read only
+internxt mount ~/drive -i <folder-uuid>                 # mount a subfolder as root
+internxt mount ~/drive --allow-other                    # needs user_allow_other in /etc/fuse.conf
+```
+
+Needs `libfuse3-dev` + `pkg-config` at build time and a FUSE driver at runtime (fuse3 on Linux, macFUSE on macOS, `fusefs-libs3` on FreeBSD). Reads stream and decrypt lazily; writes buffer to a temp file and upload in full when the file is closed (Internxt has no partial-update API), replacing the old Drive entry. The `fuse` feature is on by default but inert on non-Unix targets, so Windows default builds still compile.
 
 ## Usage examples
 
@@ -142,34 +177,26 @@ internxt trash-clear --force
 internxt sync-up   -l ./my-folder -r <folder-uuid> --dry-run   # preview a push
 internxt sync-up   -l ./my-folder -r <folder-uuid> --delete    # push, trashing remote extras
 internxt sync-down -l ./my-folder -r <folder-uuid>             # pull new/changed files
-internxt serve webdav --host 0.0.0.0 --port 8080               # serve Drive over WebDAV (Ctrl-C to stop)
+internxt serve webdav --webdav-host 0.0.0.0 --webdav-port 8080 # serve Drive over WebDAV (Ctrl-C to stop)
+internxt mount ~/drive                                         # mount Drive as a local filesystem (Unix; Ctrl-C to unmount)
 ```
 
 Credentials are stored AES-encrypted at `~/.internxt-cli/.inxtcli` (same location/format as the node CLI).
 
 ## Architecture
 
-- `src/crypto.rs` — password hashing, CryptoJS-compatible AES, file-key derivation, AES-256-CTR.
-- `src/auth.rs` — login flow + credential persistence + token/workspace refresh.
-- `src/sso.rs` — web-based SSO login (feature `sso`): local callback server + browser.
-- `src/api.rs` — Drive REST client.
-- `src/network.rs` — bridge (network) client: start/PUT/finish + download links/shards.
-- `src/commands.rs` — streaming upload/download + recursive folder upload.
-- `src/sync.rs` — one-way folder sync (`sync-up` / `sync-down`): tree diff + reconcile.
-- `src/webdav/` — WebDAV server (feature `webdav`): axum server, method handlers, path resolution, XML.
-- `src/drive_ops.rs` — drive-management commands (list, folder/file ops, trash).
-- `src/workspaces.rs` — workspaces list/use/unset + workspace mnemonic decrypt.
-- `src/output.rs` — global `--json` / human output switch.
-
-### Streaming / memory
-
-- Upload < 100MB: single presigned PUT, body streamed disk → encrypt → HTTP (~1MB RAM).
-- Upload ≥ 100MB: multipart, 15MB parts, up to 10 concurrent PUTs (~150MB RAM cap regardless of file size).
-- Download: shard response streamed → decrypt → disk.
+The project is a Cargo workspace: a reusable **`internxt-core`** engine crate
+(protocol-agnostic — auth, crypto, Drive REST, streaming transfers) and the
+**`internxt-cli`** front-end that builds the `internxt` binary. Transfers are fully
+streaming — large files never load into RAM. See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
+for the crate split, how to reuse the core as a library, the `fs` feature, and the
+streaming/memory model.
 
 ## Configuration
 
-API endpoints and app constants default to the public Internxt values (see `src/config.rs`) and can be overridden via environment variables of the same name (`DRIVE_NEW_API_URL`, `NETWORK_URL`, etc.).
+API endpoints and app constants default to the public Internxt values (see
+`crates/internxt-core/src/config.rs`) and can be overridden via environment variables of the
+same name (`DRIVE_NEW_API_URL`, `NETWORK_URL`, etc.).
 
 ## Credits
 

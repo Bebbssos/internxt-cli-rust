@@ -9,7 +9,8 @@
 //! opening a browser) lives in the front-end crate, not here. The seams:
 //! * byte progress is reported through the [`ProgressSink`] trait;
 //! * `auth::login`'s 2FA code and `sso::login`'s browser-open are injected callbacks;
-//! * `auth::get_auth_details` reports best-effort warnings through an `on_warn` callback.
+//! * `auth::refresh_credentials` reports best-effort warnings through an `on_warn`
+//!   callback and does no filesystem I/O — the front-end owns credential persistence.
 
 pub mod api;
 pub mod auth;

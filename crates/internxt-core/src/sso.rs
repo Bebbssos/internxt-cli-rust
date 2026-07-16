@@ -4,9 +4,9 @@
 //! and turns it into credentials. Mirrors og/cli universal-link.service.ts.
 //!
 //! The actual local callback *transport* (a temporary HTTP server on native, or
-//! whatever a wasm/GUI host wants) is abstracted behind [`SsoCallbackServer`], so
-//! this crate stays free of axum / tokio-net and can compile for wasm. The
-//! front-end supplies the transport implementation.
+//! whatever a GUI host wants) is abstracted behind [`SsoCallbackServer`], so this
+//! crate stays free of axum / tokio-net. The front-end supplies the transport
+//! implementation.
 
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
