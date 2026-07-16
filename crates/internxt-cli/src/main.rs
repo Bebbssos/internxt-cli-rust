@@ -500,6 +500,13 @@ async fn run_sso_login(host: Option<String>, port: Option<u16>) -> Result<()> {
 
 #[tokio::main]
 async fn main() {
+    // Identify as this front-end, not the official node CLI. Env
+    // (INTERNXT_CLIENT / INTERNXT_VERSION) overrides for ad-hoc use — env policy
+    // is the front-end's concern, so core stays env-free.
+    internxt_core::config::set_client_identity(
+        std::env::var("INTERNXT_CLIENT").unwrap_or_else(|_| "internxt-cli-rust".to_string()),
+        std::env::var("INTERNXT_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string()),
+    );
     let cli = Cli::parse();
     output::set_json(cli.json);
     output::set_non_interactive(cli.non_interactive);

@@ -181,7 +181,7 @@ pub async fn serve(
     };
     let banner = format!(
         "Internxt {} WebDAV server listening at {scheme}://{}:{}{}{}",
-        config::CLIENT_VERSION,
+        config::client_version(),
         config.host,
         config.port,
         if config.custom_auth.is_some() {

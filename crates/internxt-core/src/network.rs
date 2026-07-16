@@ -46,8 +46,12 @@ impl NetworkApi {
             CONTENT_TYPE,
             HeaderValue::from_static("application/json; charset=utf-8"),
         );
-        h.insert("internxt-version", HeaderValue::from_static(config::CLIENT_VERSION));
-        h.insert("internxt-client", HeaderValue::from_static(config::CLIENT_NAME));
+        if let Ok(v) = HeaderValue::from_str(&config::client_version()) {
+            h.insert("internxt-version", v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&config::client_name()) {
+            h.insert("internxt-client", v);
+        }
         h.insert(AUTHORIZATION, self.auth_header.clone());
         h
     }

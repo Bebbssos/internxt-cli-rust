@@ -23,8 +23,12 @@ fn base_headers() -> HeaderMap {
         CONTENT_TYPE,
         HeaderValue::from_static("application/json; charset=utf-8"),
     );
-    h.insert("internxt-version", HeaderValue::from_static(config::CLIENT_VERSION));
-    h.insert("internxt-client", HeaderValue::from_static(config::CLIENT_NAME));
+    if let Ok(v) = HeaderValue::from_str(&config::client_version()) {
+        h.insert("internxt-version", v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&config::client_name()) {
+        h.insert("internxt-client", v);
+    }
     if let Ok(v) = HeaderValue::from_str(&config::desktop_header()) {
         h.insert("x-internxt-desktop-header", v);
     }
@@ -117,7 +121,7 @@ impl DriveApi {
         Self::check(resp, "loginAccess").await
     }
 
-    /// GET /users/cli/refresh -> new session token (refreshUserCredentials).
+    /// GET /users/refresh -> new session token (refreshUserCredentials).
     /// Returns the `newToken`; the rest of the user identity is unchanged.
     pub async fn refresh_user_token(&self, token: &str) -> Result<String> {
         let v = self.refresh_user_credentials(token).await?;
@@ -127,13 +131,19 @@ impl DriveApi {
             .ok_or_else(|| anyhow!("no newToken in refresh response: {v}"))
     }
 
-    /// GET /users/cli/refresh -> full `{ newToken, user }` (refreshUserCredentials).
+    /// GET /users/refresh -> full `{ user, token, newToken }` (RefreshUserTokensDto).
     /// Used by the SSO login flow to fetch the user identity, since the
     /// universal link only carries the mnemonic, token and ecc private key.
+    ///
+    /// The node CLI hits `/users/cli/refresh`, but that path is tier-gated by the
+    /// backend (`402 "CLI access not allowed for this user tier"` on non-Ultimate
+    /// plans). `/users/refresh` is the first-party GUI endpoint (drive-web /
+    /// drive-desktop) and returns the identical `RefreshUserTokensDto`, so we use
+    /// it to work on every plan. See config `client_name` note on the gate.
     pub async fn refresh_user_credentials(&self, token: &str) -> Result<serde_json::Value> {
         let resp = self
             .client
-            .get(self.url("/users/cli/refresh"))
+            .get(self.url("/users/refresh"))
             .headers(self.auth_headers(token)?)
             .send()
             .await?;
