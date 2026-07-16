@@ -307,6 +307,14 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
+    // Fail fast when the declared length already exceeds the cap: reject before
+    // resolving folders or reading the body (an oversize upload aborts here).
+    if let Some(sz) = content_length {
+        if let Err(e) = ctx.upload_limit.check(sz) {
+            return Err(AppError::payload_too_large(format!("{e}")));
+        }
+    }
+
     let creds = ctx.creds();
     let token = &creds.token;
     let api = DriveApi::for_credentials(&creds);
@@ -379,6 +387,9 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
     //   executor-starved live stream can trip under a concurrent upload burst.
     let (file_id, size) = if ctx.config.spool {
         let tmp = spool_body(req.into_body(), ctx.config.spool_dir.as_deref()).await?;
+        ctx.upload_limit
+            .check(tmp.size)
+            .map_err(|e| AppError::payload_too_large(format!("{e}")))?;
         if tmp.size == 0 {
             (String::new(), 0)
         } else {
@@ -404,6 +415,9 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
             // No declared length: fall back to spooling so we can learn the size.
             None => {
                 let tmp = spool_body(req.into_body(), ctx.config.spool_dir.as_deref()).await?;
+                ctx.upload_limit
+                    .check(tmp.size)
+                    .map_err(|e| AppError::payload_too_large(format!("{e}")))?;
                 if tmp.size == 0 {
                     (String::new(), 0)
                 } else {

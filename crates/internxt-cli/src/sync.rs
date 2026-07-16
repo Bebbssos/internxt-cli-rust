@@ -343,9 +343,11 @@ pub async fn sync_up(
     remote: Option<&str>,
     delete: Option<&str>,
     dry_run: bool,
+    limit_args: &crate::upload_limit::UploadLimitArgs,
 ) -> Result<()> {
     let mode = parse_delete(delete, true)?;
     let creds = Arc::new(auth::get_auth_details().await?);
+    let limit = crate::upload_limit::resolve(limit_args, &creds).await?;
 
     let root = Path::new(local);
     let md = std::fs::metadata(root).map_err(|_| anyhow!("Not a directory: {local}"))?;
@@ -471,6 +473,12 @@ pub async fn sync_up(
         let lf = local_files.get(&rel).unwrap();
         let abs = lf.abs.clone();
         let size = lf.size;
+        if let Err(e) = limit.check(size) {
+            pb.println(format!("Skipping {rel}: {e}"));
+            summary.record("upload", &rel, false);
+            summary.failed.fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
         let mtime = to_rfc3339(
             std::fs::metadata(&abs)
                 .and_then(|m| m.modified())

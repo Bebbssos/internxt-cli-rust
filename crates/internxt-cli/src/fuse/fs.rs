@@ -273,15 +273,18 @@ pub struct Inner {
     handles: Mutex<HashMap<u64, Arc<Handle>>>,
     next_fh: AtomicU64,
     upload_sem: Option<Arc<tokio::sync::Semaphore>>,
+    upload_limit: crate::upload_limit::UploadLimit,
 }
 
 impl Inner {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         shared: Arc<SharedCreds>,
         cache: Arc<FolderCache>,
         root_uuid: String,
         root_updated_at: String,
         upload_sem: Option<Arc<tokio::sync::Semaphore>>,
+        upload_limit: crate::upload_limit::UploadLimit,
         config: MountConfig,
     ) -> Self {
         let mut table = InodeTable {
@@ -314,6 +317,7 @@ impl Inner {
             handles: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
             upload_sem,
+            upload_limit,
         }
     }
 
@@ -913,6 +917,13 @@ impl Filesystem for InxtFs {
                 return;
             };
             let len = data.len();
+            // Reject writes that would push the file past the upload cap. The
+            // final size is only known at release, so gate each write by the
+            // high-water mark it would set (EFBIG = "file too large").
+            if inner.upload_limit.check(offset + len as u64).is_err() {
+                reply.error(Errno::EFBIG);
+                return;
+            }
             let res: Result<()> = async {
                 wh.ensure_materialized().await?;
                 let mut f = wh.file.lock().await;

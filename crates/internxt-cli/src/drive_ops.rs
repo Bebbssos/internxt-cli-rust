@@ -120,6 +120,117 @@ pub async fn whoami() -> Result<()> {
     }
 }
 
+/// og `UsageService.INFINITE_LIMIT` — space limits at/above this mean "unlimited".
+const INFINITE_LIMIT: u64 = 99 * 1024 * 1024 * 1024 * 1024;
+
+/// Derive a plan name from the payments tier `label` and subscription `type`,
+/// as `Tier (Type)` — e.g. `Pro (Subscription)`. When both agree (`free`/`free`)
+/// or one is absent, show just the single value: a genuine free account reads
+/// `Free`, and a legacy lifetime account reads `Free (Lifetime)` — the tier
+/// endpoint mislabels legacy plans `free`, but the `(Lifetime)` from
+/// `/subscriptions` still conveys it's not a free plan. `None` = both unknown.
+fn resolve_plan(label: Option<String>, subscription: Option<String>) -> Option<String> {
+    let label = label.filter(|l| !l.trim().is_empty());
+    let sub = subscription.filter(|s| !s.trim().is_empty());
+    match (label, sub) {
+        (Some(l), Some(t)) if l.eq_ignore_ascii_case(&t) => Some(cap_first(&l)),
+        (Some(l), Some(t)) => Some(format!("{} ({})", cap_first(&l), cap_first(&t))),
+        (Some(l), None) => Some(cap_first(&l)),
+        (None, Some(t)) => Some(cap_first(&t)),
+        (None, None) => None,
+    }
+}
+
+/// Uppercase the first ASCII char, leave the rest untouched (preserves labels
+/// like "Pro 10TB"; the API's subscription types are already lowercase).
+fn cap_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_ascii_uppercase().to_string() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Account overview: plan, used space (drive/backups), space limit, per-file
+/// upload cap. Not an og command — assembled from the same endpoints og's
+/// UsageService uses, plus a best-effort payments tier lookup for the plan name.
+pub async fn usage() -> Result<()> {
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
+    let token = &creds.token;
+
+    // Fan out: usage + limit + per-file cap are required; plan lookups (tier +
+    // subscription) are best-effort on the separate payments API.
+    let (usage, space_limit, upload_limit, tier, subscription) = tokio::join!(
+        api.space_usage(token),
+        api.space_limit(token),
+        api.get_file_limits(token),
+        api.user_tier(token),
+        api.user_subscription(token),
+    );
+    let usage = usage?;
+    let space_limit = space_limit?;
+    let upload_limit = upload_limit?;
+    let tier_label = tier.ok().flatten();
+    let sub_type = subscription.ok().flatten();
+    let plan = resolve_plan(tier_label.clone(), sub_type.clone());
+
+    let space_infinite = space_limit >= INFINITE_LIMIT;
+    let used_percent = if space_limit > 0 && !space_infinite {
+        Some(usage.total as f64 / space_limit as f64 * 100.0)
+    } else {
+        None
+    };
+    let limit_str = if space_infinite {
+        "Unlimited".to_string()
+    } else {
+        human_file_size(space_limit as f64)
+    };
+    let upload_str = match upload_limit {
+        Some(b) => human_file_size(b as f64),
+        None => "Unlimited".to_string(),
+    };
+    let plan_str = plan.clone().unwrap_or_else(|| "unknown".to_string());
+
+    let used_line = match used_percent {
+        Some(p) => format!(
+            "{} / {} ({:.1}%)",
+            human_file_size(usage.total as f64),
+            limit_str,
+            p
+        ),
+        None => format!("{} / {}", human_file_size(usage.total as f64), limit_str),
+    };
+    output::emit(
+        &format!(
+            "Plan:               {plan_str}\n\
+             Used:               {used_line}\n  \
+               Drive:            {}\n  \
+               Backups:          {}\n\
+             Space limit:        {limit_str}\n\
+             Upload file limit:  {upload_str}",
+            human_file_size(usage.drive as f64),
+            human_file_size(usage.backups as f64),
+        ),
+        json!({
+            "success": true,
+            "usage": {
+                "plan": plan,
+                "planLabel": tier_label,
+                "subscriptionType": sub_type,
+                "used": usage.total,
+                "drive": usage.drive,
+                "backups": usage.backups,
+                "spaceLimit": space_limit,
+                "spaceLimitInfinite": space_infinite,
+                "usedPercent": used_percent,
+                "uploadFileLimit": upload_limit,
+            }
+        }),
+    );
+    Ok(())
+}
+
 // ---- listing ----
 
 pub async fn list(folder_id: Option<&str>, extended: bool) -> Result<()> {

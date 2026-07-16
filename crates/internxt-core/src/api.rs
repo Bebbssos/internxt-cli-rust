@@ -150,6 +150,74 @@ impl DriveApi {
         Self::check(resp, "refreshUserCredentials").await
     }
 
+    /// GET /users/usage -> space used, split drive / backups / total (bytes).
+    /// Mirrors og `storageClient.spaceUsageV2()`.
+    pub async fn space_usage(&self, token: &str) -> Result<crate::models::SpaceUsage> {
+        let resp = self
+            .client
+            .get(self.url("/users/usage"))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        let v = Self::check(resp, "spaceUsage").await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    /// GET /users/limit -> the plan's total space limit in bytes (`maxSpaceBytes`).
+    /// Mirrors og `storageClient.spaceLimitV2()`.
+    pub async fn space_limit(&self, token: &str) -> Result<u64> {
+        let resp = self
+            .client
+            .get(self.url("/users/limit"))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        let v = Self::check(resp, "spaceLimit").await?;
+        Ok(v.get("maxSpaceBytes").and_then(|m| m.as_u64()).unwrap_or(0))
+    }
+
+    /// GET /files/limits -> the plan's `maxUploadFileSize` in bytes, or `None`
+    /// when the plan sets no per-file cap (field null/absent). Mirrors og
+    /// `storageClient.getFileVersionLimits()`.
+    pub async fn get_file_limits(&self, token: &str) -> Result<Option<u64>> {
+        let resp = self
+            .client
+            .get(self.url("/files/limits"))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        let v = Self::check(resp, "getFileLimits").await?;
+        Ok(v.get("maxUploadFileSize").and_then(|m| m.as_u64()))
+    }
+
+    /// GET {payments}/products/tier -> the plan's human `label` (e.g. "Pro").
+    /// Best-effort (separate API, og cli never calls it). **Unreliable for
+    /// legacy plans**: those come back `label:"free"` regardless, so callers
+    /// must corroborate with [`Self::user_subscription`] before trusting it.
+    pub async fn user_tier(&self, token: &str) -> Result<Option<String>> {
+        let url = format!("{}/products/tier", config::payments_api_url());
+        let mut headers = base_headers();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {token}"))?);
+        let resp = self.client.get(url).headers(headers).send().await?;
+        let v = Self::check(resp, "userTier").await?;
+        Ok(v.get("label")
+            .and_then(|l| l.as_str())
+            .map(|s| s.to_string()))
+    }
+
+    /// GET {payments}/subscriptions -> the billing `type`: `free`, `lifetime`,
+    /// or `subscription`. This is the authoritative plan signal (legacy lifetime
+    /// accounts report `lifetime` here even while the tier endpoint mislabels
+    /// them `free`). Best-effort; `None` on error/absent. Not workspace-scoped.
+    pub async fn user_subscription(&self, token: &str) -> Result<Option<String>> {
+        let url = format!("{}/subscriptions", config::payments_api_url());
+        let mut headers = base_headers();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {token}"))?);
+        let resp = self.client.get(url).headers(headers).send().await?;
+        let v = Self::check(resp, "userSubscription").await?;
+        Ok(v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()))
+    }
+
     /// GET /files/{uuid}/meta
     pub async fn get_file_meta(&self, token: &str, uuid: &str) -> Result<DriveFileData> {
         let resp = self

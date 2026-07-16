@@ -81,6 +81,8 @@ pub struct Ctx {
     /// Limits concurrent PUT network transfers when set (`--max-concurrent-uploads`).
     /// `None` = unlimited. Shared (process-wide cap) across serve backends.
     pub upload_sem: Option<Arc<tokio::sync::Semaphore>>,
+    /// Per-file upload size cap, enforced on PUT.
+    pub upload_limit: crate::upload_limit::UploadLimit,
 }
 
 impl Ctx {
@@ -122,6 +124,9 @@ impl AppError {
     }
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, msg)
+    }
+    pub fn payload_too_large(msg: impl Into<String>) -> Self {
+        Self::new(StatusCode::PAYLOAD_TOO_LARGE, msg)
     }
 }
 
@@ -204,6 +209,7 @@ pub async fn serve(
         root_updated_at,
         cache: shared.cache.clone(),
         upload_sem: shared.upload_sem.clone(),
+        upload_limit: shared.upload_limit,
     });
 
     let app = Router::new().fallback(dispatch).with_state(ctx);

@@ -37,8 +37,10 @@ pub async fn upload_file(
     use_stdin: bool,
     name: Option<&str>,
     size_hint: Option<u64>,
+    limit_args: &crate::upload_limit::UploadLimitArgs,
 ) -> Result<()> {
     let creds = auth::get_auth_details().await?;
+    let limit = crate::upload_limit::resolve(limit_args, &creds).await?;
 
     let folder_uuid = match destination {
         Some(d) if !d.trim().is_empty() => d.to_string(),
@@ -46,7 +48,7 @@ pub async fn upload_file(
     };
 
     if use_stdin {
-        return upload_from_stdin(&creds, name, size_hint, &folder_uuid).await;
+        return upload_from_stdin(&creds, name, size_hint, &folder_uuid, limit).await;
     }
 
     let file_path = file_path.ok_or_else(|| anyhow!("Provide --file <PATH> or --stdin"))?;
@@ -56,6 +58,7 @@ pub async fn upload_file(
         return Err(anyhow!("Not a file: {file_path}"));
     }
     let size = meta.len();
+    limit.check(size)?;
 
     let stem = path
         .file_stem()
@@ -110,6 +113,7 @@ async fn upload_from_stdin(
     name: Option<&str>,
     size_hint: Option<u64>,
     folder_uuid: &str,
+    limit: crate::upload_limit::UploadLimit,
 ) -> Result<()> {
     let name = name.ok_or_else(|| anyhow!("--name <NAME> is required with --stdin"))?;
     let np = Path::new(name);
@@ -129,6 +133,7 @@ async fn upload_from_stdin(
     let (file_id, size) = match size_hint {
         Some(0) => (String::new(), 0),
         Some(sz) => {
+            limit.check(sz)?;
             crate::output::status(&format!("Uploading {sz} bytes from stdin..."));
             let pb = crate::output::progress_bar(sz, "Uploading");
             let id = upload_stream_to_network(
@@ -146,6 +151,7 @@ async fn upload_from_stdin(
         None => {
             crate::output::status("Buffering stdin...");
             let tmp = spool_stdin_to_temp().await?;
+            limit.check(tmp.size)?;
             if tmp.size == 0 {
                 (String::new(), 0)
             } else {
@@ -448,9 +454,11 @@ async fn upload_one_file(
     file: &ScanNode,
     parent_uuid: &str,
     pb: &indicatif::ProgressBar,
+    limit: crate::upload_limit::UploadLimit,
 ) -> Result<()> {
     let meta = std::fs::metadata(&file.abs)?;
     let size = meta.len();
+    limit.check(size)?;
     let file_type = file
         .abs
         .extension()
@@ -489,8 +497,13 @@ async fn upload_one_file(
 }
 
 /// Recursively upload a local folder tree to Internxt Drive.
-pub async fn upload_folder(local_path: &str, destination: Option<&str>) -> Result<()> {
+pub async fn upload_folder(
+    local_path: &str,
+    destination: Option<&str>,
+    limit_args: &crate::upload_limit::UploadLimitArgs,
+) -> Result<()> {
     let creds = Arc::new(auth::get_auth_details().await?);
+    let limit = crate::upload_limit::resolve(limit_args, &creds).await?;
 
     let root = Path::new(local_path);
     let md = std::fs::metadata(root).map_err(|_| anyhow!("Not a directory: {local_path}"))?;
@@ -575,8 +588,10 @@ pub async fn upload_folder(local_path: &str, destination: Option<&str>) -> Resul
         let pb = pb.clone();
         handles.push(tokio::spawn(async move {
             let _permit = permit;
-            match upload_one_file(&net, &api, &token, &bucket, &mnemonic, &file, &parent_uuid, &pb)
-                .await
+            match upload_one_file(
+                &net, &api, &token, &bucket, &mnemonic, &file, &parent_uuid, &pb, limit,
+            )
+            .await
             {
                 Ok(()) => {
                     uploaded.fetch_add(file.size, Ordering::Relaxed);

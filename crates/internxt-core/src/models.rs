@@ -98,6 +98,17 @@ impl Credentials {
     }
 }
 
+/// Space usage breakdown (`GET /users/usage`). Bytes.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct SpaceUsage {
+    #[serde(default)]
+    pub drive: u64,
+    #[serde(default)]
+    pub backups: u64,
+    #[serde(default)]
+    pub total: u64,
+}
+
 // ---- Network (bridge) DTOs ----
 
 #[derive(Deserialize, Debug)]

@@ -9,6 +9,7 @@ mod serve;
 #[cfg(feature = "sso")]
 mod sso;
 mod sync;
+mod upload_limit;
 #[cfg(feature = "webdav")]
 mod webdav;
 mod workspaces;
@@ -104,6 +105,8 @@ enum Commands {
         /// spooled to a temp file to learn its size.
         #[arg(short = 's', long)]
         size: Option<u64>,
+        #[command(flatten)]
+        limit: upload_limit::UploadLimitArgs,
     },
     /// Upload a folder (recursively) to Internxt Drive.
     #[command(alias = "upload:folder")]
@@ -114,6 +117,8 @@ enum Commands {
         /// Destination folder id. Leave empty for the root folder.
         #[arg(short = 'i', long)]
         destination: Option<String>,
+        #[command(flatten)]
+        limit: upload_limit::UploadLimitArgs,
     },
     /// Download a file from Internxt Drive by uuid.
     #[command(alias = "download:file")]
@@ -132,6 +137,10 @@ enum Commands {
     Logout,
     /// Display the current user logged into the Internxt CLI.
     Whoami,
+    /// Show account usage: plan, used space (drive/backups), space limit and
+    /// per-file upload limit.
+    #[command(alias = "account", alias = "account-info")]
+    Usage,
     /// List the contents of a folder.
     List {
         /// The folder id to list. Leave empty for the root folder.
@@ -289,6 +298,8 @@ enum Commands {
         /// Print the planned actions without transferring anything.
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+        #[command(flatten)]
+        limit: upload_limit::UploadLimitArgs,
     },
     /// Serve your Internxt Drive over one or more protocols (runs until Ctrl-C).
     ///
@@ -332,6 +343,8 @@ enum Commands {
         /// Serve read-only: reject all writes/mutations on every backend.
         #[arg(long, default_value_t = false)]
         read_only: bool,
+        #[command(flatten)]
+        limit: upload_limit::UploadLimitArgs,
 
         // ---- webdav ----
         /// WebDAV: host to bind (and advertise). 0.0.0.0 accepts LAN clients.
@@ -422,6 +435,8 @@ enum Commands {
         /// user_allow_other in /etc/fuse.conf on Linux).
         #[arg(long, default_value_t = false)]
         allow_other: bool,
+        #[command(flatten)]
+        limit: upload_limit::UploadLimitArgs,
     },
     /// One-way sync: make a local folder match a remote Drive folder (pull).
     #[command(alias = "sync:down")]
@@ -566,6 +581,7 @@ async fn run(cli: Cli) -> Result<()> {
             stdin,
             name,
             size,
+            limit,
         } => {
             commands::upload_file(
                 file.as_deref(),
@@ -573,14 +589,16 @@ async fn run(cli: Cli) -> Result<()> {
                 stdin,
                 name.as_deref(),
                 size,
+                &limit,
             )
             .await?;
         }
         Commands::UploadFolder {
             folder,
             destination,
+            limit,
         } => {
-            commands::upload_folder(&folder, destination.as_deref()).await?;
+            commands::upload_folder(&folder, destination.as_deref(), &limit).await?;
         }
         Commands::DownloadFile {
             id,
@@ -592,6 +610,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Commands::Logout => drive_ops::logout().await?,
         Commands::Whoami => drive_ops::whoami().await?,
+        Commands::Usage => drive_ops::usage().await?,
         Commands::List { id, extended } => drive_ops::list(id.as_deref(), extended).await?,
         Commands::CreateFolder { name, id } => {
             drive_ops::create_folder(&name, id.as_deref()).await?
@@ -630,7 +649,8 @@ async fn run(cli: Cli) -> Result<()> {
             remote,
             delete,
             dry_run,
-        } => sync::sync_up(&local, remote.as_deref(), delete.as_deref(), dry_run).await?,
+            limit,
+        } => sync::sync_up(&local, remote.as_deref(), delete.as_deref(), dry_run, &limit).await?,
         Commands::SyncDown {
             local,
             remote,
@@ -648,6 +668,7 @@ async fn run(cli: Cli) -> Result<()> {
             spool_dir,
             max_concurrent_uploads,
             read_only,
+            limit,
             #[cfg(feature = "webdav")]
             webdav_host,
             #[cfg(feature = "webdav")]
@@ -739,6 +760,7 @@ async fn run(cli: Cli) -> Result<()> {
                 folder_uuid,
                 cache_ttl,
                 max_concurrent_uploads,
+                upload_limit: limit,
                 #[cfg(feature = "webdav")]
                 webdav,
                 #[cfg(all(unix, feature = "fuse"))]
@@ -757,6 +779,7 @@ async fn run(cli: Cli) -> Result<()> {
             max_concurrent_uploads,
             read_only,
             allow_other,
+            limit,
         } => {
             let cache_ttl = if no_cache { 0 } else { cache_ttl };
             let mount = fuse::MountConfig {
@@ -772,6 +795,7 @@ async fn run(cli: Cli) -> Result<()> {
                 folder_uuid,
                 cache_ttl,
                 max_concurrent_uploads,
+                upload_limit: limit,
                 #[cfg(feature = "webdav")]
                 webdav: None,
                 fuse: Some(mount),

@@ -22,6 +22,12 @@ pub fn network_url() -> String {
     get("NETWORK_URL", "https://gateway.internxt.com/network")
 }
 
+/// Payments API base (PAYMENTS_API_URL in the node clients). Used only for the
+/// best-effort plan/tier lookup; the drive gateway covers usage + limits.
+pub fn payments_api_url() -> String {
+    get("PAYMENTS_API_URL", "https://gateway.internxt.com/payments")
+}
+
 /// Secret used for CryptoJS-compatible AES of salt / password hash / credentials file.
 pub fn app_crypto_secret() -> String {
     get("APP_CRYPTO_SECRET", "6KYQBP847D4ATSFA")

@@ -69,6 +69,7 @@ pub async fn serve(
         shared.root_folder.clone(),
         shared.root_updated_at.clone(),
         shared.upload_sem.clone(),
+        shared.upload_limit,
         config,
     ));
     let filesystem = fs::InxtFs::new(inner, tokio::runtime::Handle::current());

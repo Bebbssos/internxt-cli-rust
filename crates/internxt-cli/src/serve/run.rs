@@ -109,6 +109,8 @@ pub struct Shared {
     /// Global upload concurrency limiter (`--max-concurrent-uploads`). `None`
     /// when unlimited. Shared so the cap is process-wide, not per-backend.
     pub upload_sem: Option<Arc<tokio::sync::Semaphore>>,
+    /// Per-file upload size cap, resolved once (flags/env/plan) for every backend.
+    pub upload_limit: crate::upload_limit::UploadLimit,
     /// Folder uuid exposed as the root of every backend (`--folder-uuid`, or the
     /// account / workspace root).
     pub root_folder: String,
@@ -127,6 +129,8 @@ pub struct ServeConfig {
     pub cache_ttl: u64,
     /// Shared upload concurrency cap (0 = unlimited).
     pub max_concurrent_uploads: usize,
+    /// Per-file upload size limit flags (resolved in `run`).
+    pub upload_limit: crate::upload_limit::UploadLimitArgs,
     /// WebDAV backend config (present iff `webdav` is in `protocols`).
     #[cfg(feature = "webdav")]
     pub webdav: Option<crate::webdav::WebdavConfig>,
@@ -155,6 +159,7 @@ pub async fn run(config: ServeConfig) -> Result<()> {
         .clone()
         .unwrap_or_else(|| creds.root_folder().to_string());
     let root_updated_at = fetch_folder_updated_at(&creds, &root_folder).await;
+    let upload_limit = crate::upload_limit::resolve(&config.upload_limit, &creds).await?;
 
     let upload_sem = (config.max_concurrent_uploads > 0)
         .then(|| Arc::new(tokio::sync::Semaphore::new(config.max_concurrent_uploads)));
@@ -162,6 +167,7 @@ pub async fn run(config: ServeConfig) -> Result<()> {
         creds: Arc::new(SharedCreds::new(creds)),
         cache: Arc::new(FolderCache::new(config.cache_ttl)),
         upload_sem,
+        upload_limit,
         root_folder,
         root_updated_at,
     });

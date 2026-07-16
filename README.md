@@ -54,11 +54,12 @@ All commands accept the global `--json` flag, which prints a single JSON result 
 | `login-legacy` | `login:legacy` | `-e, --email <EMAIL>`, `-p, --password <PASSWORD>`, `-w, --twofactor <CODE>` | Log in with email + password. Prompts for any missing value; 2FA prompted if the account requires it. |
 | `logout` | | | Invalidate the session server-side and clear local credentials. |
 | `whoami` | | | Show the currently logged-in user. |
+| `usage` | `account`, `account-info` | | Show account usage: plan, used space (drive/backups), space limit and per-file upload limit. |
 | `workspaces-list` | `workspaces:list` | `-e, --extended` | List the workspaces you belong to. |
 | `workspaces-use` | `workspaces:use` | `-i, --id <WORKSPACE_ID>`, `-p, --personal` | Set the active workspace for subsequent commands (`--personal` switches back to your personal drive). |
 | `workspaces-unset` | `workspaces:unset` | | Unset the active workspace (operate within your personal drive space). |
-| `upload-file` | `upload:file` | `-f, --file <PATH>`, `-i, --destination <FOLDER_ID>` | Upload a single file (streaming; single-part or multipart). |
-| `upload-folder` | `upload:folder` | `-f, --folder <PATH>`, `-i, --destination <FOLDER_ID>` | Recursively upload a folder tree (concurrent file uploads). |
+| `upload-file` | `upload:file` | `-f, --file <PATH>`, `-i, --destination <FOLDER_ID>`, `--no-upload-limit`, `--max-upload-size <SIZE>` | Upload a single file (streaming; single-part or multipart). |
+| `upload-folder` | `upload:folder` | `-f, --folder <PATH>`, `-i, --destination <FOLDER_ID>`, `--no-upload-limit`, `--max-upload-size <SIZE>` | Recursively upload a folder tree (concurrent file uploads). |
 | `download-file` | `download:file` | `-i, --id <FILE_ID>`, `-d, --directory <DIR>`, `-o, --overwrite` | Download + decrypt a file by id, streaming to disk. |
 | `list` | | `-i, --id <FOLDER_ID>`, `-e, --extended` | List a folder's contents. `--extended` adds modified date + size. |
 | `create-folder` | `create:folder` | `-n, --name <NAME>`, `-i, --id <PARENT_ID>` | Create a folder. |
@@ -74,10 +75,49 @@ All commands accept the global `--json` flag, which prints a single JSON result 
 | `trash-clear` | `trash:clear` | `-f, --force` | Empty the trash permanently. Prompts unless `--force` (required in `--json` mode). |
 | `delete-permanently-file` | `delete:permanently:file` | `-i, --id <FILE_ID>` | Permanently delete a file. Cannot be undone. |
 | `delete-permanently-folder` | `delete:permanently:folder` | `-i, --id <FOLDER_ID>` | Permanently delete a folder. Cannot be undone. |
-| `sync-up` | `sync:up` | `-l, --local <DIR>`, `-r, --remote <FOLDER_ID>`, `--delete[=trash\|permanent]`, `--dry-run` | Make a remote folder match a local one (push): upload new/changed files, optionally trash/delete remote extras. |
+| `sync-up` | `sync:up` | `-l, --local <DIR>`, `-r, --remote <FOLDER_ID>`, `--delete[=trash\|permanent]`, `--dry-run`, `--no-upload-limit`, `--max-upload-size <SIZE>` | Make a remote folder match a local one (push): upload new/changed files, optionally trash/delete remote extras. |
 | `sync-down` | `sync:down` | `-l, --local <DIR>`, `-r, --remote <FOLDER_ID>`, `--delete`, `--dry-run` | Make a local folder match a remote one (pull): download new/changed files, optionally remove local extras. |
-| `serve <PROTOCOLS>` | | comma-list of `webdav` / `fuse`; shared: `-i, --folder-uuid`, `--cache-ttl`/`--no-cache`, `-d, --delete-permanently`, `--spool`, `--spool-dir`, `--max-concurrent-uploads`, `--read-only`; `--webdav-*` and `--fuse-*` prefixed per protocol | Run one or more Drive backends in the foreground until Ctrl-C, sharing creds/cache/upload-limit. `serve webdav`, `serve fuse`, `serve webdav,fuse`. |
-| `mount <MOUNTPOINT>` | | `-i, --folder-uuid`, `--read-only`, `-d, --delete-permanently`, `--spool-dir`, `--max-concurrent-uploads`, `--cache-ttl`/`--no-cache`, `--allow-other` | Expose your Drive as a local read-write filesystem via FUSE (Unix only; Ctrl-C to unmount). Thin wrapper over `serve fuse`. |
+| `serve <PROTOCOLS>` | | comma-list of `webdav` / `fuse`; shared: `-i, --folder-uuid`, `--cache-ttl`/`--no-cache`, `-d, --delete-permanently`, `--spool`, `--spool-dir`, `--max-concurrent-uploads`, `--read-only`, `--no-upload-limit`, `--max-upload-size <SIZE>`; `--webdav-*` and `--fuse-*` prefixed per protocol | Run one or more Drive backends in the foreground until Ctrl-C, sharing creds/cache/upload-limit. `serve webdav`, `serve fuse`, `serve webdav,fuse`. |
+| `mount <MOUNTPOINT>` | | `-i, --folder-uuid`, `--read-only`, `-d, --delete-permanently`, `--spool-dir`, `--max-concurrent-uploads`, `--cache-ttl`/`--no-cache`, `--allow-other`, `--no-upload-limit`, `--max-upload-size <SIZE>` | Expose your Drive as a local read-write filesystem via FUSE (Unix only; Ctrl-C to unmount). Thin wrapper over `serve fuse`. |
+
+### Account usage (`usage`)
+
+`usage` (aliases `account`, `account-info`) prints your plan, used space (split
+drive / backups), total space limit and the per-file upload limit:
+
+```
+Plan:               Free
+Used:               3.89 TB / 10 TB (38.9%)
+  Drive:            3.89 TB
+  Backups:          0 B
+Space limit:        10 TB
+Upload file limit:  10 GB
+```
+
+Not an official-CLI command — it fans out the same drive-gateway endpoints the node
+CLI uses internally (`/users/usage`, `/users/limit`, `/files/limits`) plus a
+best-effort plan lookup on the payments API. The plan name reads `Tier (Type)` (e.g.
+`Pro (Subscription)`), collapsing to one value when they agree. Legacy lifetime
+accounts show `Free (Lifetime)` — the tier endpoint mislabels old plans as `free`,
+but the `(Lifetime)` still signals it's a paid plan; the space limit is always
+correct. If the payments API is unreachable the plan shows `unknown`. `--json` adds
+raw `planLabel` / `subscriptionType` fields.
+
+### Upload size limit
+
+Uploads are validated against a per-file size cap before transferring, mirroring the
+node CLI — except there is **no** hard-coded default: when your plan sets no cap,
+uploads are unbounded. The cap is resolved in this order (first match wins):
+
+1. `--no-upload-limit` — disable the check entirely.
+2. `--max-upload-size <SIZE>` — a custom cap (`5GB`, `500M`, `1073741824`, … binary units).
+3. `INTERNXT_MAX_UPLOAD_SIZE` env var — universal override for every upload command.
+   A size string sets a cap; `off` / `none` / `unlimited` / `0` disables it.
+4. Otherwise, your plan's `maxUploadFileSize` (from `/files/limits`; unlimited if unset).
+
+These flags apply to `upload-file`, `upload-folder`, `sync-up`, and the `serve` /
+`mount` backends. Over-limit files are rejected up front (folder/sync uploads skip the
+offending file and continue; WebDAV `PUT` returns `413`; FUSE writes fail `EFBIG`).
 
 ### Sync
 
@@ -116,6 +156,7 @@ WebDAV supported methods: `OPTIONS`, `PROPFIND`, `GET`/`HEAD` (with `Range`), `P
 | `--spool` | off | Spool each upload body to a temp file, then upload from disk, instead of streaming the live client body straight to storage. Costs temp disk + a little latency; more robust for slow/bursty clients. (FUSE always spools; no-op there.) |
 | `--spool-dir <DIR>` | system temp | Directory for spool temp files (created if missing). |
 | `--max-concurrent-uploads <N>` | `0` (unlimited) | Cap how many upload transfers run at once, across all backends. `1` fully serializes. |
+| `--no-upload-limit` / `--max-upload-size <SIZE>` | plan limit | Disable or override the per-file upload size cap (see [Upload size limit](#upload-size-limit)). WebDAV `PUT` over the cap returns `413`; FUSE writes past it fail with `EFBIG`. |
 | `--cache-ttl <SECS>` | `5` | Cache folder listings this many seconds (also the FUSE kernel attr/entry TTL). `0` disables. Only folder listings are cached; file listings stay live, and folder changes invalidate. |
 | `--no-cache` | off | Disable the folder-listing cache (same as `--cache-ttl 0`). |
 
@@ -166,7 +207,10 @@ Needs `libfuse3-dev` + `pkg-config` at build time and a FUSE driver at runtime (
 ```sh
 internxt login                                  # SSO: opens a browser to authenticate
 internxt login-legacy --email you@example.com   # email/password; prompts for password (+ 2FA if enabled)
+internxt usage                                  # plan, used/total space, upload limit
 internxt upload-file -f ./file.bin -i <folder-uuid>
+internxt upload-file -f ./big.iso --max-upload-size 20GB       # override the per-file cap
+internxt upload-file -f ./big.iso --no-upload-limit            # disable the cap
 internxt upload-folder -f ./my-folder           # recursive; -i for a destination folder
 internxt download-file -i <file-uuid> -d ./out --overwrite
 internxt list -e                                # root folder, extended view
@@ -196,7 +240,11 @@ streaming/memory model.
 
 API endpoints and app constants default to the public Internxt values (see
 `crates/internxt-core/src/config.rs`) and can be overridden via environment variables of the
-same name (`DRIVE_NEW_API_URL`, `NETWORK_URL`, etc.).
+same name (`DRIVE_NEW_API_URL`, `NETWORK_URL`, `PAYMENTS_API_URL`, etc.).
+
+`INTERNXT_MAX_UPLOAD_SIZE` sets a universal per-file upload cap across all upload
+commands (a size like `5GB`, or `off` / `none` / `unlimited` / `0` to disable) — see
+[Upload size limit](#upload-size-limit).
 
 ## Credits
 
