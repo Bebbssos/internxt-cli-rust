@@ -14,4 +14,12 @@ pub mod log;
     feature = "sftp"
 ))]
 pub mod run;
+#[cfg(any(
+    feature = "webdav",
+    all(unix, feature = "fuse"),
+    feature = "smb",
+    feature = "nfs",
+    feature = "sftp"
+))]
+pub mod thumbnail;
 pub mod tree;

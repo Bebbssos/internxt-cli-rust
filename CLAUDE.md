@@ -88,7 +88,7 @@ Cargo **workspace**, two crates (bin `internxt` built by the cli crate):
 | **cli** `auth.rs` / `sso.rs` | shims over core: cred persistence, 2FA prompt, browser-open, refresh warnings |
 | **cli** `commands.rs` | upload/download/folder-upload orchestration (args, progress bars, `--json`) |
 | **cli** `sync.rs` | sync-up/down: one-way folder reconcile (tree diff, size+mtime detection, optional `--delete`) |
-| **cli** `serve/` | shared serve code: `run.rs` (orchestrator: parse protocol comma-list, build one `Shared` bundle — creds+cache+global upload semaphore+root — spawn each backend, own the single Ctrl-C via a `watch` flag), `tree.rs` (Drive-tree walk), `cache.rs` (`FolderCache` TTL cache), `creds.rs` (`SharedCreds` + hourly refresh) |
+| **cli** `serve/` | shared serve code: `run.rs` (orchestrator: parse protocol comma-list, build one `Shared` bundle — creds+cache+global upload semaphore+root — spawn each backend, own the single Ctrl-C via a `watch` flag), `tree.rs` (Drive-tree walk), `cache.rs` (`FolderCache` TTL cache), `creds.rs` (`SharedCreds` + hourly refresh), `thumbnail.rs` (`upload_thumbnail_best_effort` — every backend calls it after a write to register an image thumbnail; gated by `INTERNXT_THUMBNAILS`) |
 | **cli** `webdav/` | WebDAV server (feature `webdav`): `mod.rs` (axum + dispatch + auth + TLS), `handlers.rs`, `resource.rs` (URL parse + resolve), `xml.rs` |
 | **cli** `fuse/` | FUSE mount (feature `fuse`, Unix): `mod.rs` (mount + Ctrl-C unmount), `fs.rs` (`fuser::Filesystem`: inode table, sync→tokio bridge, streaming reads, temp-file writes) |
 | **cli** `smb/` | SMB/CIFS server (feature `smb`, default-off): `mod.rs` (`SmbConfig` + `serve`: build `SmbServer`, wire shutdown), `fs.rs` (Drive-backed `ShareBackend`/`Handle`: path resolve, streaming reads, temp-file writes). SMB2/3 wire protocol from the `smb-server` git-dep fork |
@@ -127,6 +127,13 @@ Cargo **workspace**, two crates (bin `internxt` built by the cli crate):
 - **Kyber512** (`safe_pqc_kyber`) interops with node's `@dashlane/pqc-kem-kyber512`. Stored
   key coerced to raw 1632-byte secret (handles base64(raw) and node's double-base64). **`pgp`
   crate needs aes-gcm's re-exported `aes` (`aes_gcm::aes::Aes256`), not top-level `aes` 0.9.**
+- **Thumbnails** (core `thumbnail.rs`, feature `thumbnails` default-on): after a file
+  upload, thumbnailable images (jpg/png/webp/gif/tiff, ≤500MB) get a 300x300 PNG preview
+  via the `image` crate, uploaded to the network + `POST /files/thumbnail`. Best-effort —
+  never fails the parent upload. Wired into upload-file, upload-folder, and every serve
+  backend write (WebDAV PUT spools the image so the bytes survive the main upload). Disable
+  everywhere with `INTERNXT_THUMBNAILS=0` (or `false`/`no`/`off`). PDFs are never
+  thumbnailed (og defines a PDF set but never uses it).
 - **Network auth**: bridge basic auth = `user : sha256(pass).hex` — personal `pass = userId`,
   workspace `pass = networkPass`.
 - **File key**: `sha512( sha512(seed || bucketIdBytes)[0..32] || index )[0..32]`, where

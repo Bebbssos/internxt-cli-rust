@@ -403,14 +403,14 @@ impl WriteState {
         };
         let now = now_rfc3339();
         let old = self.existing_uuid.lock().unwrap().take();
-        match old {
-            Some(old_uuid) => {
-                api.replace_file(token, &old_uuid, &file_id, size)
-                    .await
-                    .map_err(to_status)?;
-            }
-            None => {
-                api.create_file_entry(
+        let file_uuid = match old {
+            Some(old_uuid) => api
+                .replace_file(token, &old_uuid, &file_id, size)
+                .await
+                .map_err(to_status)?
+                .uuid,
+            None => api
+                .create_file_entry(
                     token,
                     &self.plain,
                     &self.ftype,
@@ -422,9 +422,15 @@ impl WriteState {
                     &now,
                 )
                 .await
-                .map_err(to_status)?;
-            }
-        }
+                .map_err(to_status)?
+                .uuid,
+        };
+
+        crate::serve::thumbnail::upload_thumbnail_best_effort(
+            &net, &api, token, &self.bucket, &self.mnemonic, &file_uuid, &self.ftype,
+            &self.temp_path, size, "sftp",
+        )
+        .await;
         Ok(())
     }
 }

@@ -385,23 +385,34 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
     //   from local disk continuously, avoiding the S3 "RequestTimeout: socket not
     //   read from or written to within the timeout period" that a stalled /
     //   executor-starved live stream can trip under a concurrent upload burst.
-    let (file_id, size) = if ctx.config.spool {
+    // A thumbnailable image must be spooled to a temp file even in streaming mode:
+    // thumbnail generation needs the bytes on disk after the main upload, and the
+    // live streaming path retains nothing. `unwrap_or(1)` keeps unknown-length
+    // images eligible (they spool anyway) while still honouring the size cap.
+    let thumb_wanted = internxt_core::config::thumbnails_enabled()
+        && internxt_core::thumbnail::is_image_thumbnailable(&ftype, content_length.unwrap_or(1));
+    let spool_it = ctx.config.spool || content_length.is_none() || thumb_wanted;
+
+    // `retained_tmp` keeps a spooled body alive past the upload so a thumbnail can
+    // be built from it; dropped (temp deleted) at the end of the handler.
+    let (file_id, size, retained_tmp) = if spool_it {
         let tmp = spool_body(req.into_body(), ctx.config.spool_dir.as_deref()).await?;
         ctx.upload_limit
             .check(tmp.size)
             .map_err(|e| AppError::payload_too_large(format!("{e}")))?;
         if tmp.size == 0 {
-            (String::new(), 0)
+            (String::new(), 0, None)
         } else {
             let id = internxt_core::transfer::upload_file_to_network(
                 &net, &bucket, mnemonic, &tmp.path, tmp.size, None,
             )
             .await?;
-            (id, tmp.size)
+            let size = tmp.size;
+            (id, size, Some(tmp))
         }
     } else {
         match content_length {
-            Some(0) => (String::new(), 0),
+            Some(0) => (String::new(), 0, None),
             Some(sz) => {
                 let stream = req
                     .into_body()
@@ -410,40 +421,34 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
                 let reader = StreamReader::new(stream);
                 let id = internxt_core::transfer::upload_stream_to_network(&net, &bucket, mnemonic, reader, sz, None)
                     .await?;
-                (id, sz)
+                (id, sz, None)
             }
-            // No declared length: fall back to spooling so we can learn the size.
-            None => {
-                let tmp = spool_body(req.into_body(), ctx.config.spool_dir.as_deref()).await?;
-                ctx.upload_limit
-                    .check(tmp.size)
-                    .map_err(|e| AppError::payload_too_large(format!("{e}")))?;
-                if tmp.size == 0 {
-                    (String::new(), 0)
-                } else {
-                    let id = internxt_core::transfer::upload_file_to_network(
-                        &net, &bucket, mnemonic, &tmp.path, tmp.size, None,
-                    )
-                    .await?;
-                    (id, tmp.size)
-                }
-            }
+            // No declared length is handled by `spool_it` above (spooled).
+            None => unreachable!("unknown-length bodies are spooled"),
         }
     };
 
     let now = now_rfc3339();
-    api.create_file_entry(
-        token,
-        &plain,
-        &ftype,
-        size,
-        &parent.uuid,
-        &file_id,
-        &bucket,
-        &now,
-        &now,
-    )
-    .await?;
+    let created = api
+        .create_file_entry(
+            token,
+            &plain,
+            &ftype,
+            size,
+            &parent.uuid,
+            &file_id,
+            &bucket,
+            &now,
+            &now,
+        )
+        .await?;
+
+    if let Some(tmp) = &retained_tmp {
+        crate::serve::thumbnail::upload_thumbnail_best_effort(
+            &net, &api, token, &bucket, mnemonic, &created.uuid, &ftype, &tmp.path, size, "webdav",
+        )
+        .await;
+    }
 
     let status = if is_replacement {
         StatusCode::NO_CONTENT

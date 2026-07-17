@@ -401,12 +401,14 @@ impl WriteState {
         // Replace an existing entry in place (keeps uuid/name/folder, swaps
         // fileId+size) — createFileEntry would 409 on the duplicate name.
         let old = self.existing_uuid.lock().unwrap().take();
-        match old {
-            Some(old_uuid) => {
-                api.replace_file(token, &old_uuid, &file_id, size).await.map_err(to_smb)?;
-            }
-            None => {
-                api.create_file_entry(
+        let file_uuid = match old {
+            Some(old_uuid) => api
+                .replace_file(token, &old_uuid, &file_id, size)
+                .await
+                .map_err(to_smb)?
+                .uuid,
+            None => api
+                .create_file_entry(
                     token,
                     &self.plain,
                     &self.ftype,
@@ -418,9 +420,15 @@ impl WriteState {
                     &now,
                 )
                 .await
-                .map_err(to_smb)?;
-            }
-        }
+                .map_err(to_smb)?
+                .uuid,
+        };
+
+        crate::serve::thumbnail::upload_thumbnail_best_effort(
+            &net, &api, token, &self.bucket, &self.mnemonic, &file_uuid, &self.ftype,
+            &self.temp_path, size, "smb",
+        )
+        .await;
         Ok(())
     }
 }

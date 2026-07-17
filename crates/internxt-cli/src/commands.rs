@@ -131,7 +131,8 @@ async fn try_upload_thumbnail(
     path: &Path,
     size: u64,
 ) {
-    if !internxt_core::thumbnail::is_image_thumbnailable(file_type, size) {
+    if !config::thumbnails_enabled() || !internxt_core::thumbnail::is_image_thumbnailable(file_type, size)
+    {
         return;
     }
     let net = NetworkApi::new(creds.net_user(), creds.net_pass());
@@ -568,7 +569,8 @@ async fn upload_one_file(
 
     // Best-effort thumbnail; never fails the folder upload (silent — the shared
     // progress bar owns the terminal here).
-    if internxt_core::thumbnail::is_image_thumbnailable(&file_type, size) {
+    if config::thumbnails_enabled() && internxt_core::thumbnail::is_image_thumbnailable(&file_type, size)
+    {
         let _ = internxt_core::thumbnail::try_upload_thumbnail_from_path(
             net, api, token, bucket, mnemonic, &drive_file.uuid, &file_type, &file.abs, size,
         )

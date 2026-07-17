@@ -549,6 +549,12 @@ impl Inner {
             }
         };
 
+        crate::serve::thumbnail::upload_thumbnail_best_effort(
+            &net, &api, token, &wh.bucket, &wh.mnemonic, &result_uuid, &wh.ftype, &wh.temp_path,
+            size, "fuse",
+        )
+        .await;
+
         let mut t = self.inodes.lock().unwrap();
         if let Some(nd) = t.map.get_mut(&wh.ino) {
             nd.uuid = result_uuid;

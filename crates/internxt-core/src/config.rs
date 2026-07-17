@@ -37,6 +37,19 @@ pub fn desktop_header() -> String {
     get("DESKTOP_HEADER", "3b68706a367fd567b929396290b1de40768bb768")
 }
 
+/// Whether image thumbnail generation/upload is enabled (default on). Set
+/// `INTERNXT_THUMBNAILS` to `0`/`false`/`no`/`off` (case-insensitive) to turn it
+/// off across every upload path (upload-file/-folder and the serve backends).
+pub fn thumbnails_enabled() -> bool {
+    match std::env::var("INTERNXT_THUMBNAILS") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
 use std::sync::OnceLock;
 
 static CLIENT_NAME: OnceLock<String> = OnceLock::new();

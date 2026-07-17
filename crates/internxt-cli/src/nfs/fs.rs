@@ -669,13 +669,14 @@ impl Inner {
             }
         };
         let now = now_rfc3339();
-        match existing {
+        let file_uuid = match existing {
             // Replace an existing Drive entry in place (keeps uuid/name/folder).
             Some(uuid) => {
                 if let Err(e) = api.replace_file(token, &uuid, &file_id, size).await {
                     crate::serve::log::warn(&format!("[nfs] replace_file failed: {e:#}"));
                     return;
                 }
+                uuid
             }
             // First flush of a new file: create the entry now (with content), then
             // remember its uuid so subsequent flushes replace instead of re-create.
@@ -697,13 +698,20 @@ impl Inner {
                     *wb.existing_uuid.lock().unwrap() = Some(created.uuid.clone());
                     self.set_node_uuid(wb.fileid, &created.uuid);
                     self.cache.invalidate(&wb.parent_uuid);
+                    created.uuid
                 }
                 Err(e) => {
                     crate::serve::log::warn(&format!("[nfs] createFileEntry failed: {e:#}"));
                     return;
                 }
             },
-        }
+        };
+
+        crate::serve::thumbnail::upload_thumbnail_best_effort(
+            &net, &api, token, &wb.bucket, &wb.mnemonic, &file_uuid, &wb.ftype, &wb.temp_path,
+            size, "nfs",
+        )
+        .await;
         wb.dirty.store(false, Ordering::SeqCst);
         self.update_file_node(wb.fileid, file_id, size, wb.bucket.clone());
         self.readers.lock().unwrap().remove(&wb.fileid);

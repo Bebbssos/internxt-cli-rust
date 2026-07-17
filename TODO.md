@@ -48,7 +48,9 @@ diff upstream against them to find changes worth pulling in.
   module (feature `thumbnails`, default-on) decodes/resizes/encodes a 300x300 PNG via
   the `image` crate and `POST /files/thumbnail`; wired into `upload-file` + `upload-folder`
   (best-effort, never fails the upload). Only image sources (jpg/png/webp/gif/tiff), as in og.
-  PDF thumbnails and serve-backend PUT thumbnails still TODO.
+  PDF thumbnails still TODO (og also never generates them — its PDF set is unused).
+  Serve backends (WebDAV/FUSE/SMB/NFS/SFTP) also upload thumbnails on write (og only
+  does WebDAV; the rest are our backends). `INTERNXT_THUMBNAILS=0` disables everywhere.
 - Retry with backoff on transient failures (`uploadFileWithRetry`, MAX_RETRIES/DELAYS_MS).
 - Upload size limit check (node enforces a per-file limit; see CLI README "40GB").
 - HMAC on upload (sdk now stores hmac on upload — see sdk commit; node inxt-js
@@ -65,7 +67,10 @@ diff upstream against them to find changes worth pulling in.
   `server.requestTimeout`). Add a tower `TimeoutLayer` if needed.
 - No local drive cache / path→uuid database (og uses sqlite); every resolution walks
   the folder tree. Fine for typical trees; could be slow for very large/deep folders.
-- No thumbnail upload on PUT (shares the general thumbnail gap above).
+- ~~No thumbnail upload on PUT.~~ **Done** — PUT registers an image thumbnail like
+  upload-file. A thumbnailable image is spooled to a temp file even in streaming mode
+  (the thumbnail needs the bytes after the main upload); non-image / thumbnails-off PUTs
+  keep the pure streaming path.
 - Range GET decrypts from the start and discards the prefix (CTR is continuous); a
   large offset still downloads+decrypts the skipped bytes. Proper CTR-offset seeking
   would avoid that (same math as the Download range item).
@@ -82,8 +87,8 @@ diff upstream against them to find changes worth pulling in.
   `truncate(2)` on a closed file updates local metadata only (no Drive rewrite).
 - Read-modify-write of a large existing file downloads the whole file first (materialize),
   then re-uploads it whole. Fine for typical edits; heavy for huge files.
-- No `--timeout`, no thumbnail upload (shares the general gaps). macOS/FreeBSD build the
-  same way but are untested here (developed/verified on Linux + libfuse3).
+- No `--timeout`. Thumbnails ARE uploaded on write (from the whole-file temp). macOS/FreeBSD
+  build the same way but are untested here (developed/verified on Linux + libfuse3).
 
 ### SMB/CIFS (`serve smb`, beyond og — no official equivalent, experimental, feature default-off)
 - Shares the whole-file write + streaming/ranged read model with FUSE, so the same caveats
