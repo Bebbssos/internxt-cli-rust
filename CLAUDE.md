@@ -12,9 +12,10 @@ Commands: **login** (legacy email/password + web **SSO**), **upload-file /
 download-file / upload-folder**, drive management (**logout, whoami, list,
 create-folder, move/rename/trash/restore, trash-list/clear, delete-permanently**),
 **workspaces** (list/use/unset, workspace-scoped), one-way **sync** (sync-up/down),
-a foreground multi-protocol **serve** (`serve webdav,fuse,smb,…`) exposing Drive
-over **WebDAV**, a **FUSE mount** (Unix) and an **SMB/CIFS** share, plus a
-top-level **mount** convenience command. Global **`--json`** flag on all commands.
+a foreground multi-protocol **serve** (`serve webdav,fuse,smb,nfs,sftp`) exposing
+Drive over **WebDAV**, a **FUSE mount** (Unix), an **SMB/CIFS** share, an **NFSv3**
+export and an **SFTP** share, plus a top-level **mount** convenience command.
+Global **`--json`** flag on all commands.
 
 Roadmap + what's missing, pinned upstream commits: see [TODO.md](TODO.md).
 
@@ -89,6 +90,8 @@ Cargo **workspace**, two crates (bin `internxt` built by the cli crate):
 | **cli** `webdav/` | WebDAV server (feature `webdav`): `mod.rs` (axum + dispatch + auth + TLS), `handlers.rs`, `resource.rs` (URL parse + resolve), `xml.rs` |
 | **cli** `fuse/` | FUSE mount (feature `fuse`, Unix): `mod.rs` (mount + Ctrl-C unmount), `fs.rs` (`fuser::Filesystem`: inode table, sync→tokio bridge, streaming reads, temp-file writes) |
 | **cli** `smb/` | SMB/CIFS server (feature `smb`, default-off): `mod.rs` (`SmbConfig` + `serve`: build `SmbServer`, wire shutdown), `fs.rs` (Drive-backed `ShareBackend`/`Handle`: path resolve, streaming reads, temp-file writes). SMB2/3 wire protocol from the `smb-server` git-dep fork |
+| **cli** `nfs/` | NFSv3 server (feature `nfs`, default-off, all platforms): `mod.rs` (`NfsConfig` + `serve`: bind `NFSTcpListener`, spawn idle-flush sweeper, wire shutdown), `fs.rs` (Drive-backed `NFSFileSystem`: id-based inode table like FUSE, streaming reads, temp-buffer writes flushed on idle — NFS has no close). Wire protocol from `nfsserve` |
+| **cli** `sftp/` | SFTP server (feature `sftp`, default-off, all platforms): `mod.rs` (`SftpConfig` + `serve`: build `russh` SSH server w/ host key, wire shutdown), `fs.rs` (`SshServer`/`SshSession` = `russh::server::Handler` for transport+auth; `SftpSession` = `russh_sftp::server::Handler` over Drive: path resolve, per-session open/close handle map, streaming reads, temp-file writes uploaded on `close`). SSH transport from `russh`, SFTP subsystem from `russh-sftp` |
 | **cli** `drive_ops.rs` | logout, whoami, list, create/move/rename/trash/delete |
 | **cli** `workspaces.rs` | workspaces list/use/unset; decrypts workspace mnemonic |
 | **cli** `output.rs` | `--json` vs human switch (`emit`/`status`/`emit_error`); `bar_sink` |
@@ -137,16 +140,20 @@ Cargo **workspace**, two crates (bin `internxt` built by the cli crate):
 - **No secrets in the repo.** `APP_CRYPTO_SECRET` / `DESKTOP_HEADER` in `config.rs` are public
   per-client constants from upstream `.env.template`, not user data. `og/`, `target/` git-ignored.
 
-### serve / WebDAV / FUSE / SMB
+### serve / WebDAV / FUSE / SMB / NFS / SFTP
 
 - **serve** (`serve/run.rs`): `serve` takes a **comma-separated positional protocol list**
-  (`serve webdav,fuse,smb`) — not a clap subcommand — so several backends run in one foreground
-  process (Ctrl-C stops all). **Shared** flags (`-i/--folder-uuid`, `--cache-ttl`/`--no-cache`,
-  `-d/--delete-permanently`, `--spool`, `--spool-dir`, `--max-concurrent-uploads`,
-  `--read-only`) back one `SharedCreds`, one `FolderCache`, one global upload `Semaphore`.
-  **Protocol-specific** flags are prefixed (`--webdav-*`, `--fuse-*`, `--smb-*`). `mount` is a
-  thin wrapper calling the orchestrator with a single-`fuse` list. Unknown / not-implemented
-  (`sftp`) / feature-off protocols error at parse time.
+  (`serve webdav,fuse,smb,nfs,sftp`) — not a clap subcommand — so several backends run in one
+  foreground process (Ctrl-C stops all). **Shared** flags (`-i/--folder-uuid`,
+  `--cache-ttl`/`--no-cache`, `-d/--delete-permanently`, `--spool`, `--spool-dir`,
+  `--max-concurrent-uploads`, `--read-only`) back one `SharedCreds`, one `FolderCache`, one
+  global upload `Semaphore`. **Protocol-specific** flags are prefixed (`--webdav-*`, `--fuse-*`,
+  `--smb-*`, `--nfs-*`, `--sftp-*`). `mount` is a thin wrapper calling the orchestrator with a
+  single-`fuse` list. Unknown / feature-off protocols error at parse time.
+- **Logging** (`serve/log.rs`): a process-global `--verbose`/`-v` flag (set once by `serve`/`mount`)
+  gates the per-op request traces. Every backend's `log()` routes to `serve::log::trace`
+  (verbose-only); errors/warnings go through `serve::log::warn` (always). WebDAV's header dump is
+  gated by `--verbose` **or** `INTERNXT_WEBDAV_DEBUG`. Default output = errors/warnings only.
 - **WebDAV** (feature `webdav`, default-on): foreground backend, not og's pm2 daemon. axum
   `Router::fallback` dispatches by method. Path→item walks the folder tree (workspace-aware),
   subfolder listings cached in-process (`--cache-ttl`, default 5s); file listings stay live.
@@ -193,6 +200,36 @@ Cargo **workspace**, two crates (bin `internxt` built by the cli crate):
   -username/-password` (port default 4445, since 445 needs root/admin; a password is recommended
   — Windows refuses anonymous). The `smb-server` git-dep is optional, only pulled when the `smb`
   feature is on, so a default `cargo build` never fetches or compiles it.
+- **NFSv3** (feature `nfs`, **default-OFF**, all platforms): foreground `serve nfs` exposing Drive
+  as a **read-write** NFSv3 export (`mount -t nfs` on Linux/macOS). Wire protocol + mount + portmap
+  from the `nfsserve` crate; we implement its `NFSFileSystem` over Drive in `nfs/fs.rs`. **Id-based**
+  like FUSE (`fileid3` = u64), so it keeps an `InodeTable` interning items on `lookup`/`readdir`
+  (root id 1). **Reads** reuse FUSE's sequential streaming reader, cached per file id. **Writes** are
+  the awkward part — NFSv3 has **no open/close for data**, so nothing signals "done": each written
+  file is buffered to a temp file (existing content materialized lazily) and marked dirty; a
+  background **sweeper** (`Inner::sweep`, ticked from `nfs::serve`) uploads it once writes have been
+  idle ~2s (`FLUSH_IDLE`), replacing the Drive entry in place (`replace_file`), then evicts the
+  buffer after ~30s quiet (`EVICT_IDLE`); a final `flush_all` runs on shutdown. `create` only
+  **interns a pending node** (empty uuid, no Drive call); the entry is created lazily on the first
+  flush **with content** (`existing_uuid: None` → `createFileEntry`, then remembers the uuid so later
+  flushes replace). A file created but never written never persists — deliberate, since free/legacy
+  plans 402 on empty files (`createFileEntry` of a 0-byte file). `--nfs-host/-port` (port
+  default 12049, since 2049 needs root/admin; mount with `-o port=…,mountport=…`). `nfsserve` is
+  optional, only pulled with the `nfs` feature.
+- **SFTP** (feature `sftp`, **default-OFF**, all platforms): foreground `serve sftp` exposing Drive
+  as a **read-write** SFTP share (`sftp`/`scp -s`/WinSCP/FileZilla/`sshfs`). SSH transport + kex +
+  auth from `russh`; SFTP subsystem wire protocol from `russh-sftp`. `sftp/fs.rs` implements
+  `russh::server::Handler` (`SshSession`: password auth — public-key rejected to force password;
+  `sftp` subsystem → `russh_sftp::server::run`) and `russh_sftp::server::Handler` (`SftpSession`:
+  the Drive backend). **Path-based** like SMB (re-resolve via the shared `tree` walk); SFTP has
+  explicit **open/close**, so it keeps a **per-session** open-handle map (`&mut self`, no locks) and
+  **reads** reuse the sequential streaming reader while **writes** reuse the whole-file temp model
+  uploaded on `close` (SMB/FUSE-style). Host key: `--sftp-host-key <PATH>` (OpenSSH), else a
+  **persistent** Ed25519 key auto-generated once at `~/.internxt-cli/sftp_host_key` (mode 0600) and
+  reused after, so the fingerprint is stable across restarts. `--sftp-host/-port/-username/-password`
+  (port default 2022, since
+  22 needs root/admin; omit `--sftp-password` to accept any). `russh`/`russh-sftp` are optional, only
+  pulled with the `sftp` feature.
 
 ## Build / test / run
 
@@ -200,6 +237,8 @@ Cargo **workspace**, two crates (bin `internxt` built by the cli crate):
 cargo build --release        # -> target/release/internxt (SSO + WebDAV-over-HTTP + FUSE default; FUSE needs libfuse3-dev+pkg-config on Unix)
 cargo build --release --features webdav-tls    # + HTTPS for WebDAV
 cargo build --release --features smb           # + SMB/CIFS share (default-off; pulls smb-server fork)
+cargo build --release --features nfs           # + NFSv3 export (default-off; pulls nfsserve)
+cargo build --release --features sftp          # + SFTP share (default-off; pulls russh)
 cargo build --release --no-default-features    # smaller: legacy login only (no axum/open/webdav/fuse)
 cargo test                                     # crypto cross-check vs node (no network)
 
@@ -210,6 +249,8 @@ target/release/internxt download-file -i <file-uuid> -d ./out --overwrite
 target/release/internxt workspaces-use -i <workspace-uuid>     # scope later commands; --personal to unset
 target/release/internxt serve webdav,fuse --fuse-mountpoint ~/drive   # both, shared cache/creds
 target/release/internxt serve smb --smb-password secret               # SMB share (needs --features smb); mount -t cifs //host/internxt /mnt -o port=4445
+target/release/internxt serve nfs --nfs-host 0.0.0.0                  # NFSv3 export (needs --features nfs); mount -t nfs -o nolock,vers=3,tcp,port=12049,mountport=12049 host:/ /mnt
+target/release/internxt serve sftp --sftp-password secret             # SFTP share (needs --features sftp); sftp -P 2022 internxt@host
 target/release/internxt mount ~/drive                          # FUSE only (Unix; Ctrl-C to unmount)
 ```
 

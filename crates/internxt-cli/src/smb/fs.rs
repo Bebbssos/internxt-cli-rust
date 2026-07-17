@@ -40,10 +40,10 @@ pub(crate) fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-/// Per-op logging to stderr (leaves stdout clean), mirroring the WebDAV/FUSE
-/// backends' `[METHOD] path` request log.
+/// Per-op request trace (`[METHOD] path`). Verbose-only: printed just when
+/// `--verbose` is set, so a busy share doesn't spam stderr by default.
 pub(crate) fn log(msg: &str) {
-    eprintln!("{msg}");
+    crate::serve::log::trace(msg);
 }
 
 /// Stable, non-zero 64-bit id derived from a Drive uuid, for `FileInfo.file_index`.
@@ -243,7 +243,7 @@ impl ReadState {
             )
             .await
             {
-                eprintln!("[smb] read stream error: {e:#}");
+                crate::serve::log::warn(&format!("[smb] read stream error: {e:#}"));
             }
             let _ = writer.shutdown().await;
         });

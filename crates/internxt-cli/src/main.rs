@@ -3,9 +3,13 @@ mod commands;
 mod drive_ops;
 #[cfg(all(unix, feature = "fuse"))]
 mod fuse;
+#[cfg(feature = "nfs")]
+mod nfs;
 mod output;
-#[cfg(any(feature = "webdav", feature = "fuse", feature = "smb"))]
+#[cfg(any(feature = "webdav", feature = "fuse", feature = "smb", feature = "nfs", feature = "sftp"))]
 mod serve;
+#[cfg(feature = "sftp")]
+mod sftp;
 #[cfg(feature = "smb")]
 mod smb;
 #[cfg(feature = "sso")]
@@ -40,6 +44,10 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// The `Serve` variant carries many protocol-specific flags (more with the
+// non-default nfs/sftp features). This enum is parsed once at startup, so the
+// size disparity between variants is irrelevant.
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Log in to your Internxt account.
     ///
@@ -311,9 +319,9 @@ enum Commands {
     /// (`--cache-ttl`, `--folder-uuid`, `--delete-permanently`, `--spool`,
     /// `--spool-dir`, `--max-concurrent-uploads`, `--read-only`); protocol
     /// specific knobs are prefixed (`--webdav-port`, `--fuse-mountpoint`, …).
-    #[cfg(any(feature = "webdav", all(unix, feature = "fuse"), feature = "smb"))]
+    #[cfg(any(feature = "webdav", all(unix, feature = "fuse"), feature = "smb", feature = "nfs", feature = "sftp"))]
     Serve {
-        /// Comma-separated protocols to serve (known: webdav, fuse, smb).
+        /// Comma-separated protocols to serve (known: webdav, fuse, smb, nfs, sftp).
         #[arg(value_name = "PROTOCOLS")]
         protocols: String,
 
@@ -345,6 +353,10 @@ enum Commands {
         /// Serve read-only: reject all writes/mutations on every backend.
         #[arg(long, default_value_t = false)]
         read_only: bool,
+        /// Verbose: log every per-operation request across all backends. Without
+        /// it, only errors/warnings are printed.
+        #[arg(short = 'v', long, default_value_t = false)]
+        verbose: bool,
         #[command(flatten)]
         limit: upload_limit::UploadLimitArgs,
 
@@ -426,6 +438,42 @@ enum Commands {
         #[cfg(feature = "smb")]
         #[arg(long)]
         smb_password: Option<String>,
+
+        // ---- nfs ----
+        /// NFS: host to bind (and advertise). 0.0.0.0 accepts LAN clients.
+        #[cfg(feature = "nfs")]
+        #[arg(long, default_value = "127.0.0.1")]
+        nfs_host: String,
+        /// NFS: TCP port. The well-known NFS port 2049 needs root/admin; the
+        /// default is an unprivileged port (mount with `-o port=...,mountport=...`).
+        #[cfg(feature = "nfs")]
+        #[arg(long, default_value_t = 12049)]
+        nfs_port: u16,
+
+        // ---- sftp ----
+        /// SFTP: host to bind (and advertise). 0.0.0.0 accepts LAN clients.
+        #[cfg(feature = "sftp")]
+        #[arg(long, default_value = "127.0.0.1")]
+        sftp_host: String,
+        /// SFTP: TCP port. The well-known SSH port 22 needs root/admin; the
+        /// default is an unprivileged port (connect with `sftp -P <port> ...`).
+        #[cfg(feature = "sftp")]
+        #[arg(long, default_value_t = 2022)]
+        sftp_port: u16,
+        /// SFTP: username required from clients.
+        #[cfg(feature = "sftp")]
+        #[arg(long, default_value = "internxt")]
+        sftp_username: String,
+        /// SFTP: password required from clients. Omit to accept any password
+        /// (the username is still required). A password is recommended.
+        #[cfg(feature = "sftp")]
+        #[arg(long)]
+        sftp_password: Option<String>,
+        /// SFTP: path to an SSH host private key (OpenSSH/PEM). Omit to generate
+        /// an ephemeral key on each start (clients will see a changed host key).
+        #[cfg(feature = "sftp")]
+        #[arg(long, value_name = "PATH")]
+        sftp_host_key: Option<String>,
     },
     /// Mount your Internxt Drive as a local filesystem via FUSE (runs until Ctrl-C).
     ///
@@ -462,6 +510,10 @@ enum Commands {
         /// user_allow_other in /etc/fuse.conf on Linux).
         #[arg(long, default_value_t = false)]
         allow_other: bool,
+        /// Verbose: log every per-operation request. Without it, only
+        /// errors/warnings are printed.
+        #[arg(short = 'v', long, default_value_t = false)]
+        verbose: bool,
         #[command(flatten)]
         limit: upload_limit::UploadLimitArgs,
     },
@@ -695,6 +747,7 @@ async fn run(cli: Cli) -> Result<()> {
             spool_dir,
             max_concurrent_uploads,
             read_only,
+            verbose,
             limit,
             #[cfg(feature = "webdav")]
             webdav_host,
@@ -730,8 +783,23 @@ async fn run(cli: Cli) -> Result<()> {
             smb_username,
             #[cfg(feature = "smb")]
             smb_password,
+            #[cfg(feature = "nfs")]
+            nfs_host,
+            #[cfg(feature = "nfs")]
+            nfs_port,
+            #[cfg(feature = "sftp")]
+            sftp_host,
+            #[cfg(feature = "sftp")]
+            sftp_port,
+            #[cfg(feature = "sftp")]
+            sftp_username,
+            #[cfg(feature = "sftp")]
+            sftp_password,
+            #[cfg(feature = "sftp")]
+            sftp_host_key,
         } => {
             let protocols = serve::run::parse_protocols(&protocols)?;
+            serve::log::set_verbose(verbose);
             let cache_ttl = if no_cache { 0 } else { cache_ttl };
             let spool_dir = spool_dir.map(std::path::PathBuf::from);
             // `spool` only affects the WebDAV backend (FUSE writes always spool);
@@ -809,6 +877,35 @@ async fn run(cli: Cli) -> Result<()> {
                 None
             };
 
+            #[cfg(feature = "nfs")]
+            let nfs = if protocols.contains(&serve::run::Protocol::Nfs) {
+                Some(nfs::NfsConfig {
+                    host: nfs_host,
+                    port: nfs_port,
+                    delete_permanently,
+                    read_only,
+                    spool_dir: spool_dir.clone(),
+                })
+            } else {
+                None
+            };
+
+            #[cfg(feature = "sftp")]
+            let sftp = if protocols.contains(&serve::run::Protocol::Sftp) {
+                Some(sftp::SftpConfig {
+                    host: sftp_host,
+                    port: sftp_port,
+                    username: sftp_username,
+                    password: sftp_password,
+                    host_key: sftp_host_key.map(std::path::PathBuf::from),
+                    delete_permanently,
+                    read_only,
+                    spool_dir: spool_dir.clone(),
+                })
+            } else {
+                None
+            };
+
             let config = serve::run::ServeConfig {
                 protocols,
                 folder_uuid,
@@ -821,6 +918,10 @@ async fn run(cli: Cli) -> Result<()> {
                 fuse,
                 #[cfg(feature = "smb")]
                 smb,
+                #[cfg(feature = "nfs")]
+                nfs,
+                #[cfg(feature = "sftp")]
+                sftp,
             };
             serve::run::run(config).await?;
         }
@@ -835,8 +936,10 @@ async fn run(cli: Cli) -> Result<()> {
             max_concurrent_uploads,
             read_only,
             allow_other,
+            verbose,
             limit,
         } => {
+            serve::log::set_verbose(verbose);
             let cache_ttl = if no_cache { 0 } else { cache_ttl };
             let mount = fuse::MountConfig {
                 mountpoint: std::path::PathBuf::from(mountpoint),
@@ -857,6 +960,10 @@ async fn run(cli: Cli) -> Result<()> {
                 fuse: Some(mount),
                 #[cfg(feature = "smb")]
                 smb: None,
+                #[cfg(feature = "nfs")]
+                nfs: None,
+                #[cfg(feature = "sftp")]
+                sftp: None,
             };
             serve::run::run(config).await?;
         }

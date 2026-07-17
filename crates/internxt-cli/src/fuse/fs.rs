@@ -54,10 +54,10 @@ pub(crate) fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-/// Per-operation logging to stderr (leaves stdout clean), mirroring the WebDAV
-/// server's `[METHOD] path` request log so you can see what the mount is doing.
+/// Per-operation request trace (`[METHOD] path`). Verbose-only: printed just
+/// when `--verbose` is set, so a busy mount doesn't spam stderr by default.
 pub(crate) fn log(msg: &str) {
-    eprintln!("{msg}");
+    crate::serve::log::trace(msg);
 }
 
 /// Parse an RFC3339 timestamp into a `SystemTime`, falling back to the epoch.
@@ -156,7 +156,7 @@ impl ReadHandle {
             )
             .await
             {
-                eprintln!("[mount] read stream error: {e:#}");
+                crate::serve::log::warn(&format!("[mount] read stream error: {e:#}"));
             }
             let _ = writer.shutdown().await;
         });
@@ -977,7 +977,9 @@ impl Filesystem for InxtFs {
                     match inner.finalize_write(wh.clone()).await {
                         Ok(_) if dirty => log(&format!("[UPLOAD] {path} done")),
                         Ok(_) => {}
-                        Err(e) => log(&format!("[ERROR] upload {path} failed: {e:#}")),
+                        Err(e) => {
+                            crate::serve::log::warn(&format!("[ERROR] upload {path} failed: {e:#}"))
+                        }
                     }
                 }
             }

@@ -139,7 +139,11 @@ impl From<anyhow::Error> for AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        log(&format!("[ERROR] [{}] {}", self.status.as_u16(), self.message));
+        crate::serve::log::warn(&format!(
+            "[ERROR] [{}] {}",
+            self.status.as_u16(),
+            self.message
+        ));
         let body = xml::error(&self.message);
         Response::builder()
             .status(self.status)
@@ -149,9 +153,16 @@ impl IntoResponse for AppError {
     }
 }
 
-/// Minimal WebDAV request logging to stderr (leaves stdout clean).
+/// Per-request trace (`[METHOD] path`). Verbose-only: printed just when
+/// `--verbose` is set, so a busy server doesn't spam stderr by default.
 pub(crate) fn log(msg: &str) {
-    eprintln!("{msg}");
+    crate::serve::log::trace(msg);
+}
+
+/// Whether the wire-level header dump is enabled: the legacy
+/// `INTERNXT_WEBDAV_DEBUG` env var, or the shared `--verbose` flag.
+fn debug_enabled() -> bool {
+    std::env::var("INTERNXT_WEBDAV_DEBUG").is_ok() || crate::serve::log::verbose()
 }
 
 /// Run the WebDAV backend until `shutdown` resolves. Credentials, the folder
@@ -250,16 +261,12 @@ async fn dispatch(State(ctx): State<Arc<Ctx>>, req: Request) -> Response {
     log(&format!("[{}] {}", method.as_str(), req.uri().path()));
 
     // Opt-in wire-level debug: dump the request line + all headers so we can see
-    // exactly what a client (e.g. WinSCP) sends. Enable with INTERNXT_WEBDAV_DEBUG=1.
-    if std::env::var("INTERNXT_WEBDAV_DEBUG").is_ok() {
-        log(&format!(
-            "  >> {} {} {:?}",
-            method.as_str(),
-            req.uri(),
-            req.version()
-        ));
+    // exactly what a client (e.g. WinSCP) sends. Enable with INTERNXT_WEBDAV_DEBUG=1
+    // or --verbose.
+    if debug_enabled() {
+        eprintln!("  >> {} {} {:?}", method.as_str(), req.uri(), req.version());
         for (name, value) in req.headers() {
-            log(&format!("  >> {}: {}", name, value.to_str().unwrap_or("<binary>")));
+            eprintln!("  >> {}: {}", name, value.to_str().unwrap_or("<binary>"));
         }
     }
 
@@ -315,14 +322,10 @@ async fn dispatch(State(ctx): State<Arc<Ctx>>, req: Request) -> Response {
     };
 
     let resp = result.unwrap_or_else(|e| e.into_response());
-    if std::env::var("INTERNXT_WEBDAV_DEBUG").is_ok() {
-        log(&format!(
-            "  << {} response {}",
-            method.as_str(),
-            resp.status().as_u16()
-        ));
+    if debug_enabled() {
+        eprintln!("  << {} response {}", method.as_str(), resp.status().as_u16());
         for (name, value) in resp.headers() {
-            log(&format!("  << {}: {}", name, value.to_str().unwrap_or("<binary>")));
+            eprintln!("  << {}: {}", name, value.to_str().unwrap_or("<binary>"));
         }
     }
     resp

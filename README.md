@@ -37,6 +37,11 @@ cargo build --release
 # add HTTPS support to the WebDAV server (pulls in a rustls TLS stack):
 cargo build --release --features webdav-tls
 
+# add the SMB / NFS / SFTP backends (all off by default):
+cargo build --release --features smb          # SMB2/3 share
+cargo build --release --features nfs          # NFSv3 export
+cargo build --release --features sftp         # SFTP over SSH (pulls in russh)
+
 # smaller binary without SSO login, WebDAV or FUSE (drops axum + open + fuser):
 cargo build --release --no-default-features
 ```
@@ -77,7 +82,7 @@ All commands accept the global `--json` flag, which prints a single JSON result 
 | `delete-permanently-folder` | `delete:permanently:folder` | `-i, --id <FOLDER_ID>` | Permanently delete a folder. Cannot be undone. |
 | `sync-up` | `sync:up` | `-l, --local <DIR>`, `-r, --remote <FOLDER_ID>`, `--delete[=trash\|permanent]`, `--dry-run`, `--no-upload-limit`, `--max-upload-size <SIZE>` | Make a remote folder match a local one (push): upload new/changed files, optionally trash/delete remote extras. |
 | `sync-down` | `sync:down` | `-l, --local <DIR>`, `-r, --remote <FOLDER_ID>`, `--delete`, `--dry-run` | Make a local folder match a remote one (pull): download new/changed files, optionally remove local extras. |
-| `serve <PROTOCOLS>` | | comma-list of `webdav` / `fuse`; shared: `-i, --folder-uuid`, `--cache-ttl`/`--no-cache`, `-d, --delete-permanently`, `--spool`, `--spool-dir`, `--max-concurrent-uploads`, `--read-only`, `--no-upload-limit`, `--max-upload-size <SIZE>`; `--webdav-*` and `--fuse-*` prefixed per protocol | Run one or more Drive backends in the foreground until Ctrl-C, sharing creds/cache/upload-limit. `serve webdav`, `serve fuse`, `serve webdav,fuse`. |
+| `serve <PROTOCOLS>` | | comma-list of `webdav` / `fuse` / `smb` / `nfs` / `sftp`; shared: `-i, --folder-uuid`, `--cache-ttl`/`--no-cache`, `-d, --delete-permanently`, `--spool`, `--spool-dir`, `--max-concurrent-uploads`, `--read-only`, `--no-upload-limit`, `--max-upload-size <SIZE>`; `--webdav-*`, `--fuse-*`, `--smb-*`, `--nfs-*`, `--sftp-*` prefixed per protocol | Run one or more Drive backends in the foreground until Ctrl-C, sharing creds/cache/upload-limit. `serve webdav`, `serve fuse`, `serve webdav,fuse`, `serve smb`, `serve nfs`, `serve sftp`. |
 | `mount <MOUNTPOINT>` | | `-i, --folder-uuid`, `--read-only`, `-d, --delete-permanently`, `--spool-dir`, `--max-concurrent-uploads`, `--cache-ttl`/`--no-cache`, `--allow-other`, `--no-upload-limit`, `--max-upload-size <SIZE>` | Expose your Drive as a local read-write filesystem via FUSE (Unix only; Ctrl-C to unmount). Thin wrapper over `serve fuse`. |
 
 ### Account usage (`usage`)
@@ -123,11 +128,11 @@ offending file and continue; WebDAV `PUT` returns `413`; FUSE writes fail `EFBIG
 
 `sync-up` and `sync-down` do a single **one-way** reconcile pass then exit (not a daemon). The source side always wins — there is no bidirectional mode and no conflict resolution. Files are keyed by relative path; change detection compares size, then `modificationTime` (±2s tolerance). `--dry-run` prints the plan without transferring; `--json` emits a summary object with counts + per-action list. Downloaded files are stamped with the remote modification time so repeat runs are idempotent. `--delete` is opt-in and off by default; it prunes both extra files **and** extra folders (deleting the top-most extra folder cascades its whole subtree).
 
-### serve (WebDAV + FUSE + SMB)
+### serve (WebDAV + FUSE + SMB + NFS + SFTP)
 
-`serve` runs one or more Drive backends in the **foreground** until Ctrl-C. Pass a comma-separated protocol list; `webdav`, `fuse` (Unix) and `smb` are supported. Running several at once shares one set of credentials, one folder-listing cache and one global upload limit. Shared flags are bare (`--cache-ttl`, `--read-only`, …); protocol-specific flags are prefixed (`--webdav-*`, `--fuse-*`, `--smb-*`).
+`serve` runs one or more Drive backends in the **foreground** until Ctrl-C. Pass a comma-separated protocol list; `webdav`, `fuse` (Unix), `smb`, `nfs` and `sftp` are supported. Running several at once shares one set of credentials, one folder-listing cache and one global upload limit. Shared flags are bare (`--cache-ttl`, `--read-only`, …); protocol-specific flags are prefixed (`--webdav-*`, `--fuse-*`, `--smb-*`, `--nfs-*`, `--sftp-*`).
 
-Unlike the official CLI — which runs WebDAV as a pm2-managed background service configured through a separate `webdav-config` command — this port runs it inline as a normal foreground command. `smb` is **experimental**, off by default, and must be built in (`--features smb`); `sftp` may follow later.
+Unlike the official CLI — which runs WebDAV as a pm2-managed background service configured through a separate `webdav-config` command — this port runs it inline as a normal foreground command. `smb`, `nfs` and `sftp` are **experimental**, off by default, and must be built in (`--features smb` / `nfs` / `sftp`).
 
 ```sh
 internxt serve webdav                                    # http://127.0.0.1:3005
@@ -138,6 +143,8 @@ internxt serve webdav --webdav-https                     # HTTPS, self-signed ce
 internxt serve webdav --webdav-https --webdav-cert cert.pem --webdav-key key.pem
 internxt serve fuse --fuse-mountpoint ~/drive            # FUSE mount (Unix)
 internxt serve smb --smb-password secret                 # SMB share (needs `--features smb`)
+internxt serve nfs --nfs-host 0.0.0.0                    # NFSv3 export (needs `--features nfs`)
+internxt serve sftp --sftp-password secret               # SFTP share (needs `--features sftp`)
 internxt serve webdav,fuse --fuse-mountpoint ~/drive     # both at once, shared cache/creds
 internxt serve webdav --read-only -i <folder-uuid>       # read-only, rooted at a subfolder
 internxt serve webdav --spool --spool-dir /var/tmp/inxt  # spool each upload to disk first (see below)
@@ -154,6 +161,7 @@ WebDAV supported methods: `OPTIONS`, `PROPFIND`, `GET`/`HEAD` (with `Range`), `P
 | `-i, --folder-uuid <UUID>` | account/workspace root | Expose a subfolder as the root of every backend. |
 | `-d, --delete-permanently` | off | Hard-delete instead of moving to trash. |
 | `--read-only` | off | Reject all writes/mutations on every backend. |
+| `-v, --verbose` | off | Log every per-operation request (`[OPEN]`, `[READ]`, …) across all backends. Without it, only errors/warnings (and upload/download failures) are printed. Also enables the WebDAV wire-level header dump (same as `INTERNXT_WEBDAV_DEBUG=1`). |
 | `--spool` | off | Spool each upload body to a temp file, then upload from disk, instead of streaming the live client body straight to storage. Costs temp disk + a little latency; more robust for slow/bursty clients. (FUSE always spools; no-op there.) |
 | `--spool-dir <DIR>` | system temp | Directory for spool temp files (created if missing). |
 | `--max-concurrent-uploads <N>` | `0` (unlimited) | Cap how many upload transfers run at once, across all backends. `1` fully serializes. |
@@ -192,9 +200,32 @@ WebDAV supported methods: `OPTIONS`, `PROPFIND`, `GET`/`HEAD` (with `Range`), `P
 | `--smb-username <USER>` | `internxt` | Username required from clients (with `--smb-password`). |
 | `--smb-password <PASS>` | — | Password required from clients. Omit for an anonymous (guest) share — most clients, Windows especially, refuse anonymous, so a password is recommended. |
 
+#### NFS flags (`--nfs-*`)
+
+**Experimental** and off by default — build with `--features nfs`. Serves a Drive as a read-write NFSv3 export on all platforms. Mount it from Linux/macOS (`mount -t nfs`).
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--nfs-host <HOST>` | `127.0.0.1` | Address to bind (and advertise). `0.0.0.0` accepts LAN clients. |
+| `--nfs-port <PORT>` | `12049` | Listen port. **The well-known NFS port 2049 needs root/admin, so the default is an unprivileged port instead.** Mount with the port + mountport override, e.g. `sudo mount -t nfs -o nolock,vers=3,tcp,port=12049,mountport=12049 <host>:/ /mnt`. |
+
+NFSv3 has no open/close for data, so a written file can't finalize on a `close` the way the other backends do. Each written file is buffered to a temp file and uploaded once writes have gone idle for ~2s (and the buffer is evicted after ~30s of quiet); a final flush runs on shutdown. Because of this, a freshly written file may take a moment to appear finalized on Drive. The Drive entry is created lazily **on that first flush, with content** — a file that is created but never written (e.g. `touch`) never persists. This is deliberate: free/legacy plans reject 0-byte files (`HTTP 402 "You can not have empty files"`), so NFS never POSTs an empty file.
+
+#### SFTP flags (`--sftp-*`)
+
+**Experimental** and off by default — build with `--features sftp` (pulls in `russh` for the SSH transport). Serves a Drive as a read-write SFTP share. Connect with `sftp`, `scp -s`, WinSCP, FileZilla, or an `sshfs` mount.
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--sftp-host <HOST>` | `127.0.0.1` | Address to bind (and advertise). `0.0.0.0` accepts LAN clients. |
+| `--sftp-port <PORT>` | `2022` | Listen port. **The well-known SSH port 22 needs root/admin, so the default is an unprivileged port instead** (connect with `sftp -P <port> <user>@<host>`). |
+| `--sftp-username <USER>` | `internxt` | Username required from clients. |
+| `--sftp-password <PASS>` | — | Password required from clients. Omit to accept any password (the username is still required). A password is recommended. Public-key auth is rejected so clients fall back to password. |
+| `--sftp-host-key <PATH>` | `~/.internxt-cli/sftp_host_key` | SSH host private key (OpenSSH). Omit and a persistent key is generated once in the CLI data dir (mode `0600`) and reused on every later start, so the host fingerprint stays stable. Point this at your own key to override. |
+
 #### Debug logging (WebDAV)
 
-Set `INTERNXT_WEBDAV_DEBUG=1` to dump each request line, all request/response headers, and the response status to stderr — useful for diagnosing client-specific behaviour (e.g. WinSCP):
+Set `INTERNXT_WEBDAV_DEBUG=1` (or pass `--verbose`) to dump each request line, all request/response headers, and the response status to stderr — useful for diagnosing client-specific behaviour (e.g. WinSCP). Note `--verbose` also turns on the bare `[METHOD] path` per-request trace for every backend; without it, all backends print only errors/warnings:
 
 ```sh
 INTERNXT_WEBDAV_DEBUG=1 internxt serve webdav --webdav-host 0.0.0.0 --webdav-port 8099 2>&1 | tee webdav-debug.log

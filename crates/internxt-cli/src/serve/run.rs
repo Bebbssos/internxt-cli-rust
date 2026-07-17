@@ -29,6 +29,10 @@ pub enum Protocol {
     Fuse,
     #[cfg(feature = "smb")]
     Smb,
+    #[cfg(feature = "nfs")]
+    Nfs,
+    #[cfg(feature = "sftp")]
+    Sftp,
 }
 
 impl Protocol {
@@ -40,6 +44,10 @@ impl Protocol {
             Protocol::Fuse => "fuse",
             #[cfg(feature = "smb")]
             Protocol::Smb => "smb",
+            #[cfg(feature = "nfs")]
+            Protocol::Nfs => "nfs",
+            #[cfg(feature = "sftp")]
+            Protocol::Sftp => "sftp",
         }
     }
 }
@@ -85,9 +93,32 @@ pub fn parse_protocol(token: &str) -> Result<Protocol> {
                 ))
             }
         }
-        "sftp" => Err(anyhow!("protocol `{token}` is not implemented yet")),
+        "nfs" => {
+            #[cfg(feature = "nfs")]
+            {
+                Ok(Protocol::Nfs)
+            }
+            #[cfg(not(feature = "nfs"))]
+            {
+                Err(anyhow!(
+                    "protocol `nfs` is unavailable: this binary was built without the `nfs` feature"
+                ))
+            }
+        }
+        "sftp" => {
+            #[cfg(feature = "sftp")]
+            {
+                Ok(Protocol::Sftp)
+            }
+            #[cfg(not(feature = "sftp"))]
+            {
+                Err(anyhow!(
+                    "protocol `sftp` is unavailable: this binary was built without the `sftp` feature"
+                ))
+            }
+        }
         other => Err(anyhow!(
-            "unknown protocol `{other}` (known protocols: webdav, fuse, smb)"
+            "unknown protocol `{other}` (known protocols: webdav, fuse, smb, nfs, sftp)"
         )),
     }
 }
@@ -109,7 +140,7 @@ pub fn parse_protocols(list: &str) -> Result<Vec<Protocol>> {
     }
     if out.is_empty() {
         return Err(anyhow!(
-            "no protocols given (usage: `serve webdav,smb` — known: webdav, fuse, smb)"
+            "no protocols given (usage: `serve webdav,smb` — known: webdav, fuse, smb, nfs, sftp)"
         ));
     }
     Ok(out)
@@ -156,6 +187,12 @@ pub struct ServeConfig {
     /// SMB backend config (present iff `smb` is in `protocols`).
     #[cfg(feature = "smb")]
     pub smb: Option<crate::smb::SmbConfig>,
+    /// NFS backend config (present iff `nfs` is in `protocols`).
+    #[cfg(feature = "nfs")]
+    pub nfs: Option<crate::nfs::NfsConfig>,
+    /// SFTP backend config (present iff `sftp` is in `protocols`).
+    #[cfg(feature = "sftp")]
+    pub sftp: Option<crate::sftp::SftpConfig>,
 }
 
 /// Build a shutdown future for one backend from a shared watch channel: it
@@ -208,6 +245,10 @@ pub async fn run(config: ServeConfig) -> Result<()> {
     let mut fuse_cfg = config.fuse;
     #[cfg(feature = "smb")]
     let mut smb_cfg = config.smb;
+    #[cfg(feature = "nfs")]
+    let mut nfs_cfg = config.nfs;
+    #[cfg(feature = "sftp")]
+    let mut sftp_cfg = config.sftp;
 
     for proto in &config.protocols {
         match proto {
@@ -237,6 +278,24 @@ pub async fn run(config: ServeConfig) -> Result<()> {
                 let shared = shared.clone();
                 let shutdown = shutdown_future(shutdown_rx.clone());
                 set.spawn(async move { crate::smb::serve(shared, cfg, shutdown).await });
+            }
+            #[cfg(feature = "nfs")]
+            Protocol::Nfs => {
+                let cfg = nfs_cfg
+                    .take()
+                    .ok_or_else(|| anyhow!("internal: nfs selected but no nfs config"))?;
+                let shared = shared.clone();
+                let shutdown = shutdown_future(shutdown_rx.clone());
+                set.spawn(async move { crate::nfs::serve(shared, cfg, shutdown).await });
+            }
+            #[cfg(feature = "sftp")]
+            Protocol::Sftp => {
+                let cfg = sftp_cfg
+                    .take()
+                    .ok_or_else(|| anyhow!("internal: sftp selected but no sftp config"))?;
+                let shared = shared.clone();
+                let shutdown = shutdown_future(shutdown_rx.clone());
+                set.spawn(async move { crate::sftp::serve(shared, cfg, shutdown).await });
             }
         }
     }

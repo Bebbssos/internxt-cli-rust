@@ -5,6 +5,13 @@
 
 pub mod cache;
 pub mod creds;
-#[cfg(any(feature = "webdav", all(unix, feature = "fuse"), feature = "smb"))]
+pub mod log;
+#[cfg(any(
+    feature = "webdav",
+    all(unix, feature = "fuse"),
+    feature = "smb",
+    feature = "nfs",
+    feature = "sftp"
+))]
 pub mod run;
 pub mod tree;

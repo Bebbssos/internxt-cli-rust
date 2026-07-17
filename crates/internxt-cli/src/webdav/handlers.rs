@@ -254,7 +254,7 @@ pub async fn get(ctx: &Ctx, req: Request, head_only: bool) -> Result<Response, A
             internxt_core::transfer::download_file_to_writer(&net, &mnemonic, &bucket, &file_id, &mut writer, range)
                 .await
         {
-            log(&format!("[GET] download error: {e:#}"));
+            crate::serve::log::warn(&format!("[GET] download error: {e:#}"));
         }
         let _ = writer.shutdown().await;
     });
