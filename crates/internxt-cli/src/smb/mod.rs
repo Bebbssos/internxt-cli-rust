@@ -115,7 +115,7 @@ pub async fn serve(
         .map_err(|e| anyhow!("failed to build SMB server: {e}"))?;
 
     let banner = format!(
-        "Internxt {} SMB server listening at smb://{}:{}/{}{}{}",
+        "Internxt {} SMB server (experimental) listening at smb://{}:{}/{}{}{}",
         config::client_version(),
         config.host,
         config.port,
@@ -131,9 +131,7 @@ pub async fn serve(
     // `serve()` consumes the server; grab a shutdown handle first, then race the
     // accept loop against the orchestrator's shutdown signal.
     let shutdown_handle = server.shutdown_handle();
-    let mount_hint = mount_hint(&config);
     crate::output::status(&banner);
-    crate::output::status(&mount_hint);
 
     let mut serve_task = tokio::spawn(async move { server.serve().await });
     tokio::select! {
@@ -150,25 +148,4 @@ pub async fn serve(
     // Let in-flight connections wind down (best-effort).
     let _ = serve_task.await;
     Ok(())
-}
-
-/// A one-line client mount hint for the banner.
-fn mount_hint(config: &SmbConfig) -> String {
-    let host = if config.host == "0.0.0.0" {
-        "<host>"
-    } else {
-        &config.host
-    };
-    if config.port == 445 {
-        format!(
-            "  mount:  \\\\{host}\\{share}  (Windows)   |   mount -t cifs //{host}/{share} /mnt (Linux)",
-            share = config.share_name,
-        )
-    } else {
-        format!(
-            "  mount:  mount -t cifs //{host}/{share} /mnt -o port={port}  (SMB default port 445 needs root/admin)",
-            share = config.share_name,
-            port = config.port,
-        )
-    }
 }

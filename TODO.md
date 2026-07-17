@@ -81,7 +81,7 @@ diff upstream against them to find changes worth pulling in.
 - No `--timeout`, no thumbnail upload (shares the general gaps). macOS/FreeBSD build the
   same way but are untested here (developed/verified on Linux + libfuse3).
 
-### SMB/CIFS (`serve smb`, beyond og — no official equivalent, feature default-off)
+### SMB/CIFS (`serve smb`, beyond og — no official equivalent, experimental, feature default-off)
 - Shares the whole-file write + streaming/ranged read model with FUSE, so the same caveats
   apply (random reads not yet CTR-offset-cheap; RMW of a large file materializes then re-uploads;
   no partial update).
