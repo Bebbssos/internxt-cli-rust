@@ -651,6 +651,27 @@ enum ThumbnailCmd {
         #[arg(long)]
         index: Option<usize>,
     },
+    /// Display a Drive file's thumbnail inline in the terminal (Kitty/iTerm2, with
+    /// a Unicode half-block fallback).
+    #[cfg(feature = "termimage")]
+    #[command(alias = "show")]
+    Display {
+        /// The uuid of the file.
+        #[arg(short, long)]
+        id: Option<String>,
+        /// The Drive path of the file, alternative to --id.
+        #[arg(short, long)]
+        path: Option<String>,
+        /// Which thumbnail to show when a file has several (0-based, default 0).
+        #[arg(long)]
+        index: Option<usize>,
+        /// Max render width in terminal cells.
+        #[arg(short, long)]
+        width: Option<u32>,
+        /// Max render height in terminal cells.
+        #[arg(short = 'H', long)]
+        height: Option<u32>,
+    },
 }
 
 fn prompt(msg: &str) -> Result<String> {
@@ -948,6 +969,16 @@ async fn run(cli: Cli) -> Result<()> {
             } => {
                 thumbnail_ops::download(id.as_deref(), path.as_deref(), directory.as_deref(), overwrite, index)
                     .await?
+            }
+            #[cfg(feature = "termimage")]
+            ThumbnailCmd::Display {
+                id,
+                path,
+                index,
+                width,
+                height,
+            } => {
+                thumbnail_ops::display(id.as_deref(), path.as_deref(), index, width, height).await?
             }
         },
         #[cfg(any(feature = "webdav", all(unix, feature = "fuse"), feature = "smb"))]

@@ -12,7 +12,8 @@ Commands: **login** (legacy email/password + web **SSO**), **upload-file /
 download-file / upload-folder**, drive management (**logout, whoami, list,
 create-folder, move/rename/trash/restore, trash-list/clear, delete-permanently**,
 **get-id** path→uuid / **get-path** uuid→path),
-**thumbnail** (generate/upload/download — on-demand previews, beyond og),
+**thumbnail** (generate/upload/download/display — on-demand previews incl. inline
+terminal rendering, beyond og),
 **workspaces** (list/use/unset, workspace-scoped), one-way **sync** (sync-up/down),
 a foreground multi-protocol **serve** (`serve webdav,fuse,smb,nfs,sftp`) exposing
 Drive over **WebDAV**, a **FUSE mount** (Unix), an **SMB/CIFS** share, an **NFSv3**
@@ -96,7 +97,7 @@ Cargo **workspace**, two crates (bin `internxt` built by the cli crate):
 | **cli** `nfs/` | NFSv3 server (feature `nfs`, default-off, all platforms): `mod.rs` (`NfsConfig` + `serve`: bind `NFSTcpListener`, spawn idle-flush sweeper, wire shutdown), `fs.rs` (Drive-backed `NFSFileSystem`: id-based inode table like FUSE, streaming reads, temp-buffer writes flushed on idle — NFS has no close). Wire protocol from `nfsserve` |
 | **cli** `sftp/` | SFTP server (feature `sftp`, default-off, all platforms): `mod.rs` (`SftpConfig` + `serve`: build `russh` SSH server w/ host key, wire shutdown), `fs.rs` (`SshServer`/`SshSession` = `russh::server::Handler` for transport+auth; `SftpSession` = `russh_sftp::server::Handler` over Drive: path resolve, per-session open/close handle map, streaming reads, temp-file writes uploaded on `close`). SSH transport from `russh`, SFTP subsystem from `russh-sftp` |
 | **cli** `drive_ops.rs` | logout, whoami, list, create/move/rename/trash/delete |
-| **cli** `thumbnail_ops.rs` | on-demand `thumbnail generate/upload/download`: generate (download file → 300x300 PNG → upload+register), upload (custom preview, `--raw` = bytes as-is), download (fetch current). Reads a file's thumbnails from the folder-content listing (the `/meta` endpoint omits them) |
+| **cli** `thumbnail_ops.rs` | on-demand `thumbnail generate/upload/download/display`: generate (download file → 300x300 PNG → upload+register), upload (custom preview, `--raw` = bytes as-is), download (fetch current), display (render inline via `viuer` — Kitty/iTerm2 + half-block fallback, feature `termimage`). Reads a file's thumbnails from the folder-content listing (the `/meta` endpoint omits them) |
 | **cli** `paths.rs` | path↔uuid resolution: cache-free workspace-aware tree walk (path→uuid) + folder `ancestors` endpoint (uuid→path). `get-id`/`get-path` commands; `resolve_opt` powers the `--path`/`--dest-path`/`--remote-path` alternatives to `-i` on most drive/upload/download/sync ops (live items only, not trash) |
 | **cli** `workspaces.rs` | workspaces list/use/unset; decrypts workspace mnemonic |
 | **cli** `output.rs` | `--json` vs human switch (`emit`/`status`/`emit_error`); `bar_sink` |
@@ -251,7 +252,7 @@ Cargo **workspace**, two crates (bin `internxt` built by the cli crate):
 ## Build / test / run
 
 ```sh
-cargo build --release        # -> target/release/internxt (SSO + WebDAV-over-HTTP + FUSE default; FUSE needs libfuse3-dev+pkg-config on Unix)
+cargo build --release        # -> target/release/internxt (SSO + WebDAV-over-HTTP + FUSE + termimage default; FUSE needs libfuse3-dev+pkg-config on Unix)
 cargo build --release --features webdav-tls    # + HTTPS for WebDAV
 cargo build --release --features smb           # + SMB/CIFS share (default-off; pulls smb-server fork)
 cargo build --release --features nfs           # + NFSv3 export (default-off; pulls nfsserve)
@@ -265,6 +266,7 @@ target/release/internxt upload-file -f ./file -i <folder-uuid>
 target/release/internxt download-file -i <file-uuid> -d ./out --overwrite
 target/release/internxt thumbnail generate -i <file-uuid>      # make a preview for an existing file
 target/release/internxt thumbnail download --path /a/pic.jpg -d ./out --overwrite
+target/release/internxt thumbnail display --path /a/pic.jpg    # render inline (Kitty/iTerm2, else half-blocks)
 target/release/internxt workspaces-use -i <workspace-uuid>     # scope later commands; --personal to unset
 target/release/internxt serve webdav,fuse --fuse-mountpoint ~/drive   # both, shared cache/creds
 target/release/internxt serve smb --smb-password secret               # SMB share (needs --features smb); mount -t cifs //host/internxt /mnt -o port=4445

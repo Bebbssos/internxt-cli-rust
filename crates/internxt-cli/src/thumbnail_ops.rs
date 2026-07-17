@@ -227,6 +227,67 @@ pub async fn upload(id: Option<&str>, path: Option<&str>, file: &str, raw: bool)
     Ok(())
 }
 
+/// Render a Drive file's current thumbnail inline in the terminal (Kitty / iTerm2
+/// graphics protocols, Unicode half-block fallback) without writing a file.
+/// `width`/`height` bound the render size in terminal cells.
+#[cfg(feature = "termimage")]
+pub async fn display(
+    id: Option<&str>,
+    path: Option<&str>,
+    index: Option<usize>,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<()> {
+    if crate::output::is_json() {
+        return Err(anyhow!("thumbnail display cannot be combined with --json"));
+    }
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
+    let uuid = resolve_file(&api, &creds, id, path).await?;
+
+    let (_name, _ftype, thumbnails) = fetch_thumbnails(&api, &creds.token, &uuid).await?;
+    if thumbnails.is_empty() {
+        return Err(anyhow!(
+            "File has no thumbnail. Run `internxt thumbnail generate` first."
+        ));
+    }
+    let idx = index.unwrap_or(0);
+    let thumb = thumbnails.get(idx).ok_or_else(|| {
+        anyhow!(
+            "thumbnail index {idx} out of range (file has {})",
+            thumbnails.len()
+        )
+    })?;
+    if thumb.bucket_file.is_empty() {
+        return Err(anyhow!("thumbnail has no network file id"));
+    }
+    let bucket = file_bucket(&creds, &thumb.bucket_id);
+
+    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+    // Chatter to stderr so the rendered image (stdout) stays clean.
+    crate::output::status_err("Downloading thumbnail...");
+    let mut buf: Vec<u8> = Vec::new();
+    internxt_core::transfer::download_file_to_writer(
+        &net,
+        creds.mnemonic(),
+        &bucket,
+        &thumb.bucket_file,
+        &mut buf,
+        None,
+    )
+    .await?;
+
+    let img = image::load_from_memory(&buf).map_err(|e| anyhow!("could not decode thumbnail: {e}"))?;
+    let cfg = viuer::Config {
+        width,
+        height,
+        absolute_offset: false,
+        ..Default::default()
+    };
+    viuer::print(&img, &cfg).map_err(|e| anyhow!("could not display image: {e}"))?;
+    Ok(())
+}
+
 /// Download a Drive file's current thumbnail to a local file.
 pub async fn download(
     id: Option<&str>,

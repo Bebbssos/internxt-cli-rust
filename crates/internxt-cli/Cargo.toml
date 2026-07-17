@@ -12,7 +12,12 @@ name = "internxt"
 path = "src/main.rs"
 
 [features]
-default = ["sso", "webdav", "fuse"]
+default = ["sso", "webdav", "fuse", "termimage"]
+# In-terminal thumbnail display (`internxt thumbnail display`). `viuer` renders via
+# the Kitty / iTerm2 graphics protocols with a Unicode half-block fallback (all
+# pure Rust — no Sixel, so no libsixel C dependency). Needs `image` to decode the
+# downloaded thumbnail bytes. Disable for a smaller binary without image display.
+termimage = ["dep:viuer", "dep:image"]
 # Web-based (universal-link) SSO login. The flow lives in internxt-core (portable);
 # this adds the native transport — a local axum callback server — plus `open` for
 # the browser launcher. Disable to build a smaller binary with only legacy login.
@@ -87,6 +92,12 @@ nfsserve = { version = "0.11", optional = true }
 # supply a Drive-backed `russh_sftp::server::Handler`.
 russh = { version = "0.62", optional = true }
 russh-sftp = { version = "2", optional = true }
+
+# termimage: in-terminal image rendering (Kitty/iTerm2/half-block) + image decode.
+# `viuer` without default features drops Sixel (libsixel C dep); `image` mirrors the
+# lean decoder set used in core.
+viuer = { version = "0.9", default-features = false, optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "tiff"], optional = true }
 
 [target."cfg(unix)".dependencies]
 fuser = { version = "0.17.0", optional = true }
