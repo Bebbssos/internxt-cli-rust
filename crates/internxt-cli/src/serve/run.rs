@@ -27,6 +27,8 @@ pub enum Protocol {
     Webdav,
     #[cfg(all(unix, feature = "fuse"))]
     Fuse,
+    #[cfg(feature = "smb")]
+    Smb,
 }
 
 impl Protocol {
@@ -36,6 +38,8 @@ impl Protocol {
             Protocol::Webdav => "webdav",
             #[cfg(all(unix, feature = "fuse"))]
             Protocol::Fuse => "fuse",
+            #[cfg(feature = "smb")]
+            Protocol::Smb => "smb",
         }
     }
 }
@@ -69,9 +73,21 @@ pub fn parse_protocol(token: &str) -> Result<Protocol> {
                 ))
             }
         }
-        "smb" | "sftp" => Err(anyhow!("protocol `{token}` is not implemented yet")),
+        "smb" => {
+            #[cfg(feature = "smb")]
+            {
+                Ok(Protocol::Smb)
+            }
+            #[cfg(not(feature = "smb"))]
+            {
+                Err(anyhow!(
+                    "protocol `smb` is unavailable: this binary was built without the `smb` feature"
+                ))
+            }
+        }
+        "sftp" => Err(anyhow!("protocol `{token}` is not implemented yet")),
         other => Err(anyhow!(
-            "unknown protocol `{other}` (known protocols: webdav, fuse)"
+            "unknown protocol `{other}` (known protocols: webdav, fuse, smb)"
         )),
     }
 }
@@ -93,7 +109,7 @@ pub fn parse_protocols(list: &str) -> Result<Vec<Protocol>> {
     }
     if out.is_empty() {
         return Err(anyhow!(
-            "no protocols given (usage: `serve webdav,fuse` — known: webdav, fuse)"
+            "no protocols given (usage: `serve webdav,smb` — known: webdav, fuse, smb)"
         ));
     }
     Ok(out)
@@ -137,6 +153,9 @@ pub struct ServeConfig {
     /// FUSE backend config (present iff `fuse` is in `protocols`).
     #[cfg(all(unix, feature = "fuse"))]
     pub fuse: Option<crate::fuse::MountConfig>,
+    /// SMB backend config (present iff `smb` is in `protocols`).
+    #[cfg(feature = "smb")]
+    pub smb: Option<crate::smb::SmbConfig>,
 }
 
 /// Build a shutdown future for one backend from a shared watch channel: it
@@ -187,6 +206,8 @@ pub async fn run(config: ServeConfig) -> Result<()> {
     let mut webdav_cfg = config.webdav;
     #[cfg(all(unix, feature = "fuse"))]
     let mut fuse_cfg = config.fuse;
+    #[cfg(feature = "smb")]
+    let mut smb_cfg = config.smb;
 
     for proto in &config.protocols {
         match proto {
@@ -207,6 +228,15 @@ pub async fn run(config: ServeConfig) -> Result<()> {
                 let shared = shared.clone();
                 let shutdown = shutdown_future(shutdown_rx.clone());
                 set.spawn(async move { crate::fuse::serve(shared, cfg, shutdown).await });
+            }
+            #[cfg(feature = "smb")]
+            Protocol::Smb => {
+                let cfg = smb_cfg
+                    .take()
+                    .ok_or_else(|| anyhow!("internal: smb selected but no smb config"))?;
+                let shared = shared.clone();
+                let shutdown = shutdown_future(shutdown_rx.clone());
+                set.spawn(async move { crate::smb::serve(shared, cfg, shutdown).await });
             }
         }
     }

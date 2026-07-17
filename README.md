@@ -123,11 +123,11 @@ offending file and continue; WebDAV `PUT` returns `413`; FUSE writes fail `EFBIG
 
 `sync-up` and `sync-down` do a single **one-way** reconcile pass then exit (not a daemon). The source side always wins — there is no bidirectional mode and no conflict resolution. Files are keyed by relative path; change detection compares size, then `modificationTime` (±2s tolerance). `--dry-run` prints the plan without transferring; `--json` emits a summary object with counts + per-action list. Downloaded files are stamped with the remote modification time so repeat runs are idempotent. `--delete` is opt-in and off by default; it prunes both extra files **and** extra folders (deleting the top-most extra folder cascades its whole subtree).
 
-### serve (WebDAV + FUSE)
+### serve (WebDAV + FUSE + SMB)
 
-`serve` runs one or more Drive backends in the **foreground** until Ctrl-C. Pass a comma-separated protocol list; `webdav` and `fuse` (Unix) are supported. Running both at once shares one set of credentials, one folder-listing cache and one global upload limit. Shared flags are bare (`--cache-ttl`, `--read-only`, …); protocol-specific flags are prefixed (`--webdav-*`, `--fuse-*`).
+`serve` runs one or more Drive backends in the **foreground** until Ctrl-C. Pass a comma-separated protocol list; `webdav`, `fuse` (Unix) and `smb` are supported. Running several at once shares one set of credentials, one folder-listing cache and one global upload limit. Shared flags are bare (`--cache-ttl`, `--read-only`, …); protocol-specific flags are prefixed (`--webdav-*`, `--fuse-*`, `--smb-*`).
 
-Unlike the official CLI — which runs WebDAV as a pm2-managed background service configured through a separate `webdav-config` command — this port runs it inline as a normal foreground command. Other protocols (`serve sftp`, `serve smb`) can be added the same way later.
+Unlike the official CLI — which runs WebDAV as a pm2-managed background service configured through a separate `webdav-config` command — this port runs it inline as a normal foreground command. `smb` is **experimental**, off by default, and must be built in (`--features smb`); `sftp` may follow later.
 
 ```sh
 internxt serve webdav                                    # http://127.0.0.1:3005
@@ -137,6 +137,7 @@ internxt serve webdav --webdav-custom-auth --webdav-username alice --webdav-pass
 internxt serve webdav --webdav-https                     # HTTPS, self-signed cert (needs `webdav-tls`)
 internxt serve webdav --webdav-https --webdav-cert cert.pem --webdav-key key.pem
 internxt serve fuse --fuse-mountpoint ~/drive            # FUSE mount (Unix)
+internxt serve smb --smb-password secret                 # SMB share (needs `--features smb`)
 internxt serve webdav,fuse --fuse-mountpoint ~/drive     # both at once, shared cache/creds
 internxt serve webdav --read-only -i <folder-uuid>       # read-only, rooted at a subfolder
 internxt serve webdav --spool --spool-dir /var/tmp/inxt  # spool each upload to disk first (see below)
@@ -178,6 +179,18 @@ WebDAV supported methods: `OPTIONS`, `PROPFIND`, `GET`/`HEAD` (with `Range`), `P
 |---|---|---|
 | `--fuse-mountpoint <DIR>` | — | Local directory to mount onto (required when `fuse` is served). |
 | `--fuse-allow-other` | off | Let other users (and root) access the mount (needs `user_allow_other` in `/etc/fuse.conf` on Linux). |
+
+#### SMB flags (`--smb-*`)
+
+**Experimental** and off by default — build with `--features smb`. Serves a Drive as a read-write SMB2/3 share on all platforms. Mount it from Windows (`net use`), Linux (`mount -t cifs`) or macOS.
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--smb-host <HOST>` | `127.0.0.1` | Address to bind (and advertise). `0.0.0.0` accepts LAN clients. |
+| `--smb-port <PORT>` | `4445` | Listen port. **The well-known SMB port 445 needs root/admin, so the default is an unprivileged port instead.** Bind `445` only if you can (e.g. via `setcap`/elevation) — Windows clients only speak `445`, so a non-default port needs a Linux/macOS client that can pass `-o port=`. |
+| `--smb-share <NAME>` | `internxt` | Exported share name (`\\host\<name>`). |
+| `--smb-username <USER>` | `internxt` | Username required from clients (with `--smb-password`). |
+| `--smb-password <PASS>` | — | Password required from clients. Omit for an anonymous (guest) share — most clients, Windows especially, refuse anonymous, so a password is recommended. |
 
 #### Debug logging (WebDAV)
 

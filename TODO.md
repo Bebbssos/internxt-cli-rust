@@ -81,6 +81,21 @@ diff upstream against them to find changes worth pulling in.
 - No `--timeout`, no thumbnail upload (shares the general gaps). macOS/FreeBSD build the
   same way but are untested here (developed/verified on Linux + libfuse3).
 
+### SMB/CIFS (`serve smb`, beyond og — no official equivalent, experimental, feature default-off)
+- Shares the whole-file write + streaming/ranged read model with FUSE, so the same caveats
+  apply (random reads not yet CTR-offset-cheap; RMW of a large file materializes then re-uploads;
+  no partial update).
+- Built on `smb-server`, pulled as a **git dependency** on a fork
+  (`github.com/Bebbssos/rust-smb-server`) with two fixes: upstream 0.4.1 doesn't re-export the
+  `ShareBackend`/`Handle` trait types (can't be implemented downstream unpatched), and QUERY_INFO
+  returned a per-open volatile id (stale-handle on the Linux cifs client). Switch back to a
+  crates.io release once the fork's PR lands upstream.
+- Auth is a single username/password (or anonymous). Multi-user shares / per-user ACLs are
+  possible (the crate supports them) but not wired to CLI flags.
+- Default port 4445 (445 needs root/admin). No SMB-over-QUIC, no DFS, no change-notify beyond
+  what the crate provides. Verified on Linux via `smbclient` (list / get / put / rename / del /
+  mkdir / rmdir, 41MB multi-shard read + 512KB write round-trip md5-identical).
+
 ### Infrastructure / parity
 - `.env` loading (node uses dotenv). We hardcode public defaults in `src/config.rs`,
   overridable via env vars. Decide if a `.env` file should be supported.

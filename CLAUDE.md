@@ -12,9 +12,9 @@ Commands: **login** (legacy email/password + web **SSO**), **upload-file /
 download-file / upload-folder**, drive management (**logout, whoami, list,
 create-folder, move/rename/trash/restore, trash-list/clear, delete-permanently**),
 **workspaces** (list/use/unset, workspace-scoped), one-way **sync** (sync-up/down),
-a foreground multi-protocol **serve** (`serve webdav,fuse,…`) exposing Drive over
-**WebDAV** and a **FUSE mount** (Unix), plus a top-level **mount** convenience
-command. Global **`--json`** flag on all commands.
+a foreground multi-protocol **serve** (`serve webdav,fuse,smb,…`) exposing Drive
+over **WebDAV**, a **FUSE mount** (Unix) and an **SMB/CIFS** share, plus a
+top-level **mount** convenience command. Global **`--json`** flag on all commands.
 
 Roadmap + what's missing, pinned upstream commits: see [TODO.md](TODO.md).
 
@@ -88,6 +88,7 @@ Cargo **workspace**, two crates (bin `internxt` built by the cli crate):
 | **cli** `serve/` | shared serve code: `run.rs` (orchestrator: parse protocol comma-list, build one `Shared` bundle — creds+cache+global upload semaphore+root — spawn each backend, own the single Ctrl-C via a `watch` flag), `tree.rs` (Drive-tree walk), `cache.rs` (`FolderCache` TTL cache), `creds.rs` (`SharedCreds` + hourly refresh) |
 | **cli** `webdav/` | WebDAV server (feature `webdav`): `mod.rs` (axum + dispatch + auth + TLS), `handlers.rs`, `resource.rs` (URL parse + resolve), `xml.rs` |
 | **cli** `fuse/` | FUSE mount (feature `fuse`, Unix): `mod.rs` (mount + Ctrl-C unmount), `fs.rs` (`fuser::Filesystem`: inode table, sync→tokio bridge, streaming reads, temp-file writes) |
+| **cli** `smb/` | SMB/CIFS server (feature `smb`, default-off): `mod.rs` (`SmbConfig` + `serve`: build `SmbServer`, wire shutdown), `fs.rs` (Drive-backed `ShareBackend`/`Handle`: path resolve, streaming reads, temp-file writes). SMB2/3 wire protocol from the `smb-server` git-dep fork |
 | **cli** `drive_ops.rs` | logout, whoami, list, create/move/rename/trash/delete |
 | **cli** `workspaces.rs` | workspaces list/use/unset; decrypts workspace mnemonic |
 | **cli** `output.rs` | `--json` vs human switch (`emit`/`status`/`emit_error`); `bar_sink` |
@@ -136,16 +137,16 @@ Cargo **workspace**, two crates (bin `internxt` built by the cli crate):
 - **No secrets in the repo.** `APP_CRYPTO_SECRET` / `DESKTOP_HEADER` in `config.rs` are public
   per-client constants from upstream `.env.template`, not user data. `og/`, `target/` git-ignored.
 
-### serve / WebDAV / FUSE
+### serve / WebDAV / FUSE / SMB
 
 - **serve** (`serve/run.rs`): `serve` takes a **comma-separated positional protocol list**
-  (`serve webdav,fuse`) — not a clap subcommand — so several backends run in one foreground
+  (`serve webdav,fuse,smb`) — not a clap subcommand — so several backends run in one foreground
   process (Ctrl-C stops all). **Shared** flags (`-i/--folder-uuid`, `--cache-ttl`/`--no-cache`,
   `-d/--delete-permanently`, `--spool`, `--spool-dir`, `--max-concurrent-uploads`,
   `--read-only`) back one `SharedCreds`, one `FolderCache`, one global upload `Semaphore`.
-  **Protocol-specific** flags are prefixed (`--webdav-*`, `--fuse-*`). `mount` is a thin
-  wrapper calling the orchestrator with a single-`fuse` list. Unknown / not-implemented
-  (`smb`/`sftp`) / feature-off protocols error at parse time.
+  **Protocol-specific** flags are prefixed (`--webdav-*`, `--fuse-*`, `--smb-*`). `mount` is a
+  thin wrapper calling the orchestrator with a single-`fuse` list. Unknown / not-implemented
+  (`sftp`) / feature-off protocols error at parse time.
 - **WebDAV** (feature `webdav`, default-on): foreground backend, not og's pm2 daemon. axum
   `Router::fallback` dispatches by method. Path→item walks the folder tree (workspace-aware),
   subfolder listings cached in-process (`--cache-ttl`, default 5s); file listings stay live.
@@ -176,12 +177,29 @@ Cargo **workspace**, two crates (bin `internxt` built by the cli crate):
   shared serve flags; fuse-only `--fuse-allow-other` (needs `user_allow_other` in
   `/etc/fuse.conf`). Under `mount` the shared flags use bare names; under `serve` fuse-only ones
   are `--fuse-`-prefixed.
+- **SMB/CIFS** (feature `smb`, **default-OFF**, all platforms): foreground `serve smb` exposing
+  Drive as a **read-write** SMB2/3 share (`net use` on Windows, `mount -t cifs` on Linux/macOS).
+  The wire protocol + NTLM auth + signing come from the `smb-server` crate (MIT), pulled as a
+  **git dependency** on a fork (`github.com/Bebbssos/rust-smb-server`) — upstream 0.4.1 doesn't
+  re-export its own trait types and returned a per-open volatile id from QUERY_INFO (stale-handle
+  on the Linux cifs client); the fork fixes both, pending an upstream PR. We only implement its
+  `ShareBackend`/`Handle`
+  over Drive in `smb/fs.rs` — the SMB analog of `fuser::Filesystem`. **Path-based** (no inode
+  table): every op re-resolves the path via the shared `tree` walk. **Reads** reuse FUSE's
+  sequential streaming reader (forward-skip, backward-seek → ranged download). **Writes** reuse
+  FUSE's whole-file temp model (materialize existing lazily, upload whole on `close`, replace the
+  Drive entry). Delete = CREATE `delete_on_close` / SET_INFO disposition → backend `unlink`
+  (trash unless `-d`); `rename` = SET_INFO → Drive move+rename. `--smb-host/-port/-share/
+  -username/-password` (port default 4445, since 445 needs root/admin; a password is recommended
+  — Windows refuses anonymous). The `smb-server` git-dep is optional, only pulled when the `smb`
+  feature is on, so a default `cargo build` never fetches or compiles it.
 
 ## Build / test / run
 
 ```sh
 cargo build --release        # -> target/release/internxt (SSO + WebDAV-over-HTTP + FUSE default; FUSE needs libfuse3-dev+pkg-config on Unix)
 cargo build --release --features webdav-tls    # + HTTPS for WebDAV
+cargo build --release --features smb           # + SMB/CIFS share (default-off; pulls smb-server fork)
 cargo build --release --no-default-features    # smaller: legacy login only (no axum/open/webdav/fuse)
 cargo test                                     # crypto cross-check vs node (no network)
 
@@ -191,6 +209,7 @@ target/release/internxt upload-file -f ./file -i <folder-uuid>
 target/release/internxt download-file -i <file-uuid> -d ./out --overwrite
 target/release/internxt workspaces-use -i <workspace-uuid>     # scope later commands; --personal to unset
 target/release/internxt serve webdav,fuse --fuse-mountpoint ~/drive   # both, shared cache/creds
+target/release/internxt serve smb --smb-password secret               # SMB share (needs --features smb); mount -t cifs //host/internxt /mnt -o port=4445
 target/release/internxt mount ~/drive                          # FUSE only (Unix; Ctrl-C to unmount)
 ```
 
