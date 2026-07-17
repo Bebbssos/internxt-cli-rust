@@ -25,6 +25,11 @@ webdav-tls = ["webdav", "dep:axum-server", "dep:rustls-pemfile", "dep:rcgen"]
 # FUSE mount mode (`internxt mount`, `internxt serve fuse`). Unix only; `fuser`
 # links libfuse via pkg-config. Declared for `cfg(unix)` only (inert on Windows).
 fuse = ["dep:fuser", "dep:libc", "dep:tokio-util"]
+# SMB/CIFS server mode (`internxt serve smb`). Off by default. The SMB2/3
+# protocol, NTLM auth and signing come from the `smb-server` crate; we implement
+# its `ShareBackend`/`Handle` traits over Drive (like `fuser::Filesystem` for
+# FUSE). All platforms (plain TCP).
+smb = ["dep:smb-server", "dep:async-trait"]
 
 [dependencies]
 internxt-core = { path = "../internxt-core" }
@@ -57,6 +62,14 @@ mime_guess = { version = "2", optional = true }
 axum-server = { version = "0.7", features = ["tls-rustls"], optional = true }
 rustls-pemfile = { version = "2", optional = true }
 rcgen = { version = "0.13", optional = true }
+
+# smb: pure-Rust SMB2/3 server (protocol + NTLM auth + signing). We supply a
+# Drive-backed `ShareBackend`/`Handle` impl; the crate drives the wire protocol.
+# Fork of `smb-server` 0.4.1 — upstream doesn't re-export its own trait types
+# (and returned a per-open volatile id from QUERY_INFO); the fork fixes both.
+# Track the fork until the patches land upstream, then switch back to crates.io.
+smb-server = { git = "https://github.com/Bebbssos/rust-smb-server.git", default-features = false, optional = true }
+async-trait = { version = "0.1", optional = true }
 
 [target."cfg(unix)".dependencies]
 fuser = { version = "0.17.0", optional = true }

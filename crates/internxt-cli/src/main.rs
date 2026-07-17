@@ -4,8 +4,10 @@ mod drive_ops;
 #[cfg(all(unix, feature = "fuse"))]
 mod fuse;
 mod output;
-#[cfg(any(feature = "webdav", feature = "fuse"))]
+#[cfg(any(feature = "webdav", feature = "fuse", feature = "smb"))]
 mod serve;
+#[cfg(feature = "smb")]
+mod smb;
 #[cfg(feature = "sso")]
 mod sso;
 mod sync;
@@ -309,9 +311,9 @@ enum Commands {
     /// (`--cache-ttl`, `--folder-uuid`, `--delete-permanently`, `--spool`,
     /// `--spool-dir`, `--max-concurrent-uploads`, `--read-only`); protocol
     /// specific knobs are prefixed (`--webdav-port`, `--fuse-mountpoint`, …).
-    #[cfg(any(feature = "webdav", all(unix, feature = "fuse")))]
+    #[cfg(any(feature = "webdav", all(unix, feature = "fuse"), feature = "smb"))]
     Serve {
-        /// Comma-separated protocols to serve (known: webdav, fuse).
+        /// Comma-separated protocols to serve (known: webdav, fuse, smb).
         #[arg(value_name = "PROTOCOLS")]
         protocols: String,
 
@@ -399,6 +401,31 @@ enum Commands {
         #[cfg(all(unix, feature = "fuse"))]
         #[arg(long, default_value_t = false)]
         fuse_allow_other: bool,
+
+        // ---- smb ----
+        /// SMB: host to bind (and advertise). 0.0.0.0 accepts LAN clients.
+        #[cfg(feature = "smb")]
+        #[arg(long, default_value = "127.0.0.1")]
+        smb_host: String,
+        /// SMB: TCP port. The well-known SMB port 445 needs root/admin; the
+        /// default is an unprivileged port.
+        #[cfg(feature = "smb")]
+        #[arg(long, default_value_t = 4445)]
+        smb_port: u16,
+        /// SMB: exported share name (`\\host\<share>`).
+        #[cfg(feature = "smb")]
+        #[arg(long, default_value = "internxt")]
+        smb_share: String,
+        /// SMB: require authentication as this user (with --smb-password).
+        #[cfg(feature = "smb")]
+        #[arg(long, default_value = "internxt")]
+        smb_username: String,
+        /// SMB: password required from clients. Omit for an anonymous (guest)
+        /// share — most SMB clients (Windows especially) refuse anonymous, so a
+        /// password is recommended.
+        #[cfg(feature = "smb")]
+        #[arg(long)]
+        smb_password: Option<String>,
     },
     /// Mount your Internxt Drive as a local filesystem via FUSE (runs until Ctrl-C).
     ///
@@ -657,7 +684,7 @@ async fn run(cli: Cli) -> Result<()> {
             delete,
             dry_run,
         } => sync::sync_down(&local, remote.as_deref(), delete.as_deref(), dry_run).await?,
-        #[cfg(any(feature = "webdav", all(unix, feature = "fuse")))]
+        #[cfg(any(feature = "webdav", all(unix, feature = "fuse"), feature = "smb"))]
         Commands::Serve {
             protocols,
             folder_uuid,
@@ -693,6 +720,16 @@ async fn run(cli: Cli) -> Result<()> {
             fuse_mountpoint,
             #[cfg(all(unix, feature = "fuse"))]
             fuse_allow_other,
+            #[cfg(feature = "smb")]
+            smb_host,
+            #[cfg(feature = "smb")]
+            smb_port,
+            #[cfg(feature = "smb")]
+            smb_share,
+            #[cfg(feature = "smb")]
+            smb_username,
+            #[cfg(feature = "smb")]
+            smb_password,
         } => {
             let protocols = serve::run::parse_protocols(&protocols)?;
             let cache_ttl = if no_cache { 0 } else { cache_ttl };
@@ -755,6 +792,23 @@ async fn run(cli: Cli) -> Result<()> {
                 None
             };
 
+            #[cfg(feature = "smb")]
+            let smb = if protocols.contains(&serve::run::Protocol::Smb) {
+                Some(smb::SmbConfig {
+                    host: smb_host,
+                    port: smb_port,
+                    share_name: smb_share,
+                    username: smb_username,
+                    password: smb_password,
+                    delete_permanently,
+                    read_only,
+                    spool_dir: spool_dir.clone(),
+                    max_transfer_size: 1024 * 1024,
+                })
+            } else {
+                None
+            };
+
             let config = serve::run::ServeConfig {
                 protocols,
                 folder_uuid,
@@ -765,6 +819,8 @@ async fn run(cli: Cli) -> Result<()> {
                 webdav,
                 #[cfg(all(unix, feature = "fuse"))]
                 fuse,
+                #[cfg(feature = "smb")]
+                smb,
             };
             serve::run::run(config).await?;
         }
@@ -799,6 +855,8 @@ async fn run(cli: Cli) -> Result<()> {
                 #[cfg(feature = "webdav")]
                 webdav: None,
                 fuse: Some(mount),
+                #[cfg(feature = "smb")]
+                smb: None,
             };
             serve::run::run(config).await?;
         }
