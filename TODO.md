@@ -44,7 +44,11 @@ diff upstream against them to find changes worth pulling in.
   returns the stored keys), but registration / key-update paths are unsupported.
 
 ### Upload
-- Thumbnail generation + upload (`ThumbnailService`).
+- ~~Thumbnail generation + upload (`ThumbnailService`).~~ **Done** — core `thumbnail`
+  module (feature `thumbnails`, default-on) decodes/resizes/encodes a 300x300 PNG via
+  the `image` crate and `POST /files/thumbnail`; wired into `upload-file` + `upload-folder`
+  (best-effort, never fails the upload). Only image sources (jpg/png/webp/gif/tiff), as in og.
+  PDF thumbnails and serve-backend PUT thumbnails still TODO.
 - Retry with backoff on transient failures (`uploadFileWithRetry`, MAX_RETRIES/DELAYS_MS).
 - Upload size limit check (node enforces a per-file limit; see CLI README "40GB").
 - HMAC on upload (sdk now stores hmac on upload — see sdk commit; node inxt-js

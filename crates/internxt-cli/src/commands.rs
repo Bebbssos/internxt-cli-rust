@@ -103,7 +103,7 @@ pub async fn upload_file(
     let creation = to_rfc3339(meta.created().unwrap_or_else(|_| SystemTime::now()));
     let modification = to_rfc3339(meta.modified().unwrap_or_else(|_| SystemTime::now()));
 
-    finish_file_entry(
+    let drive_file = finish_file_entry(
         &creds,
         &stem,
         &file_type,
@@ -113,7 +113,45 @@ pub async fn upload_file(
         &creation,
         &modification,
     )
+    .await?;
+
+    try_upload_thumbnail(&creds, &drive_file.uuid, &file_type, path, size).await;
+
+    emit_upload_success(&creds, &drive_file);
+    Ok(())
+}
+
+/// Best-effort thumbnail: generate + upload a preview for thumbnailable images.
+/// Failures are logged and swallowed — a thumbnail must never fail the upload
+/// (mirrors og's `tryUploadThumbnail`).
+async fn try_upload_thumbnail(
+    creds: &internxt_core::models::Credentials,
+    file_uuid: &str,
+    file_type: &str,
+    path: &Path,
+    size: u64,
+) {
+    if !internxt_core::thumbnail::is_image_thumbnailable(file_type, size) {
+        return;
+    }
+    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+    let api = DriveApi::for_credentials(creds);
+    match internxt_core::thumbnail::try_upload_thumbnail_from_path(
+        &net,
+        &api,
+        &creds.token,
+        creds.bucket(),
+        creds.mnemonic(),
+        file_uuid,
+        file_type,
+        path,
+        size,
+    )
     .await
+    {
+        Ok(_) => {}
+        Err(e) => crate::output::status(&format!("Thumbnail skipped: {e}")),
+    }
 }
 
 /// Upload a file whose body comes from stdin. Filename is required (stdin has none).
@@ -185,10 +223,14 @@ async fn upload_from_stdin(
     };
 
     let now = to_rfc3339(SystemTime::now());
-    finish_file_entry(creds, &stem, &file_type, size, folder_uuid, &file_id, &now, &now).await
+    let drive_file =
+        finish_file_entry(creds, &stem, &file_type, size, folder_uuid, &file_id, &now, &now).await?;
+    emit_upload_success(creds, &drive_file);
+    Ok(())
 }
 
-/// Create the drive file entry and emit the success line. Shared by both upload paths.
+/// Create the drive file entry. Shared by both upload paths; the caller handles
+/// any thumbnail and emits the success line.
 #[allow(clippy::too_many_arguments)]
 async fn finish_file_entry(
     creds: &internxt_core::models::Credentials,
@@ -199,7 +241,7 @@ async fn finish_file_entry(
     file_id: &str,
     creation: &str,
     modification: &str,
-) -> Result<()> {
+) -> Result<internxt_core::models::DriveFileData> {
     let api = DriveApi::for_credentials(creds);
     let drive_file = api
         .create_file_entry(
@@ -214,7 +256,14 @@ async fn finish_file_entry(
             modification,
         )
         .await?;
+    Ok(drive_file)
+}
 
+/// Emit the "File uploaded successfully" line (human + JSON).
+fn emit_upload_success(
+    creds: &internxt_core::models::Credentials,
+    drive_file: &internxt_core::models::DriveFileData,
+) {
     let ws_suffix = creds
         .workspace_id()
         .map(|id| format!("?workspaceid={id}"))
@@ -227,7 +276,6 @@ async fn finish_file_entry(
         ),
         serde_json::json!({ "success": true, "file": { "uuid": drive_file.uuid } }),
     );
-    Ok(())
 }
 
 /// A temp file that deletes itself on drop. Used to spool unknown-length stdin.
@@ -504,18 +552,28 @@ async fn upload_one_file(
 
     let creation = to_rfc3339(meta.created().unwrap_or_else(|_| SystemTime::now()));
     let modification = to_rfc3339(meta.modified().unwrap_or_else(|_| SystemTime::now()));
-    api.create_file_entry(
-        token,
-        &file.name,
-        &file_type,
-        size,
-        parent_uuid,
-        &file_id,
-        bucket,
-        &creation,
-        &modification,
-    )
-    .await?;
+    let drive_file = api
+        .create_file_entry(
+            token,
+            &file.name,
+            &file_type,
+            size,
+            parent_uuid,
+            &file_id,
+            bucket,
+            &creation,
+            &modification,
+        )
+        .await?;
+
+    // Best-effort thumbnail; never fails the folder upload (silent — the shared
+    // progress bar owns the terminal here).
+    if internxt_core::thumbnail::is_image_thumbnailable(&file_type, size) {
+        let _ = internxt_core::thumbnail::try_upload_thumbnail_from_path(
+            net, api, token, bucket, mnemonic, &drive_file.uuid, &file_type, &file.abs, size,
+        )
+        .await;
+    }
     Ok(())
 }
 

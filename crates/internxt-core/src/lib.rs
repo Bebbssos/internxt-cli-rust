@@ -20,6 +20,8 @@ pub mod models;
 pub mod network;
 pub mod progress;
 pub mod sso;
+#[cfg(feature = "thumbnails")]
+pub mod thumbnail;
 pub mod transfer;
 
 pub use models::Credentials;

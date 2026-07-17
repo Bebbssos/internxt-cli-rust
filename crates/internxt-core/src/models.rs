@@ -171,6 +171,22 @@ pub struct DriveFileData {
     pub file_type: Option<String>,
 }
 
+/// Response of `POST /files/thumbnail` (og `Thumbnail`). We only need it to
+/// deserialize successfully; the useful bits are the network `bucket_file` and id.
+#[derive(Deserialize, Debug)]
+pub struct Thumbnail {
+    #[serde(default)]
+    pub id: u64,
+    #[serde(rename = "file_id", default)]
+    pub file_id: u64,
+    #[serde(rename = "bucket_file", default)]
+    pub bucket_file: String,
+    #[serde(rename = "type", default)]
+    pub thumbnail_type: String,
+    #[serde(default)]
+    pub size: SizeField,
+}
+
 /// Size comes back as a number or a numeric string depending on endpoint.
 #[derive(Debug, Default)]
 pub struct SizeField(pub u64);

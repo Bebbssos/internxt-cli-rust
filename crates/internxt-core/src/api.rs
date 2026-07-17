@@ -340,6 +340,42 @@ impl DriveApi {
         Ok(serde_json::from_value(v)?)
     }
 
+    /// POST /files/thumbnail — register a thumbnail for a file (mirrors og
+    /// storage.createThumbnailEntryWithUUID). The thumbnail bytes must already be
+    /// uploaded to the network; `bucket_file` is that network file id.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_thumbnail_entry(
+        &self,
+        token: &str,
+        file_uuid: &str,
+        thumbnail_type: &str,
+        size: u64,
+        max_width: u32,
+        max_height: u32,
+        bucket: &str,
+        bucket_file: &str,
+    ) -> Result<crate::models::Thumbnail> {
+        let body = json!({
+            "fileUuid": file_uuid,
+            "type": thumbnail_type,
+            "size": size,
+            "maxWidth": max_width,
+            "maxHeight": max_height,
+            "bucketId": bucket,
+            "bucketFile": bucket_file,
+            "encryptVersion": "03-aes",
+        });
+        let resp = self
+            .client
+            .post(self.url("/files/thumbnail"))
+            .headers(self.auth_headers(token)?)
+            .json(&body)
+            .send()
+            .await?;
+        let v = Self::check(resp, "createThumbnailEntry").await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
     /// GET /workspaces/ — available + pending workspaces (WorkspacesResponse).
     pub async fn get_workspaces(&self, token: &str) -> Result<Value> {
         let resp = self

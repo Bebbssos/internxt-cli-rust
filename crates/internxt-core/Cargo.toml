@@ -12,13 +12,17 @@ name = "internxt_core"
 path = "src/lib.rs"
 
 [features]
-default = ["fs"]
+default = ["fs", "thumbnails"]
 # Native filesystem + runtime-bound transfer helpers: the path-based upload
 # (`upload_file_to_network`), multipart upload, and `create_folder_with_retry`.
 # These pull in `tokio::fs` / `tokio::spawn` / `tokio::time`. Disable to build only
 # the reader/writer surface (crypto, api, network, and the generic streaming
 # `upload_stream_to_network` / `download_file_to_writer`).
 fs = []
+# Image thumbnail generation (`thumbnail` module): decode/resize/encode a 300x300
+# PNG preview via the `image` crate. Mirrors og's sharp-based ThumbnailService.
+# Pulls in `image`; disable for a smaller build without preview upload.
+thumbnails = ["dep:image"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -32,6 +36,10 @@ base32 = "0.5"
 rand = "0.10"
 futures-util = "0.3"
 bytes = "1"
+
+# thumbnails feature: decode/resize/encode preview images. Only the formats og
+# treats as thumbnailable (jpg/png/webp/gif/tiff) are enabled to keep it lean.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "tiff"], optional = true }
 
 # crypto
 aes = "0.9"

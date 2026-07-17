@@ -81,6 +81,7 @@ Cargo **workspace**, two crates (bin `internxt` built by the cli crate):
 | **core** `api.rs` | Drive REST client; workspace-aware via `for_credentials` (`x-internxt-workspace` + `/workspaces/{id}/…`) |
 | **core** `network.rs` | bridge/network client, streaming PUT/GET |
 | **core** `transfer.rs` | streaming transfer primitives + `ProgressSink`. Always on: generic `upload_stream_to_network` / `download_file_to_writer` (ranged). `fs` feature: path-based `upload_file_to_network`, multipart, `create_folder_with_retry` |
+| **core** `thumbnail.rs` | image thumbnail gen+upload (feature `thumbnails`, default-on): decode/resize/encode 300x300 PNG via `image` crate, `POST /files/thumbnail`. jpg/png/webp/gif/tiff only |
 | **core** `progress.rs` | `ProgressSink` trait + `noop_sink` |
 | **core** `models.rs` | serde DTOs; `Credentials` workspace/keys + net/bucket/mnemonic helpers |
 | **cli** `main.rs` | clap dispatch (all subcommands) |
