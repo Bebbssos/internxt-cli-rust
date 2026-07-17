@@ -44,6 +44,17 @@ pub fn is_image_thumbnailable(file_type: &str, size: u64) -> bool {
     !ext.is_empty() && THUMBNAILABLE_IMAGE_EXTENSIONS.contains(&ext.as_str())
 }
 
+/// Read an image's `(width, height)` from its bytes without fully decoding it.
+/// Used when registering a custom (`--raw`) thumbnail to record its real
+/// dimensions. `None` when the bytes aren't a recognizable image.
+pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
 /// Decode `bytes` as an image, resize to fit inside `MAX_WIDTH`x`MAX_HEIGHT`
 /// (aspect preserved, like sharp's `fit: 'inside'`) and encode as PNG.
 /// CPU-bound; run under `spawn_blocking` from an async context.

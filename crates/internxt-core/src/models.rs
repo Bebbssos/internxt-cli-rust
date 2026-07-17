@@ -171,6 +171,27 @@ pub struct DriveFileData {
     pub file_type: Option<String>,
 }
 
+/// A thumbnail as returned inside a folder-content file listing (`files[].thumbnails[]`
+/// of `/folders/content/{uuid}/files`; the `/meta` endpoint omits it). Enough to
+/// download it (bucket + network file id) and describe it.
+#[derive(Deserialize, Debug, Clone)]
+pub struct ThumbnailMeta {
+    #[serde(default)]
+    pub id: u64,
+    #[serde(rename = "bucket_id", default)]
+    pub bucket_id: String,
+    #[serde(rename = "bucket_file", default)]
+    pub bucket_file: String,
+    #[serde(rename = "type", default)]
+    pub thumbnail_type: String,
+    #[serde(default)]
+    pub size: SizeField,
+    #[serde(rename = "max_width", default)]
+    pub max_width: u32,
+    #[serde(rename = "max_height", default)]
+    pub max_height: u32,
+}
+
 /// Response of `POST /files/thumbnail` (og `Thumbnail`). We only need it to
 /// deserialize successfully; the useful bits are the network `bucket_file` and id.
 #[derive(Deserialize, Debug)]
@@ -188,7 +209,7 @@ pub struct Thumbnail {
 }
 
 /// Size comes back as a number or a numeric string depending on endpoint.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SizeField(pub u64);
 
 impl<'de> Deserialize<'de> for SizeField {

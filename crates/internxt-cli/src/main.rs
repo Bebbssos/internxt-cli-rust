@@ -16,6 +16,7 @@ mod smb;
 #[cfg(feature = "sso")]
 mod sso;
 mod sync;
+mod thumbnail_ops;
 mod upload_limit;
 #[cfg(feature = "webdav")]
 mod webdav;
@@ -601,6 +602,55 @@ enum Commands {
         #[arg(short, long)]
         id: String,
     },
+    /// Manage a file's thumbnail: generate, upload a custom one, or download it.
+    #[command(subcommand, alias = "thumbnails")]
+    Thumbnail(ThumbnailCmd),
+}
+
+#[derive(Subcommand)]
+enum ThumbnailCmd {
+    /// Generate a thumbnail for a Drive file from its own image content.
+    Generate {
+        /// The uuid of the file.
+        #[arg(short, long)]
+        id: Option<String>,
+        /// The Drive path of the file, alternative to --id.
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Upload a custom thumbnail image for a Drive file.
+    Upload {
+        /// The uuid of the file.
+        #[arg(short, long)]
+        id: Option<String>,
+        /// The Drive path of the file, alternative to --id.
+        #[arg(short, long)]
+        path: Option<String>,
+        /// Local image to use as the thumbnail.
+        #[arg(short, long)]
+        file: String,
+        /// Upload the image as-is instead of resizing it to a 300x300 PNG.
+        #[arg(long, default_value_t = false)]
+        raw: bool,
+    },
+    /// Download a Drive file's current thumbnail.
+    Download {
+        /// The uuid of the file.
+        #[arg(short, long)]
+        id: Option<String>,
+        /// The Drive path of the file, alternative to --id.
+        #[arg(short, long)]
+        path: Option<String>,
+        /// Directory to write the thumbnail into (default: current dir).
+        #[arg(short, long)]
+        directory: Option<String>,
+        /// Overwrite an existing local file.
+        #[arg(short, long, default_value_t = false)]
+        overwrite: bool,
+        /// Which thumbnail to fetch when a file has several (0-based, default 0).
+        #[arg(long)]
+        index: Option<usize>,
+    },
 }
 
 fn prompt(msg: &str) -> Result<String> {
@@ -879,6 +929,27 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Commands::IdFromPath { path } => paths::cmd_id_from_path(&path).await?,
         Commands::PathFromId { id } => paths::cmd_path_from_id(&id).await?,
+        Commands::Thumbnail(cmd) => match cmd {
+            ThumbnailCmd::Generate { id, path } => {
+                thumbnail_ops::generate(id.as_deref(), path.as_deref()).await?
+            }
+            ThumbnailCmd::Upload {
+                id,
+                path,
+                file,
+                raw,
+            } => thumbnail_ops::upload(id.as_deref(), path.as_deref(), &file, raw).await?,
+            ThumbnailCmd::Download {
+                id,
+                path,
+                directory,
+                overwrite,
+                index,
+            } => {
+                thumbnail_ops::download(id.as_deref(), path.as_deref(), directory.as_deref(), overwrite, index)
+                    .await?
+            }
+        },
         #[cfg(any(feature = "webdav", all(unix, feature = "fuse"), feature = "smb"))]
         Commands::Serve {
             protocols,
