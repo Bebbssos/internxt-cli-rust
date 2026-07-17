@@ -6,6 +6,7 @@ mod fuse;
 #[cfg(feature = "nfs")]
 mod nfs;
 mod output;
+mod paths;
 #[cfg(any(feature = "webdav", feature = "fuse", feature = "smb", feature = "nfs", feature = "sftp"))]
 mod serve;
 #[cfg(feature = "sftp")]
@@ -105,6 +106,9 @@ enum Commands {
         /// Destination folder uuid. Leave empty for root.
         #[arg(short = 'i', long)]
         destination: Option<String>,
+        /// Destination folder path (e.g. `/a/b`), alternative to --destination.
+        #[arg(long)]
+        dest_path: Option<String>,
         /// Read the file body from stdin instead of --file. Requires --name.
         #[arg(long, default_value_t = false)]
         stdin: bool,
@@ -127,14 +131,21 @@ enum Commands {
         /// Destination folder id. Leave empty for the root folder.
         #[arg(short = 'i', long)]
         destination: Option<String>,
+        /// Destination folder path (e.g. `/a/b`), alternative to --destination.
+        #[arg(long)]
+        dest_path: Option<String>,
         #[command(flatten)]
         limit: upload_limit::UploadLimitArgs,
     },
-    /// Download a file from Internxt Drive by uuid.
+    /// Download a file from Internxt Drive by uuid or path.
     #[command(alias = "download:file")]
     DownloadFile {
+        /// The uuid of the file to download.
         #[arg(short, long)]
-        id: String,
+        id: Option<String>,
+        /// The Drive path of the file (e.g. `/a/b/file.txt`), alternative to --id.
+        #[arg(short, long)]
+        path: Option<String>,
         #[arg(short, long)]
         directory: Option<String>,
         #[arg(short, long, default_value_t = false)]
@@ -156,6 +167,9 @@ enum Commands {
         /// The folder id to list. Leave empty for the root folder.
         #[arg(short = 'i', long)]
         id: Option<String>,
+        /// The folder path to list (e.g. `/a/b`), alternative to --id.
+        #[arg(short, long)]
+        path: Option<String>,
         /// Display additional information (modified date, size).
         #[arg(short, long, default_value_t = false)]
         extended: bool,
@@ -169,33 +183,51 @@ enum Commands {
         /// Parent folder id. Leave empty for the root folder.
         #[arg(short = 'i', long)]
         id: Option<String>,
+        /// Parent folder path (e.g. `/a/b`), alternative to --id.
+        #[arg(short, long)]
+        path: Option<String>,
     },
     /// Move a file into a destination folder.
     #[command(alias = "move:file")]
     MoveFile {
         /// The id of the file to move.
         #[arg(short = 'i', long)]
-        id: String,
+        id: Option<String>,
+        /// The Drive path of the file to move, alternative to --id.
+        #[arg(short, long)]
+        path: Option<String>,
         /// Destination folder id. Leave empty for the root folder.
         #[arg(short, long)]
         destination: Option<String>,
+        /// Destination folder path, alternative to --destination.
+        #[arg(long)]
+        dest_path: Option<String>,
     },
     /// Move a folder into a destination folder.
     #[command(alias = "move:folder")]
     MoveFolder {
         /// The id of the folder to move.
         #[arg(short = 'i', long)]
-        id: String,
+        id: Option<String>,
+        /// The Drive path of the folder to move, alternative to --id.
+        #[arg(short, long)]
+        path: Option<String>,
         /// Destination folder id. Leave empty for the root folder.
         #[arg(short, long)]
         destination: Option<String>,
+        /// Destination folder path, alternative to --destination.
+        #[arg(long)]
+        dest_path: Option<String>,
     },
     /// Rename a file.
     #[command(alias = "rename:file")]
     RenameFile {
         /// The id of the file to rename.
         #[arg(short = 'i', long)]
-        id: String,
+        id: Option<String>,
+        /// The Drive path of the file to rename, alternative to --id.
+        #[arg(short, long)]
+        path: Option<String>,
         /// The new name for the file.
         #[arg(short, long)]
         name: String,
@@ -205,7 +237,10 @@ enum Commands {
     RenameFolder {
         /// The id of the folder to rename.
         #[arg(short = 'i', long)]
-        id: String,
+        id: Option<String>,
+        /// The Drive path of the folder to rename, alternative to --id.
+        #[arg(short, long)]
+        path: Option<String>,
         /// The new name for the folder.
         #[arg(short, long)]
         name: String,
@@ -215,14 +250,20 @@ enum Commands {
     TrashFile {
         /// The id of the file to trash.
         #[arg(short = 'i', long)]
-        id: String,
+        id: Option<String>,
+        /// The Drive path of the file to trash, alternative to --id.
+        #[arg(short, long)]
+        path: Option<String>,
     },
     /// Move a folder to the trash.
     #[command(alias = "trash:folder")]
     TrashFolder {
         /// The id of the folder to trash.
         #[arg(short = 'i', long)]
-        id: String,
+        id: Option<String>,
+        /// The Drive path of the folder to trash, alternative to --id.
+        #[arg(short, long)]
+        path: Option<String>,
     },
     /// List the contents of the trash.
     #[command(alias = "trash:list")]
@@ -240,6 +281,9 @@ enum Commands {
         /// Destination folder id. Leave empty for the root folder.
         #[arg(short, long)]
         destination: Option<String>,
+        /// Destination folder path, alternative to --destination.
+        #[arg(long)]
+        dest_path: Option<String>,
     },
     /// Restore a trashed folder into a destination folder.
     #[command(alias = "trash:restore:folder")]
@@ -250,6 +294,9 @@ enum Commands {
         /// Destination folder id. Leave empty for the root folder.
         #[arg(short, long)]
         destination: Option<String>,
+        /// Destination folder path, alternative to --destination.
+        #[arg(long)]
+        dest_path: Option<String>,
     },
     /// Empty the trash permanently. This action cannot be undone.
     #[command(alias = "trash:clear")]
@@ -301,6 +348,9 @@ enum Commands {
         /// The remote folder uuid to sync into. Leave empty for the root folder.
         #[arg(short, long)]
         remote: Option<String>,
+        /// The remote folder path to sync into (e.g. `/a/b`), alternative to --remote.
+        #[arg(long)]
+        remote_path: Option<String>,
         /// Delete remote files not present locally. Optional value: `trash`
         /// (default) or `permanent`.
         #[arg(long, num_args = 0..=1, default_missing_value = "default")]
@@ -526,6 +576,9 @@ enum Commands {
         /// The remote folder uuid to sync from. Leave empty for the root folder.
         #[arg(short, long)]
         remote: Option<String>,
+        /// The remote folder path to sync from (e.g. `/a/b`), alternative to --remote.
+        #[arg(long)]
+        remote_path: Option<String>,
         /// Delete local files not present remotely. Optional value: `remove`
         /// (default; OS trash not yet supported).
         #[arg(long, num_args = 0..=1, default_missing_value = "default")]
@@ -533,6 +586,20 @@ enum Commands {
         /// Print the planned actions without transferring anything.
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+    },
+    /// Print the uuid of the Drive file/folder at a given path.
+    #[command(alias = "get-id", alias = "id:from:path")]
+    IdFromPath {
+        /// The Drive path (e.g. `/a/b/file.txt` or `/a/b`).
+        #[arg(short, long)]
+        path: String,
+    },
+    /// Print the full Drive path of a file/folder given its uuid.
+    #[command(alias = "get-path", alias = "path:from:id")]
+    PathFromId {
+        /// The uuid of the file or folder.
+        #[arg(short, long)]
+        id: String,
     },
 }
 
@@ -657,6 +724,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::UploadFile {
             file,
             destination,
+            dest_path,
             stdin,
             name,
             size,
@@ -665,6 +733,7 @@ async fn run(cli: Cli) -> Result<()> {
             commands::upload_file(
                 file.as_deref(),
                 destination.as_deref(),
+                dest_path.as_deref(),
                 stdin,
                 name.as_deref(),
                 size,
@@ -675,41 +744,92 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::UploadFolder {
             folder,
             destination,
+            dest_path,
             limit,
         } => {
-            commands::upload_folder(&folder, destination.as_deref(), &limit).await?;
+            commands::upload_folder(&folder, destination.as_deref(), dest_path.as_deref(), &limit)
+                .await?;
         }
         Commands::DownloadFile {
             id,
+            path,
             directory,
             overwrite,
             stdout,
         } => {
-            commands::download_file(&id, directory.as_deref(), overwrite, stdout).await?;
+            commands::download_file(
+                id.as_deref(),
+                path.as_deref(),
+                directory.as_deref(),
+                overwrite,
+                stdout,
+            )
+            .await?;
         }
         Commands::Logout => drive_ops::logout().await?,
         Commands::Whoami => drive_ops::whoami().await?,
         Commands::Usage => drive_ops::usage().await?,
-        Commands::List { id, extended } => drive_ops::list(id.as_deref(), extended).await?,
-        Commands::CreateFolder { name, id } => {
-            drive_ops::create_folder(&name, id.as_deref()).await?
+        Commands::List { id, path, extended } => {
+            drive_ops::list(id.as_deref(), path.as_deref(), extended).await?
         }
-        Commands::MoveFile { id, destination } => {
-            drive_ops::move_file(&id, destination.as_deref()).await?
+        Commands::CreateFolder { name, id, path } => {
+            drive_ops::create_folder(&name, id.as_deref(), path.as_deref()).await?
         }
-        Commands::MoveFolder { id, destination } => {
-            drive_ops::move_folder(&id, destination.as_deref()).await?
+        Commands::MoveFile {
+            id,
+            path,
+            destination,
+            dest_path,
+        } => {
+            drive_ops::move_file(
+                id.as_deref(),
+                path.as_deref(),
+                destination.as_deref(),
+                dest_path.as_deref(),
+            )
+            .await?
         }
-        Commands::RenameFile { id, name } => drive_ops::rename_file(&id, &name).await?,
-        Commands::RenameFolder { id, name } => drive_ops::rename_folder(&id, &name).await?,
-        Commands::TrashFile { id } => drive_ops::trash_file(&id).await?,
-        Commands::TrashFolder { id } => drive_ops::trash_folder(&id).await?,
+        Commands::MoveFolder {
+            id,
+            path,
+            destination,
+            dest_path,
+        } => {
+            drive_ops::move_folder(
+                id.as_deref(),
+                path.as_deref(),
+                destination.as_deref(),
+                dest_path.as_deref(),
+            )
+            .await?
+        }
+        Commands::RenameFile { id, path, name } => {
+            drive_ops::rename_file(id.as_deref(), path.as_deref(), &name).await?
+        }
+        Commands::RenameFolder { id, path, name } => {
+            drive_ops::rename_folder(id.as_deref(), path.as_deref(), &name).await?
+        }
+        Commands::TrashFile { id, path } => {
+            drive_ops::trash_file(id.as_deref(), path.as_deref()).await?
+        }
+        Commands::TrashFolder { id, path } => {
+            drive_ops::trash_folder(id.as_deref(), path.as_deref()).await?
+        }
         Commands::TrashList { extended } => drive_ops::trash_list(extended).await?,
-        Commands::TrashRestoreFile { id, destination } => {
-            drive_ops::trash_restore_file(&id, destination.as_deref()).await?
+        Commands::TrashRestoreFile {
+            id,
+            destination,
+            dest_path,
+        } => {
+            drive_ops::trash_restore_file(&id, destination.as_deref(), dest_path.as_deref()).await?
         }
-        Commands::TrashRestoreFolder { id, destination } => {
-            drive_ops::trash_restore_folder(&id, destination.as_deref()).await?
+        Commands::TrashRestoreFolder {
+            id,
+            destination,
+            dest_path,
+        } => {
+            drive_ops::trash_restore_folder(&id, destination.as_deref(), dest_path.as_deref())
+                .await?
         }
         Commands::TrashClear { force } => drive_ops::trash_clear(force).await?,
         Commands::DeletePermanentlyFile { id } => {
@@ -726,16 +846,39 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::SyncUp {
             local,
             remote,
+            remote_path,
             delete,
             dry_run,
             limit,
-        } => sync::sync_up(&local, remote.as_deref(), delete.as_deref(), dry_run, &limit).await?,
+        } => {
+            sync::sync_up(
+                &local,
+                remote.as_deref(),
+                remote_path.as_deref(),
+                delete.as_deref(),
+                dry_run,
+                &limit,
+            )
+            .await?
+        }
         Commands::SyncDown {
             local,
             remote,
+            remote_path,
             delete,
             dry_run,
-        } => sync::sync_down(&local, remote.as_deref(), delete.as_deref(), dry_run).await?,
+        } => {
+            sync::sync_down(
+                &local,
+                remote.as_deref(),
+                remote_path.as_deref(),
+                delete.as_deref(),
+                dry_run,
+            )
+            .await?
+        }
+        Commands::IdFromPath { path } => paths::cmd_id_from_path(&path).await?,
+        Commands::PathFromId { id } => paths::cmd_path_from_id(&id).await?,
         #[cfg(any(feature = "webdav", all(unix, feature = "fuse"), feature = "smb"))]
         Commands::Serve {
             protocols,

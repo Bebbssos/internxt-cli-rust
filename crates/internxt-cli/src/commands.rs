@@ -31,9 +31,11 @@ fn to_rfc3339(t: SystemTime) -> String {
 /// Upload a local file to Internxt Drive (streaming; single-part or multipart).
 /// With `use_stdin`, the body is read from stdin instead of `file_path`; `name`
 /// supplies the Drive name (required) and `size_hint` the byte length (optional).
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_file(
     file_path: Option<&str>,
     destination: Option<&str>,
+    dest_path: Option<&str>,
     use_stdin: bool,
     name: Option<&str>,
     size_hint: Option<u64>,
@@ -42,9 +44,18 @@ pub async fn upload_file(
     let creds = auth::get_auth_details().await?;
     let limit = crate::upload_limit::resolve(limit_args, &creds).await?;
 
-    let folder_uuid = match destination {
-        Some(d) if !d.trim().is_empty() => d.to_string(),
-        _ => creds.root_folder().to_string(),
+    let folder_uuid = {
+        let api = DriveApi::for_credentials(&creds);
+        crate::paths::resolve_opt(
+            &api,
+            &creds.token,
+            creds.root_folder(),
+            destination,
+            dest_path,
+            crate::paths::Expect::Folder,
+        )
+        .await?
+        .unwrap_or_else(|| creds.root_folder().to_string())
     };
 
     if use_stdin {
@@ -249,7 +260,8 @@ async fn spool_stdin_to_temp() -> Result<TempSpool> {
 /// Download + decrypt a file by uuid. Writes to a file under `directory` (default),
 /// or to stdout when `to_stdout` is set (binary-clean: all chatter goes to stderr).
 pub async fn download_file(
-    uuid: &str,
+    id: Option<&str>,
+    path: Option<&str>,
     directory: Option<&str>,
     overwrite: bool,
     to_stdout: bool,
@@ -269,6 +281,17 @@ pub async fn download_file(
     let creds = auth::get_auth_details().await?;
 
     let api = DriveApi::for_credentials(&creds);
+    let uuid = crate::paths::resolve_opt(
+        &api,
+        &creds.token,
+        creds.root_folder(),
+        id,
+        path,
+        crate::paths::Expect::File,
+    )
+    .await?
+    .ok_or_else(|| anyhow!("Provide the file id (--id) or path (--path)"))?;
+    let uuid = uuid.as_str();
     note("Getting file metadata...");
     let meta: DriveFileData = api.get_file_meta(&creds.token, uuid).await?;
 
@@ -500,6 +523,7 @@ async fn upload_one_file(
 pub async fn upload_folder(
     local_path: &str,
     destination: Option<&str>,
+    dest_path: Option<&str>,
     limit_args: &crate::upload_limit::UploadLimitArgs,
 ) -> Result<()> {
     let creds = Arc::new(auth::get_auth_details().await?);
@@ -510,9 +534,18 @@ pub async fn upload_folder(
     if !md.is_dir() {
         return Err(anyhow!("Not a directory: {local_path}"));
     }
-    let dest = match destination {
-        Some(d) if !d.trim().is_empty() => d.to_string(),
-        _ => creds.root_folder().to_string(),
+    let dest = {
+        let api = DriveApi::for_credentials(&creds);
+        crate::paths::resolve_opt(
+            &api,
+            &creds.token,
+            creds.root_folder(),
+            destination,
+            dest_path,
+            crate::paths::Expect::Folder,
+        )
+        .await?
+        .unwrap_or_else(|| creds.root_folder().to_string())
     };
     let bucket = creds.bucket().to_string();
     let mnemonic = creds.mnemonic().to_string();

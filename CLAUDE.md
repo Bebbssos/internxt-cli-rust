@@ -10,7 +10,8 @@ Goal: faster, lower memory, single static binary. Fully streaming transfers (han
 
 Commands: **login** (legacy email/password + web **SSO**), **upload-file /
 download-file / upload-folder**, drive management (**logout, whoami, list,
-create-folder, move/rename/trash/restore, trash-list/clear, delete-permanently**),
+create-folder, move/rename/trash/restore, trash-list/clear, delete-permanently**,
+**get-id** path→uuid / **get-path** uuid→path),
 **workspaces** (list/use/unset, workspace-scoped), one-way **sync** (sync-up/down),
 a foreground multi-protocol **serve** (`serve webdav,fuse,smb,nfs,sftp`) exposing
 Drive over **WebDAV**, a **FUSE mount** (Unix), an **SMB/CIFS** share, an **NFSv3**
@@ -93,6 +94,7 @@ Cargo **workspace**, two crates (bin `internxt` built by the cli crate):
 | **cli** `nfs/` | NFSv3 server (feature `nfs`, default-off, all platforms): `mod.rs` (`NfsConfig` + `serve`: bind `NFSTcpListener`, spawn idle-flush sweeper, wire shutdown), `fs.rs` (Drive-backed `NFSFileSystem`: id-based inode table like FUSE, streaming reads, temp-buffer writes flushed on idle — NFS has no close). Wire protocol from `nfsserve` |
 | **cli** `sftp/` | SFTP server (feature `sftp`, default-off, all platforms): `mod.rs` (`SftpConfig` + `serve`: build `russh` SSH server w/ host key, wire shutdown), `fs.rs` (`SshServer`/`SshSession` = `russh::server::Handler` for transport+auth; `SftpSession` = `russh_sftp::server::Handler` over Drive: path resolve, per-session open/close handle map, streaming reads, temp-file writes uploaded on `close`). SSH transport from `russh`, SFTP subsystem from `russh-sftp` |
 | **cli** `drive_ops.rs` | logout, whoami, list, create/move/rename/trash/delete |
+| **cli** `paths.rs` | path↔uuid resolution: cache-free workspace-aware tree walk (path→uuid) + folder `ancestors` endpoint (uuid→path). `get-id`/`get-path` commands; `resolve_opt` powers the `--path`/`--dest-path`/`--remote-path` alternatives to `-i` on most drive/upload/download/sync ops (live items only, not trash) |
 | **cli** `workspaces.rs` | workspaces list/use/unset; decrypts workspace mnemonic |
 | **cli** `output.rs` | `--json` vs human switch (`emit`/`status`/`emit_error`); `bar_sink` |
 

@@ -338,9 +338,11 @@ fn emit_summary(dry_run: bool, skipped: u64, s: &Summary) {
 
 // ---- sync-up: make remote match local ----
 
+#[allow(clippy::too_many_arguments)]
 pub async fn sync_up(
     local: &str,
     remote: Option<&str>,
+    remote_path: Option<&str>,
     delete: Option<&str>,
     dry_run: bool,
     limit_args: &crate::upload_limit::UploadLimitArgs,
@@ -354,9 +356,18 @@ pub async fn sync_up(
     if !md.is_dir() {
         return Err(anyhow!("Not a directory: {local}"));
     }
-    let remote_uuid = match remote {
-        Some(r) if !r.trim().is_empty() => r.trim().to_string(),
-        _ => creds.root_folder().to_string(),
+    let remote_uuid = {
+        let api = DriveApi::for_credentials(&creds);
+        crate::paths::resolve_opt(
+            &api,
+            &creds.token,
+            creds.root_folder(),
+            remote,
+            remote_path,
+            crate::paths::Expect::Folder,
+        )
+        .await?
+        .unwrap_or_else(|| creds.root_folder().to_string())
     };
 
     let mut local_files = HashMap::new();
@@ -603,6 +614,7 @@ async fn upload_one(
 pub async fn sync_down(
     local: &str,
     remote: Option<&str>,
+    remote_path: Option<&str>,
     delete: Option<&str>,
     dry_run: bool,
 ) -> Result<()> {
@@ -613,9 +625,18 @@ pub async fn sync_down(
     if root.exists() && !root.is_dir() {
         return Err(anyhow!("Not a directory: {local}"));
     }
-    let remote_uuid = match remote {
-        Some(r) if !r.trim().is_empty() => r.trim().to_string(),
-        _ => creds.root_folder().to_string(),
+    let remote_uuid = {
+        let api = DriveApi::for_credentials(&creds);
+        crate::paths::resolve_opt(
+            &api,
+            &creds.token,
+            creds.root_folder(),
+            remote,
+            remote_path,
+            crate::paths::Expect::Folder,
+        )
+        .await?
+        .unwrap_or_else(|| creds.root_folder().to_string())
     };
 
     output::status("Scanning remote tree...");

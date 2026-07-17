@@ -230,6 +230,36 @@ impl DriveApi {
         Ok(serde_json::from_value(v)?)
     }
 
+    /// GET /files/{uuid}/meta — raw JSON (keeps fields absent from
+    /// [`DriveFileData`], e.g. `folderUuid`, needed to reconstruct a file's path).
+    pub async fn get_file_meta_value(&self, token: &str, uuid: &str) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/files/{uuid}/meta")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getFileMeta").await
+    }
+
+    /// GET folder ancestors — the chain from the folder itself (first element) up
+    /// to the account/workspace root (last element, `parentUuid: null`). Each entry
+    /// carries `uuid`/`plainName`/`parentUuid`. Workspace-aware
+    /// (`/workspaces/{id}/folders/{uuid}/ancestors`).
+    pub async fn get_folder_ancestors(&self, token: &str, uuid: &str) -> Result<Value> {
+        let path = match &self.workspace {
+            Some((id, _)) => format!("/workspaces/{id}/folders/{uuid}/ancestors"),
+            None => format!("/folders/{uuid}/ancestors"),
+        };
+        let resp = self
+            .client
+            .get(self.url(&path))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getFolderAncestors").await
+    }
+
     /// POST /files (createFileEntryByUuid), or POST /workspaces/{id}/files when a
     /// workspace is active. The workspace variant omits `creationTime` and adds a
     /// `date` field (mirrors og workspaceClient.createFileEntry).
