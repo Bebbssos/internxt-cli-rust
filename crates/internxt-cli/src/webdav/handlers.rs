@@ -222,7 +222,13 @@ pub async fn get(ctx: &Ctx, req: Request, head_only: bool) -> Result<Response, A
     };
 
     let size = file.size;
-    let range = range_header.as_deref().and_then(|h| parse_range(h, size));
+    // Mirrors node: a Range header is only honored for a non-empty file; a
+    // malformed or unsatisfiable range is a client error, not a silent
+    // full-file fallback.
+    let range = match range_header.as_deref() {
+        Some(h) if size > 0 => Some(parse_range(h, size).map_err(|e| e.into_app_error(h, size))?),
+        _ => None,
+    };
     let content_length = range.map(|(_, len)| len).unwrap_or(size);
 
     let builder = Response::builder()
@@ -264,34 +270,60 @@ pub async fn get(ctx: &Ctx, req: Request, head_only: bool) -> Result<Response, A
         .unwrap())
 }
 
-/// Parse a `Range: bytes=…` header into `(start, len)` clamped to `total`.
-/// Only a single range is supported; anything unparseable yields `None`.
-fn parse_range(header: &str, total: u64) -> Option<(u64, u64)> {
-    if total == 0 {
-        return None;
+/// A `Range` header that couldn't be honored: syntactically invalid, or
+/// syntactically fine but outside the file's bounds. Mirrors node's
+/// `NetworkUtils.parseRangeHeader` (`range-parser` return codes -2/-1).
+enum RangeError {
+    Malformed,
+    Unsatisfiable,
+}
+
+impl RangeError {
+    fn into_app_error(self, header: &str, total: u64) -> AppError {
+        let detail = format!("{{\"range\":\"{header}\",\"totalFileSize\":{total}}}");
+        match self {
+            RangeError::Malformed => {
+                AppError::bad_request(format!("Malformed Range-Request. {detail}"))
+            }
+            RangeError::Unsatisfiable => AppError::new(
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                format!("Unsatisfiable Range-Request. {detail}"),
+            ),
+        }
     }
-    let spec = header.trim().strip_prefix("bytes=")?;
-    // Only the first range of a possible list.
-    let first = spec.split(',').next()?.trim();
-    let (start_s, end_s) = first.split_once('-')?;
+}
+
+/// Parse a `Range: bytes=…` header into `(start, len)` clamped to `total`.
+/// Only a single range is supported; a comma-separated multi-range is treated
+/// as malformed (multi-range responses aren't implemented, same as node).
+fn parse_range(header: &str, total: u64) -> Result<(u64, u64), RangeError> {
+    let spec = header.trim().strip_prefix("bytes=").ok_or(RangeError::Malformed)?;
+    if spec.contains(',') {
+        return Err(RangeError::Malformed);
+    }
+    let first = spec.trim();
+    let (start_s, end_s) = first.split_once('-').ok_or(RangeError::Malformed)?;
     let (start, end) = if start_s.is_empty() {
         // Suffix range: last N bytes.
-        let n: u64 = end_s.parse().ok()?;
+        let n: u64 = end_s.parse().map_err(|_| RangeError::Malformed)?;
+        if n == 0 {
+            return Err(RangeError::Unsatisfiable);
+        }
         let n = n.min(total);
         (total - n, total - 1)
     } else {
-        let start: u64 = start_s.parse().ok()?;
+        let start: u64 = start_s.parse().map_err(|_| RangeError::Malformed)?;
         let end: u64 = if end_s.is_empty() {
             total - 1
         } else {
-            end_s.parse::<u64>().ok()?.min(total - 1)
+            end_s.parse::<u64>().map_err(|_| RangeError::Malformed)?.min(total - 1)
         };
         (start, end)
     };
     if start > end || start >= total {
-        return None;
+        return Err(RangeError::Unsatisfiable);
     }
-    Some((start, end - start + 1))
+    Ok((start, end - start + 1))
 }
 
 // ---- PUT ----
@@ -514,13 +546,17 @@ pub async fn mkcol(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         None => create_parents(ctx, &api, token, parent_components).await?,
     };
 
-    // Already exists? Treat as a no-op success (matches og).
+    // RFC 4918: MKCOL on an existing resource must fail with 405. Some clients
+    // (e.g. QNAP HBS) abort the whole backup job on a 2xx here (matches og).
     let existing = resource::list_folders(&api, token, &parent.uuid, &ctx.cache)
         .await?
         .into_iter()
         .any(|f| f.plain_name == resource.name);
     if existing {
-        return Ok(multistatus_response(&xml::multistatus("")));
+        return Err(AppError::new(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Folder already exists",
+        ));
     }
 
     // Conflict-tolerant create: a racing MKCOL/PUT may create it first; adopt

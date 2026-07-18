@@ -28,14 +28,14 @@ clone_pin() {
   echo "   $name -> $(git -C "$name" rev-parse --short HEAD)"
 }
 
-clone_pin cli     https://github.com/internxt/cli.git     166fb5a77dab27aea3e9cdb1af0e1713d9dde04e  # v1.6.5
-clone_pin inxt-js https://github.com/internxt/inxt-js.git a27cc91cde65700ebca088ebba3870d9bbf2a94f  # v3.3.1
-clone_pin lib     https://github.com/internxt/lib.git     22eaae309ad17a8c39c03b742bca631feca0a8f9
-clone_pin sdk     https://github.com/internxt/sdk.git     aa97c980562926b3425a290f8ca39ea5c1f45a15  # v1.17.9
+clone_pin cli     https://github.com/internxt/cli.git     d977ab5e8ad176f572bd821e0c759219eae9522d  # v1.6.7
+clone_pin inxt-js https://github.com/internxt/inxt-js.git 855ed28c492ada9048d730d3de727f0d1732f5c2  # v3.3.5
+clone_pin lib     https://github.com/internxt/lib.git     accd5890b22b0ab4719ef5f333545eb3eee4b5d2  # v1.5.1
+clone_pin sdk     https://github.com/internxt/sdk.git     efc30f28b09bf491dc6afdcba10998190ca8afae  # v1.17.17
 
 # Published CLI + its runtime deps (gives og/node_modules/@internxt/* at the
-# versions the released CLI actually runs: inxt-js@3.2.2, sdk@1.17.5, lib@1.4.2).
-echo "== installing @internxt/cli@1.6.5 into og/node_modules =="
-npm install --no-save --prefix . @internxt/cli@1.6.5
+# versions the released CLI actually runs).
+echo "== installing @internxt/cli@1.6.7 into og/node_modules =="
+npm install --no-save --prefix . @internxt/cli@1.6.7
 
 echo "Done. Reference sources are in ./og (git-ignored)."

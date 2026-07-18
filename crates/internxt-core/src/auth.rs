@@ -154,22 +154,49 @@ fn decrypt_user_keys(user: &Value, password: &str) -> (Option<String>, Option<St
     (ecc_enc.and_then(decrypt), kyber_enc.and_then(decrypt))
 }
 
-/// Parses the `exp` claim (unix seconds) from a JWT without verifying the
-/// signature. Mirrors node ValidationService.validateJwtAndCheckExpiration.
-fn jwt_expiration(token: &str) -> Option<i64> {
+/// Parses the `exp`/`iat` claims (unix seconds) from a JWT without verifying
+/// the signature, after checking the header carries an `alg`. Mirrors node
+/// `@internxt/lib` `validateJwtAndCheckExpiration`.
+fn jwt_claims(token: &str) -> Option<(i64, Option<i64>)> {
     use base64::Engine;
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return None;
     }
+    let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[0])
+        .ok()?;
+    let header: Value = serde_json::from_slice(&header).ok()?;
+    header["alg"].as_str()?;
+
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(parts[1])
         .ok()?;
     let v: Value = serde_json::from_slice(&payload).ok()?;
-    v["exp"].as_i64()
+    let exp = v["exp"].as_i64()?;
+    if exp < 0 {
+        return None;
+    }
+    Some((exp, v["iat"].as_i64()))
 }
 
-const TWO_DAYS_SECS: i64 = 2 * 24 * 60 * 60;
+const SIX_HOURS_SECS: i64 = 6 * 60 * 60;
+
+/// Whether a token needs refreshing: once the remaining lifetime drops to 50%
+/// of the token's total lifetime (exp - iat), falling back to a fixed 6-hour
+/// margin when `iat` is absent. Mirrors node `@internxt/lib`
+/// `isTokenRefreshRequired`. Returns `false` for an already-expired token.
+fn refresh_required(exp: i64, iat: Option<i64>, now: i64) -> bool {
+    let remaining = exp - now;
+    if remaining <= 0 {
+        return false;
+    }
+    let threshold = match iat {
+        Some(iat) => (exp - iat) / 2,
+        None => SIX_HOURS_SECS,
+    };
+    remaining <= threshold
+}
 
 /// Validates and, mirroring node's `getAuthDetails`, refreshes credentials when
 /// the token is within two days of expiry. Pure: takes the current credentials
@@ -183,7 +210,7 @@ pub async fn refresh_credentials(
     mut creds: Credentials,
     on_warn: impl Fn(&str),
 ) -> Result<(Credentials, bool)> {
-    let exp = jwt_expiration(&creds.token)
+    let (exp, iat) = jwt_claims(&creds.token)
         .ok_or_else(|| anyhow!("Stored credentials are invalid. Run `internxt login` again."))?;
     if !crypto::validate_mnemonic(&creds.user.mnemonic) {
         return Err(anyhow!(
@@ -195,16 +222,15 @@ pub async fn refresh_credentials(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let remaining = exp - now;
 
-    if remaining <= 0 {
+    if exp - now <= 0 {
         return Err(anyhow!(
             "Your session has expired. Run `internxt login` again."
         ));
     }
 
     let mut changed = false;
-    if remaining <= TWO_DAYS_SECS {
+    if refresh_required(exp, iat, now) {
         match DriveApi::new().refresh_user_token(&creds.token).await {
             Ok(new_token) => {
                 creds.token = new_token;
@@ -222,8 +248,10 @@ pub async fn refresh_credentials(
     // re-fetching them (the network creds + tokenHeader rotate; the mnemonic and
     // root folder are stable). Best-effort, like the user-token refresh.
     if let Some(ws) = &creds.workspace {
-        let ws_remaining = jwt_expiration(&ws.token).map(|e| e - now).unwrap_or(0);
-        if ws_remaining <= TWO_DAYS_SECS {
+        let ws_refresh_required = jwt_claims(&ws.token)
+            .map(|(exp, iat)| refresh_required(exp, iat, now))
+            .unwrap_or(true);
+        if ws_refresh_required {
             match refresh_workspace_credentials(&creds.token, ws.id.clone()).await {
                 Ok(Some((token, bucket, user, pass))) => {
                     if let Some(w) = creds.workspace.as_mut() {
@@ -285,14 +313,59 @@ mod tests {
     fn jwt_expiration_parses_exp() {
         // header.payload.signature where payload = {"exp":1700000000}
         let token = "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjE3MDAwMDAwMDB9.sig";
-        assert_eq!(jwt_expiration(token), Some(1_700_000_000));
+        assert_eq!(jwt_claims(token).map(|(exp, _)| exp), Some(1_700_000_000));
     }
 
     #[test]
     fn jwt_expiration_rejects_malformed() {
-        assert_eq!(jwt_expiration("not-a-jwt"), None);
-        assert_eq!(jwt_expiration("a.b"), None);
+        assert_eq!(jwt_claims("not-a-jwt"), None);
+        assert_eq!(jwt_claims("a.b"), None);
         // valid structure but payload has no exp
-        assert_eq!(jwt_expiration("h.e30.s"), None);
+        assert_eq!(jwt_claims("h.e30.s"), None);
+    }
+
+    fn make_jwt(header: &str, payload: &str) -> String {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        format!(
+            "{}.{}.sig",
+            b64.encode(header.as_bytes()),
+            b64.encode(payload.as_bytes())
+        )
+    }
+
+    #[test]
+    fn jwt_claims_rejects_missing_alg() {
+        let token = make_jwt(r#"{"typ":"JWT"}"#, r#"{"exp":1700000000}"#);
+        assert_eq!(jwt_claims(&token), None);
+    }
+
+    #[test]
+    fn jwt_claims_rejects_negative_exp() {
+        let token = make_jwt(r#"{"alg":"HS256"}"#, r#"{"exp":-1}"#);
+        assert_eq!(jwt_claims(&token), None);
+    }
+
+    #[test]
+    fn jwt_claims_parses_exp_and_iat() {
+        let token = make_jwt(r#"{"alg":"HS256"}"#, r#"{"exp":1700000000,"iat":1699990000}"#);
+        assert_eq!(jwt_claims(&token), Some((1_700_000_000, Some(1_699_990_000))));
+    }
+
+    #[test]
+    fn refresh_required_uses_half_lifetime_with_iat() {
+        let iat = 1_000_000;
+        let exp = 1_000_000 + 1000; // 1000s lifetime -> 500s threshold
+        assert!(!refresh_required(exp, Some(iat), exp - 501));
+        assert!(refresh_required(exp, Some(iat), exp - 500));
+        assert!(refresh_required(exp, Some(iat), exp - 1));
+        assert!(!refresh_required(exp, Some(iat), exp)); // already expired -> false
+    }
+
+    #[test]
+    fn refresh_required_falls_back_to_six_hours_without_iat() {
+        let exp = 2_000_000;
+        assert!(!refresh_required(exp, None, exp - SIX_HOURS_SECS - 1));
+        assert!(refresh_required(exp, None, exp - SIX_HOURS_SECS));
     }
 }

@@ -66,7 +66,7 @@ All commands accept the global `--json` flag, which prints a single JSON result 
 | `upload-file` | `upload:file` | `-f, --file <PATH>`, `-i, --destination <FOLDER_ID>`, `--no-upload-limit`, `--max-upload-size <SIZE>` | Upload a single file (streaming; single-part or multipart). |
 | `upload-folder` | `upload:folder` | `-f, --folder <PATH>`, `-i, --destination <FOLDER_ID>`, `--no-upload-limit`, `--max-upload-size <SIZE>` | Recursively upload a folder tree (concurrent file uploads). |
 | `download-file` | `download:file` | `-i, --id <FILE_ID>`, `-d, --directory <DIR>`, `-o, --overwrite` | Download + decrypt a file by id, streaming to disk. |
-| `list` | | `-i, --id <FOLDER_ID>`, `-e, --extended` | List a folder's contents. `--extended` adds modified date + size. |
+| `list` | | `-i, --id <FOLDER_ID>`, `-e, --extended` | List a folder's contents. `--extended` adds created date, modified date + size. |
 | `create-folder` | `create:folder` | `-n, --name <NAME>`, `-i, --id <PARENT_ID>` | Create a folder. |
 | `move-file` | `move:file` | `-i, --id <FILE_ID>`, `-d, --destination <FOLDER_ID>` | Move a file into a destination folder. |
 | `move-folder` | `move:folder` | `-i, --id <FOLDER_ID>`, `-d, --destination <FOLDER_ID>` | Move a folder into a destination folder. |

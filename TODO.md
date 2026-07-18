@@ -14,10 +14,10 @@ diff upstream against them to find changes worth pulling in.
 
 | Package | Repo | Pinned commit | Tag / version | Commit date |
 |---|---|---|---|---|
-| cli | github.com/internxt/cli | `166fb5a77dab27aea3e9cdb1af0e1713d9dde04e` | v1.6.5 | 2026-06-16 |
-| inxt-js | github.com/internxt/inxt-js | `a27cc91cde65700ebca088ebba3870d9bbf2a94f` | v3.3.1 | 2026-06-16 |
-| lib | github.com/internxt/lib | `22eaae309ad17a8c39c03b742bca631feca0a8f9` | (master) v1.4.2 | 2026-06-17 |
-| sdk | github.com/internxt/sdk | `aa97c980562926b3425a290f8ca39ea5c1f45a15` | v1.17.9 | 2026-06-17 |
+| cli | github.com/internxt/cli | `d977ab5e8ad176f572bd821e0c759219eae9522d` | v1.6.7 | 2026-07-13 |
+| inxt-js | github.com/internxt/inxt-js | `855ed28c492ada9048d730d3de727f0d1732f5c2` | v3.3.5 | 2026-07-13 |
+| lib | github.com/internxt/lib | `accd5890b22b0ab4719ef5f333545eb3eee4b5d2` | (master) v1.5.1 | 2026-07-09 |
+| sdk | github.com/internxt/sdk | `efc30f28b09bf491dc6afdcba10998190ca8afae` | v1.17.17 | 2026-07-16 |
 
 > Note: the **released** CLI (v1.6.5) actually runs older published deps —
 > `@internxt/inxt-js@3.2.2`, `@internxt/sdk@1.17.5`, `@internxt/lib@1.4.2`

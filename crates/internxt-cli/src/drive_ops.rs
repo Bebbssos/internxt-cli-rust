@@ -49,6 +49,17 @@ fn str_field(v: &Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
+/// First non-empty of `v[primary]` / `v[fallback]` as a string. Mirrors node's
+/// `folder.creationTime ?? folder.createdAt` / `modificationTime ?? updatedAt`.
+fn str_field_or(v: &Value, primary: &str, fallback: &str) -> String {
+    let p = str_field(v, primary);
+    if !p.is_empty() {
+        p
+    } else {
+        str_field(v, fallback)
+    }
+}
+
 /// Print a simple aligned table.
 pub(crate) fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
@@ -323,7 +334,8 @@ fn render_items(folders: &[Value], files: &[Value], extended: bool) {
             str_field(f, "uuid"),
         ];
         if extended {
-            row.push(format_date(&str_field(f, "updatedAt")));
+            row.push(format_date(&str_field_or(f, "creationTime", "createdAt")));
+            row.push(format_date(&str_field_or(f, "modificationTime", "updatedAt")));
             row.push("-".to_string());
         }
         rows.push(row);
@@ -346,14 +358,15 @@ fn render_items(folders: &[Value], files: &[Value], extended: bool) {
                     _ => 0.0,
                 })
                 .unwrap_or(0.0);
-            row.push(format_date(&str_field(f, "updatedAt")));
+            row.push(format_date(&str_field_or(f, "creationTime", "createdAt")));
+            row.push(format_date(&str_field_or(f, "modificationTime", "updatedAt")));
             row.push(human_file_size(size));
         }
         rows.push(row);
     }
 
     let headers: Vec<&str> = if extended {
-        vec!["Type", "Name", "Id", "Modified", "Size"]
+        vec!["Type", "Name", "Id", "Created", "Modified", "Size"]
     } else {
         vec!["Type", "Name", "Id"]
     };
