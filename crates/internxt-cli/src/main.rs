@@ -75,7 +75,6 @@ enum Commands {
         twofactortoken: Option<String>,
     },
     /// Log in with email and password (legacy flow).
-    #[command(alias = "login:legacy")]
     LoginLegacy {
         #[arg(short, long, env = "INXT_USER")]
         email: Option<String>,
@@ -89,7 +88,6 @@ enum Commands {
         twofactortoken: Option<String>,
     },
     /// Log in via the web-based SSO flow (requires the `sso` feature).
-    #[command(alias = "login:sso")]
     LoginSso {
         /// Address the browser uses to reach this machine (default 127.0.0.1).
         #[arg(long, env = "INXT_LOGIN_SERVER_HOST")]
@@ -100,62 +98,13 @@ enum Commands {
     },
     /// Upload a file to Internxt Drive.
     #[command(alias = "upload:file")]
-    UploadFile {
-        /// Path to the file. Omit when using --stdin.
-        #[arg(short, long)]
-        file: Option<String>,
-        /// Destination folder uuid. Leave empty for root.
-        #[arg(short = 'i', long)]
-        destination: Option<String>,
-        /// Destination folder path (e.g. `/a/b`), alternative to --destination.
-        #[arg(long)]
-        dest_path: Option<String>,
-        /// Read the file body from stdin instead of --file. Requires --name.
-        #[arg(long, default_value_t = false)]
-        stdin: bool,
-        /// Drive filename (with extension) for the uploaded file. Required with --stdin;
-        /// with --file, overrides the name/extension taken from the source path.
-        #[arg(short, long)]
-        name: Option<String>,
-        /// Exact byte length of stdin. If given, streams directly; otherwise stdin is
-        /// spooled to a temp file to learn its size.
-        #[arg(short = 's', long)]
-        size: Option<u64>,
-        #[command(flatten)]
-        limit: upload_limit::UploadLimitArgs,
-    },
+    UploadFile(UploadFileArgs),
     /// Upload a folder (recursively) to Internxt Drive.
     #[command(alias = "upload:folder")]
-    UploadFolder {
-        /// The path to the folder on your system.
-        #[arg(short, long)]
-        folder: Option<String>,
-        /// Destination folder id. Leave empty for the root folder.
-        #[arg(short = 'i', long)]
-        destination: Option<String>,
-        /// Destination folder path (e.g. `/a/b`), alternative to --destination.
-        #[arg(long)]
-        dest_path: Option<String>,
-        #[command(flatten)]
-        limit: upload_limit::UploadLimitArgs,
-    },
+    UploadFolder(UploadFolderArgs),
     /// Download a file from Internxt Drive by uuid or path.
     #[command(alias = "download:file")]
-    DownloadFile {
-        /// The uuid of the file to download.
-        #[arg(short, long)]
-        id: Option<String>,
-        /// The Drive path of the file (e.g. `/a/b/file.txt`), alternative to --id.
-        #[arg(short, long)]
-        path: Option<String>,
-        #[arg(short, long)]
-        directory: Option<String>,
-        #[arg(short, long, default_value_t = false)]
-        overwrite: bool,
-        /// Write the decrypted bytes to stdout instead of a file (status goes to stderr).
-        #[arg(long, default_value_t = false)]
-        stdout: bool,
-    },
+    DownloadFile(DownloadFileArgs),
     /// Log out the current user from the Internxt CLI.
     Logout,
     /// Display the current user logged into the Internxt CLI.
@@ -178,171 +127,53 @@ enum Commands {
     },
     /// Create a folder in your Internxt Drive.
     #[command(alias = "create:folder")]
-    CreateFolder {
-        /// The name for the new folder.
-        #[arg(short, long)]
-        name: Option<String>,
-        /// Parent folder id. Leave empty for the root folder.
-        #[arg(short = 'i', long)]
-        id: Option<String>,
-        /// Parent folder path (e.g. `/a/b`), alternative to --id.
-        #[arg(short, long)]
-        path: Option<String>,
-    },
+    CreateFolder(CreateFolderArgs),
     /// Move a file into a destination folder.
     #[command(alias = "move:file")]
-    MoveFile {
-        /// The id of the file to move.
-        #[arg(short = 'i', long)]
-        id: Option<String>,
-        /// The Drive path of the file to move, alternative to --id.
-        #[arg(short, long)]
-        path: Option<String>,
-        /// Destination folder id. Leave empty for the root folder.
-        #[arg(short, long)]
-        destination: Option<String>,
-        /// Destination folder path, alternative to --destination.
-        #[arg(long)]
-        dest_path: Option<String>,
-    },
+    MoveFile(MoveFileArgs),
     /// Move a folder into a destination folder.
     #[command(alias = "move:folder")]
-    MoveFolder {
-        /// The id of the folder to move.
-        #[arg(short = 'i', long)]
-        id: Option<String>,
-        /// The Drive path of the folder to move, alternative to --id.
-        #[arg(short, long)]
-        path: Option<String>,
-        /// Destination folder id. Leave empty for the root folder.
-        #[arg(short, long)]
-        destination: Option<String>,
-        /// Destination folder path, alternative to --destination.
-        #[arg(long)]
-        dest_path: Option<String>,
-    },
+    MoveFolder(MoveFolderArgs),
     /// Rename a file.
     #[command(alias = "rename:file")]
-    RenameFile {
-        /// The id of the file to rename.
-        #[arg(short = 'i', long)]
-        id: Option<String>,
-        /// The Drive path of the file to rename, alternative to --id.
-        #[arg(short, long)]
-        path: Option<String>,
-        /// The new name for the file.
-        #[arg(short, long)]
-        name: Option<String>,
-    },
+    RenameFile(RenameFileArgs),
     /// Rename a folder.
     #[command(alias = "rename:folder")]
-    RenameFolder {
-        /// The id of the folder to rename.
-        #[arg(short = 'i', long)]
-        id: Option<String>,
-        /// The Drive path of the folder to rename, alternative to --id.
-        #[arg(short, long)]
-        path: Option<String>,
-        /// The new name for the folder.
-        #[arg(short, long)]
-        name: Option<String>,
-    },
+    RenameFolder(RenameFolderArgs),
     /// Move a file to the trash.
     #[command(alias = "trash:file")]
-    TrashFile {
-        /// The id of the file to trash.
-        #[arg(short = 'i', long)]
-        id: Option<String>,
-        /// The Drive path of the file to trash, alternative to --id.
-        #[arg(short, long)]
-        path: Option<String>,
-    },
+    TrashFile(TrashFileArgs),
     /// Move a folder to the trash.
     #[command(alias = "trash:folder")]
-    TrashFolder {
-        /// The id of the folder to trash.
-        #[arg(short = 'i', long)]
-        id: Option<String>,
-        /// The Drive path of the folder to trash, alternative to --id.
-        #[arg(short, long)]
-        path: Option<String>,
-    },
+    TrashFolder(TrashFolderArgs),
     /// List the contents of the trash.
     #[command(alias = "trash:list")]
-    TrashList {
-        /// Display additional information (modified date, size).
-        #[arg(short, long, default_value_t = false)]
-        extended: bool,
-    },
+    TrashList(TrashListArgs),
     /// Restore a trashed file into a destination folder.
     #[command(alias = "trash:restore:file")]
-    TrashRestoreFile {
-        /// The id of the file to restore.
-        #[arg(short = 'i', long)]
-        id: Option<String>,
-        /// Destination folder id. Leave empty for the root folder.
-        #[arg(short, long)]
-        destination: Option<String>,
-        /// Destination folder path, alternative to --destination.
-        #[arg(long)]
-        dest_path: Option<String>,
-    },
+    TrashRestoreFile(TrashRestoreFileArgs),
     /// Restore a trashed folder into a destination folder.
     #[command(alias = "trash:restore:folder")]
-    TrashRestoreFolder {
-        /// The id of the folder to restore.
-        #[arg(short = 'i', long)]
-        id: Option<String>,
-        /// Destination folder id. Leave empty for the root folder.
-        #[arg(short, long)]
-        destination: Option<String>,
-        /// Destination folder path, alternative to --destination.
-        #[arg(long)]
-        dest_path: Option<String>,
-    },
+    TrashRestoreFolder(TrashRestoreFolderArgs),
     /// Empty the trash permanently. This action cannot be undone.
     #[command(alias = "trash:clear")]
-    TrashClear {
-        /// Empty the trash without confirmation.
-        #[arg(short, long, default_value_t = false)]
-        force: bool,
-    },
+    TrashClear(TrashClearArgs),
     /// Permanently delete a file. This action cannot be undone.
     #[command(alias = "delete:permanently:file")]
-    DeletePermanentlyFile {
-        /// The id of the file to permanently delete.
-        #[arg(short = 'i', long)]
-        id: Option<String>,
-    },
+    DeletePermanentlyFile(DeletePermanentlyFileArgs),
     /// Permanently delete a folder. This action cannot be undone.
     #[command(alias = "delete:permanently:folder")]
-    DeletePermanentlyFolder {
-        /// The id of the folder to permanently delete.
-        #[arg(short = 'i', long)]
-        id: Option<String>,
-    },
+    DeletePermanentlyFolder(DeletePermanentlyFolderArgs),
     /// List the workspaces you belong to.
     #[command(alias = "workspaces:list")]
-    WorkspacesList {
-        /// Display additional information (owner, address, created at).
-        #[arg(short, long, default_value_t = false)]
-        extended: bool,
-    },
+    WorkspacesList(WorkspacesListArgs),
     /// Set the active workspace for subsequent commands.
     #[command(alias = "workspaces:use")]
-    WorkspacesUse {
-        /// The workspace id to activate. Use `workspaces-list` to view ids.
-        #[arg(short = 'i', long, conflicts_with = "personal")]
-        id: Option<String>,
-        /// Switch back to your personal drive space (unset the active workspace).
-        #[arg(short, long, default_value_t = false)]
-        personal: bool,
-    },
+    WorkspacesUse(WorkspacesUseArgs),
     /// Unset the active workspace (operate within your personal drive space).
     #[command(alias = "workspaces:unset")]
     WorkspacesUnset,
     /// One-way sync: make a remote Drive folder match a local folder (push).
-    #[command(alias = "sync:up")]
     SyncUp {
         /// The local directory to sync from.
         #[arg(short, long)]
@@ -570,7 +401,6 @@ enum Commands {
         limit: upload_limit::UploadLimitArgs,
     },
     /// One-way sync: make a local folder match a remote Drive folder (pull).
-    #[command(alias = "sync:down")]
     SyncDown {
         /// The local directory to sync into.
         #[arg(short, long)]
@@ -606,6 +436,347 @@ enum Commands {
     /// Manage a file's thumbnail: generate, upload a custom one, or download it.
     #[command(subcommand, alias = "thumbnails")]
     Thumbnail(ThumbnailCmd),
+
+    // ---- space-form topic groups ----
+    //
+    // The official CLI is built on oclif, whose command ids are the flat
+    // hyphenated names above (e.g. `upload-file`) with the colon form
+    // (`upload:file`) as a real secondary alias (see each command's
+    // `static readonly aliases` in og's source). oclif resolves space-separated
+    // invocation (`internxt upload file`) by joining argv with `:` and matching
+    // it against that alias — so all three forms work on the real official CLI.
+    // clap has no such joining, so these groups exist purely to make the space
+    // form parse the same way. Only for commands with a genuine og alias —
+    // `login-legacy`/`login-sso`/`sync-up`/`sync-down` have no og equivalent, so
+    // they're flat-only.
+    /// Upload a file or folder (see `upload file` / `upload folder`).
+    #[command(subcommand)]
+    Upload(UploadCmd),
+    /// Download a file (see `download file`).
+    #[command(subcommand)]
+    Download(DownloadCmd),
+    /// Create a folder (see `create folder`).
+    #[command(subcommand)]
+    Create(CreateCmd),
+    /// Move a file or folder (see `move file` / `move folder`).
+    #[command(subcommand)]
+    Move(MoveCmd),
+    /// Rename a file or folder (see `rename file` / `rename folder`).
+    #[command(subcommand)]
+    Rename(RenameCmd),
+    /// Manage the trash (see `trash file|folder|list|clear|restore`).
+    #[command(subcommand)]
+    Trash(TrashCmd),
+    /// Permanently delete a file or folder (see `delete permanently file|folder`).
+    #[command(subcommand)]
+    Delete(DeleteCmd),
+    /// Manage workspaces (see `workspaces list|use|unset`).
+    #[command(subcommand)]
+    Workspaces(WorkspacesCmd),
+}
+
+#[derive(clap::Args)]
+struct UploadFileArgs {
+    /// Path to the file. Omit when using --stdin.
+    #[arg(short, long)]
+    file: Option<String>,
+    /// Destination folder uuid. Leave empty for root.
+    #[arg(short = 'i', long)]
+    destination: Option<String>,
+    /// Destination folder path (e.g. `/a/b`), alternative to --destination.
+    #[arg(long)]
+    dest_path: Option<String>,
+    /// Read the file body from stdin instead of --file. Requires --name.
+    #[arg(long, default_value_t = false)]
+    stdin: bool,
+    /// Drive filename (with extension) for the uploaded file. Required with --stdin;
+    /// with --file, overrides the name/extension taken from the source path.
+    #[arg(short, long)]
+    name: Option<String>,
+    /// Exact byte length of stdin. If given, streams directly; otherwise stdin is
+    /// spooled to a temp file to learn its size.
+    #[arg(short = 's', long)]
+    size: Option<u64>,
+    #[command(flatten)]
+    limit: upload_limit::UploadLimitArgs,
+}
+
+#[derive(clap::Args)]
+struct UploadFolderArgs {
+    /// The path to the folder on your system.
+    #[arg(short, long)]
+    folder: Option<String>,
+    /// Destination folder id. Leave empty for the root folder.
+    #[arg(short = 'i', long)]
+    destination: Option<String>,
+    /// Destination folder path (e.g. `/a/b`), alternative to --destination.
+    #[arg(long)]
+    dest_path: Option<String>,
+    #[command(flatten)]
+    limit: upload_limit::UploadLimitArgs,
+}
+
+#[derive(Subcommand)]
+enum UploadCmd {
+    /// Upload a file to Internxt Drive.
+    File(UploadFileArgs),
+    /// Upload a folder (recursively) to Internxt Drive.
+    Folder(UploadFolderArgs),
+}
+
+#[derive(clap::Args)]
+struct DownloadFileArgs {
+    /// The uuid of the file to download.
+    #[arg(short, long)]
+    id: Option<String>,
+    /// The Drive path of the file (e.g. `/a/b/file.txt`), alternative to --id.
+    #[arg(short, long)]
+    path: Option<String>,
+    #[arg(short, long)]
+    directory: Option<String>,
+    #[arg(short, long, default_value_t = false)]
+    overwrite: bool,
+    /// Write the decrypted bytes to stdout instead of a file (status goes to stderr).
+    #[arg(long, default_value_t = false)]
+    stdout: bool,
+}
+
+#[derive(Subcommand)]
+enum DownloadCmd {
+    /// Download a file from Internxt Drive by uuid or path.
+    File(DownloadFileArgs),
+}
+
+#[derive(clap::Args)]
+struct CreateFolderArgs {
+    /// The name for the new folder.
+    #[arg(short, long)]
+    name: Option<String>,
+    /// Parent folder id. Leave empty for the root folder.
+    #[arg(short = 'i', long)]
+    id: Option<String>,
+    /// Parent folder path (e.g. `/a/b`), alternative to --id.
+    #[arg(short, long)]
+    path: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum CreateCmd {
+    /// Create a folder in your Internxt Drive.
+    Folder(CreateFolderArgs),
+}
+
+#[derive(clap::Args)]
+struct MoveFileArgs {
+    /// The id of the file to move.
+    #[arg(short = 'i', long)]
+    id: Option<String>,
+    /// The Drive path of the file to move, alternative to --id.
+    #[arg(short, long)]
+    path: Option<String>,
+    /// Destination folder id. Leave empty for the root folder.
+    #[arg(short, long)]
+    destination: Option<String>,
+    /// Destination folder path, alternative to --destination.
+    #[arg(long)]
+    dest_path: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct MoveFolderArgs {
+    /// The id of the folder to move.
+    #[arg(short = 'i', long)]
+    id: Option<String>,
+    /// The Drive path of the folder to move, alternative to --id.
+    #[arg(short, long)]
+    path: Option<String>,
+    /// Destination folder id. Leave empty for the root folder.
+    #[arg(short, long)]
+    destination: Option<String>,
+    /// Destination folder path, alternative to --destination.
+    #[arg(long)]
+    dest_path: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum MoveCmd {
+    /// Move a file into a destination folder.
+    File(MoveFileArgs),
+    /// Move a folder into a destination folder.
+    Folder(MoveFolderArgs),
+}
+
+#[derive(clap::Args)]
+struct RenameFileArgs {
+    /// The id of the file to rename.
+    #[arg(short = 'i', long)]
+    id: Option<String>,
+    /// The Drive path of the file to rename, alternative to --id.
+    #[arg(short, long)]
+    path: Option<String>,
+    /// The new name for the file.
+    #[arg(short, long)]
+    name: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct RenameFolderArgs {
+    /// The id of the folder to rename.
+    #[arg(short = 'i', long)]
+    id: Option<String>,
+    /// The Drive path of the folder to rename, alternative to --id.
+    #[arg(short, long)]
+    path: Option<String>,
+    /// The new name for the folder.
+    #[arg(short, long)]
+    name: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum RenameCmd {
+    /// Rename a file.
+    File(RenameFileArgs),
+    /// Rename a folder.
+    Folder(RenameFolderArgs),
+}
+
+#[derive(clap::Args)]
+struct TrashFileArgs {
+    /// The id of the file to trash.
+    #[arg(short = 'i', long)]
+    id: Option<String>,
+    /// The Drive path of the file to trash, alternative to --id.
+    #[arg(short, long)]
+    path: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct TrashFolderArgs {
+    /// The id of the folder to trash.
+    #[arg(short = 'i', long)]
+    id: Option<String>,
+    /// The Drive path of the folder to trash, alternative to --id.
+    #[arg(short, long)]
+    path: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct TrashListArgs {
+    /// Display additional information (modified date, size).
+    #[arg(short, long, default_value_t = false)]
+    extended: bool,
+}
+
+#[derive(clap::Args)]
+struct TrashRestoreFileArgs {
+    /// The id of the file to restore.
+    #[arg(short = 'i', long)]
+    id: Option<String>,
+    /// Destination folder id. Leave empty for the root folder.
+    #[arg(short, long)]
+    destination: Option<String>,
+    /// Destination folder path, alternative to --destination.
+    #[arg(long)]
+    dest_path: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct TrashRestoreFolderArgs {
+    /// The id of the folder to restore.
+    #[arg(short = 'i', long)]
+    id: Option<String>,
+    /// Destination folder id. Leave empty for the root folder.
+    #[arg(short, long)]
+    destination: Option<String>,
+    /// Destination folder path, alternative to --destination.
+    #[arg(long)]
+    dest_path: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct TrashClearArgs {
+    /// Empty the trash without confirmation.
+    #[arg(short, long, default_value_t = false)]
+    force: bool,
+}
+
+#[derive(Subcommand)]
+enum TrashRestoreCmd {
+    /// Restore a trashed file into a destination folder.
+    File(TrashRestoreFileArgs),
+    /// Restore a trashed folder into a destination folder.
+    Folder(TrashRestoreFolderArgs),
+}
+
+#[derive(Subcommand)]
+enum TrashCmd {
+    /// Move a file to the trash.
+    File(TrashFileArgs),
+    /// Move a folder to the trash.
+    Folder(TrashFolderArgs),
+    /// List the contents of the trash.
+    List(TrashListArgs),
+    /// Restore a trashed file or folder into a destination folder.
+    #[command(subcommand)]
+    Restore(TrashRestoreCmd),
+    /// Empty the trash permanently. This action cannot be undone.
+    Clear(TrashClearArgs),
+}
+
+#[derive(clap::Args)]
+struct DeletePermanentlyFileArgs {
+    /// The id of the file to permanently delete.
+    #[arg(short = 'i', long)]
+    id: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct DeletePermanentlyFolderArgs {
+    /// The id of the folder to permanently delete.
+    #[arg(short = 'i', long)]
+    id: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum DeletePermanentlyCmd {
+    /// Permanently delete a file. This action cannot be undone.
+    File(DeletePermanentlyFileArgs),
+    /// Permanently delete a folder. This action cannot be undone.
+    Folder(DeletePermanentlyFolderArgs),
+}
+
+#[derive(Subcommand)]
+enum DeleteCmd {
+    /// Permanently delete a file or folder (cannot be undone).
+    #[command(subcommand)]
+    Permanently(DeletePermanentlyCmd),
+}
+
+#[derive(clap::Args)]
+struct WorkspacesListArgs {
+    /// Display additional information (owner, address, created at).
+    #[arg(short, long, default_value_t = false)]
+    extended: bool,
+}
+
+#[derive(clap::Args)]
+struct WorkspacesUseArgs {
+    /// The workspace id to activate. Use `workspaces-list` to view ids.
+    #[arg(short = 'i', long, conflicts_with = "personal")]
+    id: Option<String>,
+    /// Switch back to your personal drive space (unset the active workspace).
+    #[arg(short, long, default_value_t = false)]
+    personal: bool,
+}
+
+#[derive(Subcommand)]
+enum WorkspacesCmd {
+    /// List the workspaces you belong to.
+    List(WorkspacesListArgs),
+    /// Set the active workspace for subsequent commands.
+    Use(WorkspacesUseArgs),
+    /// Unset the active workspace (operate within your personal drive space).
+    Unset,
 }
 
 #[derive(Subcommand)]
@@ -745,6 +916,132 @@ async fn run_sso_login(host: Option<String>, port: Option<u16>) -> Result<()> {
     Ok(())
 }
 
+// ---- shared command bodies, called from both the flat and space-form dispatch ----
+
+async fn do_upload_file(args: UploadFileArgs) -> Result<()> {
+    commands::upload_file(
+        args.file.as_deref(),
+        args.destination.as_deref(),
+        args.dest_path.as_deref(),
+        args.stdin,
+        args.name.as_deref(),
+        args.size,
+        &args.limit,
+    )
+    .await
+}
+
+async fn do_upload_folder(args: UploadFolderArgs) -> Result<()> {
+    let folder = required_or_prompt(
+        args.folder,
+        "folder",
+        "What is the path to the folder on your computer? ",
+    )?;
+    commands::upload_folder(&folder, args.destination.as_deref(), args.dest_path.as_deref(), &args.limit).await
+}
+
+async fn do_download_file(args: DownloadFileArgs) -> Result<()> {
+    commands::download_file(
+        args.id.as_deref(),
+        args.path.as_deref(),
+        args.directory.as_deref(),
+        args.overwrite,
+        args.stdout,
+    )
+    .await
+}
+
+async fn do_create_folder(args: CreateFolderArgs) -> Result<()> {
+    let name = required_or_prompt(
+        args.name,
+        "name",
+        "What would you like to name the new folder? ",
+    )?;
+    drive_ops::create_folder(&name, args.id.as_deref(), args.path.as_deref()).await
+}
+
+async fn do_move_file(args: MoveFileArgs) -> Result<()> {
+    drive_ops::move_file(
+        args.id.as_deref(),
+        args.path.as_deref(),
+        args.destination.as_deref(),
+        args.dest_path.as_deref(),
+    )
+    .await
+}
+
+async fn do_move_folder(args: MoveFolderArgs) -> Result<()> {
+    drive_ops::move_folder(
+        args.id.as_deref(),
+        args.path.as_deref(),
+        args.destination.as_deref(),
+        args.dest_path.as_deref(),
+    )
+    .await
+}
+
+async fn do_rename_file(args: RenameFileArgs) -> Result<()> {
+    let name = required_or_prompt(args.name, "name", "What is the new name of the file? ")?;
+    drive_ops::rename_file(args.id.as_deref(), args.path.as_deref(), &name).await
+}
+
+async fn do_rename_folder(args: RenameFolderArgs) -> Result<()> {
+    let name = required_or_prompt(args.name, "name", "What is the new name of the folder? ")?;
+    drive_ops::rename_folder(args.id.as_deref(), args.path.as_deref(), &name).await
+}
+
+async fn do_trash_file(args: TrashFileArgs) -> Result<()> {
+    drive_ops::trash_file(args.id.as_deref(), args.path.as_deref()).await
+}
+
+async fn do_trash_folder(args: TrashFolderArgs) -> Result<()> {
+    drive_ops::trash_folder(args.id.as_deref(), args.path.as_deref()).await
+}
+
+async fn do_trash_list(args: TrashListArgs) -> Result<()> {
+    drive_ops::trash_list(args.extended).await
+}
+
+async fn do_trash_restore_file(args: TrashRestoreFileArgs) -> Result<()> {
+    let id = required_or_prompt(args.id, "id", "What is the file id you want to restore? ")?;
+    drive_ops::trash_restore_file(&id, args.destination.as_deref(), args.dest_path.as_deref()).await
+}
+
+async fn do_trash_restore_folder(args: TrashRestoreFolderArgs) -> Result<()> {
+    let id = required_or_prompt(args.id, "id", "What is the folder id you want to restore? ")?;
+    drive_ops::trash_restore_folder(&id, args.destination.as_deref(), args.dest_path.as_deref()).await
+}
+
+async fn do_trash_clear(args: TrashClearArgs) -> Result<()> {
+    drive_ops::trash_clear(args.force).await
+}
+
+async fn do_delete_permanently_file(args: DeletePermanentlyFileArgs) -> Result<()> {
+    let id = required_or_prompt(
+        args.id,
+        "id",
+        "What is the file id you want to permanently delete? (This action cannot be undone) ",
+    )?;
+    drive_ops::delete_permanently_file(&id).await
+}
+
+async fn do_delete_permanently_folder(args: DeletePermanentlyFolderArgs) -> Result<()> {
+    let id = required_or_prompt(
+        args.id,
+        "id",
+        "What is the folder id you want to permanently delete? (This action cannot be undone) ",
+    )?;
+    drive_ops::delete_permanently_folder(&id).await
+}
+
+async fn do_workspaces_list(args: WorkspacesListArgs) -> Result<()> {
+    workspaces::list(args.extended).await
+}
+
+async fn do_workspaces_use(args: WorkspacesUseArgs) -> Result<()> {
+    workspaces::use_workspace(args.id.as_deref(), args.personal).await
+}
+
 #[tokio::main]
 async fn main() {
     // Identify as this front-end, not the official node CLI. Env
@@ -807,155 +1104,30 @@ async fn run(cli: Cli) -> Result<()> {
                 ));
             }
         }
-        Commands::UploadFile {
-            file,
-            destination,
-            dest_path,
-            stdin,
-            name,
-            size,
-            limit,
-        } => {
-            commands::upload_file(
-                file.as_deref(),
-                destination.as_deref(),
-                dest_path.as_deref(),
-                stdin,
-                name.as_deref(),
-                size,
-                &limit,
-            )
-            .await?;
-        }
-        Commands::UploadFolder {
-            folder,
-            destination,
-            dest_path,
-            limit,
-        } => {
-            let folder = required_or_prompt(
-                folder,
-                "folder",
-                "What is the path to the folder on your computer? ",
-            )?;
-            commands::upload_folder(&folder, destination.as_deref(), dest_path.as_deref(), &limit)
-                .await?;
-        }
-        Commands::DownloadFile {
-            id,
-            path,
-            directory,
-            overwrite,
-            stdout,
-        } => {
-            commands::download_file(
-                id.as_deref(),
-                path.as_deref(),
-                directory.as_deref(),
-                overwrite,
-                stdout,
-            )
-            .await?;
-        }
+        Commands::UploadFile(args) => do_upload_file(args).await?,
+        Commands::UploadFolder(args) => do_upload_folder(args).await?,
+        Commands::DownloadFile(args) => do_download_file(args).await?,
         Commands::Logout => drive_ops::logout().await?,
         Commands::Whoami => drive_ops::whoami().await?,
         Commands::Usage => drive_ops::usage().await?,
         Commands::List { id, path, extended } => {
             drive_ops::list(id.as_deref(), path.as_deref(), extended).await?
         }
-        Commands::CreateFolder { name, id, path } => {
-            let name = required_or_prompt(
-                name,
-                "name",
-                "What would you like to name the new folder? ",
-            )?;
-            drive_ops::create_folder(&name, id.as_deref(), path.as_deref()).await?
-        }
-        Commands::MoveFile {
-            id,
-            path,
-            destination,
-            dest_path,
-        } => {
-            drive_ops::move_file(
-                id.as_deref(),
-                path.as_deref(),
-                destination.as_deref(),
-                dest_path.as_deref(),
-            )
-            .await?
-        }
-        Commands::MoveFolder {
-            id,
-            path,
-            destination,
-            dest_path,
-        } => {
-            drive_ops::move_folder(
-                id.as_deref(),
-                path.as_deref(),
-                destination.as_deref(),
-                dest_path.as_deref(),
-            )
-            .await?
-        }
-        Commands::RenameFile { id, path, name } => {
-            let name =
-                required_or_prompt(name, "name", "What is the new name of the file? ")?;
-            drive_ops::rename_file(id.as_deref(), path.as_deref(), &name).await?
-        }
-        Commands::RenameFolder { id, path, name } => {
-            let name =
-                required_or_prompt(name, "name", "What is the new name of the folder? ")?;
-            drive_ops::rename_folder(id.as_deref(), path.as_deref(), &name).await?
-        }
-        Commands::TrashFile { id, path } => {
-            drive_ops::trash_file(id.as_deref(), path.as_deref()).await?
-        }
-        Commands::TrashFolder { id, path } => {
-            drive_ops::trash_folder(id.as_deref(), path.as_deref()).await?
-        }
-        Commands::TrashList { extended } => drive_ops::trash_list(extended).await?,
-        Commands::TrashRestoreFile {
-            id,
-            destination,
-            dest_path,
-        } => {
-            let id =
-                required_or_prompt(id, "id", "What is the file id you want to restore? ")?;
-            drive_ops::trash_restore_file(&id, destination.as_deref(), dest_path.as_deref()).await?
-        }
-        Commands::TrashRestoreFolder {
-            id,
-            destination,
-            dest_path,
-        } => {
-            let id =
-                required_or_prompt(id, "id", "What is the folder id you want to restore? ")?;
-            drive_ops::trash_restore_folder(&id, destination.as_deref(), dest_path.as_deref())
-                .await?
-        }
-        Commands::TrashClear { force } => drive_ops::trash_clear(force).await?,
-        Commands::DeletePermanentlyFile { id } => {
-            let id = required_or_prompt(
-                id,
-                "id",
-                "What is the file id you want to permanently delete? (This action cannot be undone) ",
-            )?;
-            drive_ops::delete_permanently_file(&id).await?
-        }
-        Commands::DeletePermanentlyFolder { id } => {
-            let id = required_or_prompt(
-                id,
-                "id",
-                "What is the folder id you want to permanently delete? (This action cannot be undone) ",
-            )?;
-            drive_ops::delete_permanently_folder(&id).await?
-        }
-        Commands::WorkspacesList { extended } => workspaces::list(extended).await?,
-        Commands::WorkspacesUse { id, personal } => {
-            workspaces::use_workspace(id.as_deref(), personal).await?
-        }
+        Commands::CreateFolder(args) => do_create_folder(args).await?,
+        Commands::MoveFile(args) => do_move_file(args).await?,
+        Commands::MoveFolder(args) => do_move_folder(args).await?,
+        Commands::RenameFile(args) => do_rename_file(args).await?,
+        Commands::RenameFolder(args) => do_rename_folder(args).await?,
+        Commands::TrashFile(args) => do_trash_file(args).await?,
+        Commands::TrashFolder(args) => do_trash_folder(args).await?,
+        Commands::TrashList(args) => do_trash_list(args).await?,
+        Commands::TrashRestoreFile(args) => do_trash_restore_file(args).await?,
+        Commands::TrashRestoreFolder(args) => do_trash_restore_folder(args).await?,
+        Commands::TrashClear(args) => do_trash_clear(args).await?,
+        Commands::DeletePermanentlyFile(args) => do_delete_permanently_file(args).await?,
+        Commands::DeletePermanentlyFolder(args) => do_delete_permanently_folder(args).await?,
+        Commands::WorkspacesList(args) => do_workspaces_list(args).await?,
+        Commands::WorkspacesUse(args) => do_workspaces_use(args).await?,
         Commands::WorkspacesUnset => workspaces::unset().await?,
         Commands::SyncUp {
             local,
@@ -1255,6 +1427,48 @@ async fn run(cli: Cli) -> Result<()> {
             };
             serve::run::run(config).await?;
         }
+
+        // ---- space-form dispatch: delegates to the exact same bodies as the
+        // flat commands above ----
+        Commands::Upload(cmd) => match cmd {
+            UploadCmd::File(args) => do_upload_file(args).await?,
+            UploadCmd::Folder(args) => do_upload_folder(args).await?,
+        },
+        Commands::Download(cmd) => match cmd {
+            DownloadCmd::File(args) => do_download_file(args).await?,
+        },
+        Commands::Create(cmd) => match cmd {
+            CreateCmd::Folder(args) => do_create_folder(args).await?,
+        },
+        Commands::Move(cmd) => match cmd {
+            MoveCmd::File(args) => do_move_file(args).await?,
+            MoveCmd::Folder(args) => do_move_folder(args).await?,
+        },
+        Commands::Rename(cmd) => match cmd {
+            RenameCmd::File(args) => do_rename_file(args).await?,
+            RenameCmd::Folder(args) => do_rename_folder(args).await?,
+        },
+        Commands::Trash(cmd) => match cmd {
+            TrashCmd::File(args) => do_trash_file(args).await?,
+            TrashCmd::Folder(args) => do_trash_folder(args).await?,
+            TrashCmd::List(args) => do_trash_list(args).await?,
+            TrashCmd::Clear(args) => do_trash_clear(args).await?,
+            TrashCmd::Restore(restore) => match restore {
+                TrashRestoreCmd::File(args) => do_trash_restore_file(args).await?,
+                TrashRestoreCmd::Folder(args) => do_trash_restore_folder(args).await?,
+            },
+        },
+        Commands::Delete(cmd) => match cmd {
+            DeleteCmd::Permanently(perm) => match perm {
+                DeletePermanentlyCmd::File(args) => do_delete_permanently_file(args).await?,
+                DeletePermanentlyCmd::Folder(args) => do_delete_permanently_folder(args).await?,
+            },
+        },
+        Commands::Workspaces(cmd) => match cmd {
+            WorkspacesCmd::List(args) => do_workspaces_list(args).await?,
+            WorkspacesCmd::Use(args) => do_workspaces_use(args).await?,
+            WorkspacesCmd::Unset => workspaces::unset().await?,
+        },
     }
     Ok(())
 }

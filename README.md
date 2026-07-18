@@ -18,8 +18,10 @@ breaking changes until things stabilize.
 ### `internxt-cli` (binary: `ixr`)
 
 Internxt CLI ported fully to Rust — works on any account type, including Free,
-unlike the official CLI which gates most functionality to the Ultimate plan.
-Streaming transfers end to end (no whole-file buffering), and a `serve`
+unlike the official CLI, which refuses to run at all unless your plan has CLI
+access (bundled with Ultimate). Your plan's own limits still apply either way
+(upload size cap, no empty files on Free/legacy). Streaming transfers end to end
+(no whole-file buffering), and a `serve`
 command that can expose your Drive over WebDAV, FUSE, SMB, NFS and SFTP —
 several at once if you like — beyond just the official CLI's WebDAV-only
 server.

@@ -4,8 +4,15 @@ A Rust port of Internxt's official CLI, aiming to be a fast, low-memory, single
 static binary with fully streaming transfers.
 
 The headline difference from the official CLI: **it works on any account type**,
-including Free. The official CLI gates most functionality to the Ultimate plan
-server-side; `ixr` doesn't hit that gate.
+including Free. The official CLI checks server-side for CLI access on your
+plan (bundled with Ultimate) and refuses to run at all without it; `ixr`
+doesn't hit that check.
+
+Your plan's own server-side limits still apply no matter which client you
+use — this only removes the CLI-access check, nothing else. Notably: a
+per-file upload size cap from `/files/limits` (see
+[Upload size limit](#upload-size-limit)), and Free/legacy plans rejecting
+empty (0-byte) files outright (`HTTP 402`).
 
 ## Compatibility with the official Internxt CLI
 
@@ -16,20 +23,28 @@ workflows. Credentials are **not** shared between the two — `ixr` stores its
 own session at `~/.ixr/credentials`, separate from the official CLI's
 `~/.internxt-cli`, so each needs its own `login`.
 
-The official CLI's commands (built with [oclif](https://oclif.io)) are named with
-a `topic:command` colon style, e.g. `upload:file`, `move:file`, `sync:up`. `ixr`
-keeps every one of those as an alias, but makes a hyphenated form
-(`upload-file`, `move-file`, `sync-up`) the primary spelling, since it doesn't
-need shell quoting/escaping. Both spellings always work.
+The official CLI's commands (built with [oclif](https://oclif.io)) are
+hyphenated (`upload-file`, `move-file`, `create-folder`, …) — `ixr` uses the
+exact same primary names. Most of them can also be invoked as separate
+space-separated words (`internxt upload file`), and `ixr` matches that with
+real nested subcommands, so `ixr upload file` works the same way. Both forms
+work on both CLIs, for every command listed below as also having a space
+form. `login-legacy`, `login-sso` and `sync-up`/`sync-down` are the
+exceptions: `login-sso` and `sync-up`/`sync-down` don't exist in the official
+CLI at all, so only the hyphenated form applies to any of the three.
 
 Known differences:
 
-- **`login` defaults to SSO**, matching the official CLI's default. Built with
-  the default `sso` feature, `login` runs the web-browser callback flow;
-  `login-legacy` forces email + password + optional 2FA, `login-sso` forces SSO.
-  Building `--no-default-features` drops the `sso` feature: `login` then falls
-  back to legacy and `login-sso` errors. The SSO flow can't carry the Kyber
-  private key, so hybrid-Kyber workspaces need `login-legacy`.
+- **`login` covers both flows.** The official CLI's `login` is SSO-only (no
+  email/password flags at all) and `login-legacy` is the separate
+  email/password command. `ixr`'s `login` runs the same SSO flow by default,
+  but — built with the default `sso` feature — also accepts email/password/2FA
+  flags and falls back to the legacy flow if built `--no-default-features`
+  (which drops `sso` entirely). `login-sso` (forces SSO, errors without the
+  `sso` feature) doesn't exist in the official CLI at all — it's here so you
+  can force a specific flow explicitly instead of relying on `login`'s
+  fallback behavior. The SSO flow can't carry the Kyber private key, so
+  hybrid-Kyber workspaces need `login-legacy`.
 - **`--json` output schema differs.** `ixr` emits a simplified `{ "success": true, ... }`
   object per command rather than the official CLI's exact JSON envelope. Field
   names mostly match, but don't assume a byte-identical structure — see each
@@ -45,10 +60,11 @@ Known differences:
   `add-cert` daemon-management commands aren't ported — the WebDAV server itself
   is, as `serve webdav`.
 - **Not yet ported:** `config`, `logs`.
-- **New, with no official equivalent:** `usage`, `id-from-path`, `path-from-id`,
-  the `thumbnail` command family, `mount`, and the `fuse`/`smb`/`nfs`/`sftp`
-  `serve` backends (the official CLI only serves WebDAV). See the
-  [command reference](#command-reference) below for details on each.
+- **New, with no official equivalent:** `usage`, `login-sso`, `sync-up`,
+  `sync-down`, `id-from-path`, `path-from-id`, the `thumbnail` command family,
+  `mount`, and the `fuse`/`smb`/`nfs`/`sftp` `serve` backends (the official
+  CLI only serves WebDAV). See the [command reference](#command-reference)
+  below for details on each.
 
 ## Install
 
@@ -113,34 +129,34 @@ targets your root folder (or workspace root, if a workspace is active).
 
 | Command | Description | Feature(s) | Official CLI compatibility |
 |---|---|---|---|
-| [`login`](#login) | Log in to your Internxt account. | none (flow varies with `sso`, default on) | Same command; SSO by default here matches the official default. |
-| [`login-legacy`](#login-legacy) | Log in with email + password (legacy flow). | none | Mirrors `login:legacy`, kept as alias. |
-| [`login-sso`](#login-sso) | Log in via the web-based SSO flow. | `sso` (default on) | Mirrors `login:sso`, kept as alias. |
+| [`login`](#login) | Log in to your Internxt account. | none (flow varies with `sso`, default on) | Same command name; behavior is broader than official's SSO-only `login` — see notes below. |
+| [`login-legacy`](#login-legacy) | Log in with email + password (legacy flow). | none | Same command; no official alias either way. |
+| [`login-sso`](#login-sso) | Log in via the web-based SSO flow. | `sso` (default on) | New — no official equivalent (official's plain `login` is already SSO-only). |
 | [`logout`](#logout) | Log out the current user. | none | Same command. |
 | [`whoami`](#whoami) | Show the currently logged-in user. | none | Same command. |
 | [`usage`](#usage) | Show account plan, used space, and upload limit. | none | New — no official equivalent. |
 | [`list`](#list) | List a folder's contents. | none | Same command; adds `--path`. |
-| [`create-folder`](#create-folder) | Create a folder. | none | Mirrors `create:folder`, kept as alias; adds `--path`. |
-| [`upload-file`](#upload-file) | Upload a file. | none | Mirrors `upload:file`, kept as alias; adds `--dest-path`, `--stdin`, `--size`. |
-| [`upload-folder`](#upload-folder) | Recursively upload a folder tree. | none | Mirrors `upload:folder`, kept as alias; adds `--dest-path`. |
-| [`download-file`](#download-file) | Download + decrypt a file. | none | Mirrors `download:file`, kept as alias; adds `--path`, `--stdout`. |
-| [`move-file`](#move-file--move-folder) | Move a file into a destination folder. | none | Mirrors `move:file`, kept as alias; adds `--path`/`--dest-path`. |
-| [`move-folder`](#move-file--move-folder) | Move a folder into a destination folder. | none | Mirrors `move:folder`, kept as alias; adds `--path`/`--dest-path`. |
-| [`rename-file`](#rename-file--rename-folder) | Rename a file. | none | Mirrors `rename:file`, kept as alias; adds `--path`. |
-| [`rename-folder`](#rename-file--rename-folder) | Rename a folder. | none | Mirrors `rename:folder`, kept as alias; adds `--path`. |
-| [`trash-file`](#trash-file--trash-folder) | Move a file to the trash. | none | Mirrors `trash:file`, kept as alias; adds `--path`. |
-| [`trash-folder`](#trash-file--trash-folder) | Move a folder to the trash. | none | Mirrors `trash:folder`, kept as alias; adds `--path`. |
-| [`trash-list`](#trash-list) | List the contents of the trash. | none | Mirrors `trash:list`, kept as alias. |
-| [`trash-restore-file`](#trash-restore-file--trash-restore-folder) | Restore a trashed file. | none | Mirrors `trash:restore:file`, kept as alias; adds `--dest-path`. |
-| [`trash-restore-folder`](#trash-restore-file--trash-restore-folder) | Restore a trashed folder. | none | Mirrors `trash:restore:folder`, kept as alias; adds `--dest-path`. |
-| [`trash-clear`](#trash-clear) | Empty the trash permanently. | none | Mirrors `trash:clear`, kept as alias. |
-| [`delete-permanently-file`](#delete-permanently-file--delete-permanently-folder) | Permanently delete a file. | none | Mirrors `delete:permanently:file`, kept as alias. |
-| [`delete-permanently-folder`](#delete-permanently-file--delete-permanently-folder) | Permanently delete a folder. | none | Mirrors `delete:permanently:folder`, kept as alias. |
-| [`workspaces-list`](#workspaces-list) | List the workspaces you belong to. | none | Mirrors `workspaces:list`, kept as alias. |
-| [`workspaces-use`](#workspaces-use) | Set the active workspace. | none | Mirrors `workspaces:use`, kept as alias. |
-| [`workspaces-unset`](#workspaces-unset) | Unset the active workspace. | none | Mirrors `workspaces:unset`, kept as alias. |
-| [`sync-up`](#sync-up--sync-down) | One-way sync, local → remote (push). | none | Mirrors `sync:up`, kept as alias; adds `--remote-path`. |
-| [`sync-down`](#sync-up--sync-down) | One-way sync, remote → local (pull). | none | Mirrors `sync:down`, kept as alias; adds `--remote-path`. |
+| [`create-folder`](#create-folder) | Create a folder. | none | Same command, incl. official's `create folder` form; adds `--path`. |
+| [`upload-file`](#upload-file) | Upload a file. | none | Same command, incl. official's `upload file` form; adds `--dest-path`, `--stdin`, `--size`. |
+| [`upload-folder`](#upload-folder) | Recursively upload a folder tree. | none | Same command, incl. official's `upload folder` form; adds `--dest-path`. |
+| [`download-file`](#download-file) | Download + decrypt a file. | none | Same command, incl. official's `download file` form; adds `--path`, `--stdout`. |
+| [`move-file`](#move-file--move-folder) | Move a file into a destination folder. | none | Same command, incl. official's `move file` form; adds `--path`/`--dest-path`. |
+| [`move-folder`](#move-file--move-folder) | Move a folder into a destination folder. | none | Same command, incl. official's `move folder` form; adds `--path`/`--dest-path`. |
+| [`rename-file`](#rename-file--rename-folder) | Rename a file. | none | Same command, incl. official's `rename file` form; adds `--path`. |
+| [`rename-folder`](#rename-file--rename-folder) | Rename a folder. | none | Same command, incl. official's `rename folder` form; adds `--path`. |
+| [`trash-file`](#trash-file--trash-folder) | Move a file to the trash. | none | Same command, incl. official's `trash file` form; adds `--path`. |
+| [`trash-folder`](#trash-file--trash-folder) | Move a folder to the trash. | none | Same command, incl. official's `trash folder` form; adds `--path`. |
+| [`trash-list`](#trash-list) | List the contents of the trash. | none | Same command, incl. official's `trash list` form. |
+| [`trash-restore-file`](#trash-restore-file--trash-restore-folder) | Restore a trashed file. | none | Same command, incl. official's `trash restore file` form; adds `--dest-path`. |
+| [`trash-restore-folder`](#trash-restore-file--trash-restore-folder) | Restore a trashed folder. | none | Same command, incl. official's `trash restore folder` form; adds `--dest-path`. |
+| [`trash-clear`](#trash-clear) | Empty the trash permanently. | none | Same command, incl. official's `trash clear` form. |
+| [`delete-permanently-file`](#delete-permanently-file--delete-permanently-folder) | Permanently delete a file. | none | Same command, incl. official's `delete permanently file` form. |
+| [`delete-permanently-folder`](#delete-permanently-file--delete-permanently-folder) | Permanently delete a folder. | none | Same command, incl. official's `delete permanently folder` form. |
+| [`workspaces-list`](#workspaces-list) | List the workspaces you belong to. | none | Same command, incl. official's `workspaces list` form. |
+| [`workspaces-use`](#workspaces-use) | Set the active workspace. | none | Same command, incl. official's `workspaces use` form. |
+| [`workspaces-unset`](#workspaces-unset) | Unset the active workspace. | none | Same command, incl. official's `workspaces unset` form. |
+| [`sync-up`](#sync-up--sync-down) | One-way sync, local → remote (push). | none | New — no official equivalent. |
+| [`sync-down`](#sync-up--sync-down) | One-way sync, remote → local (pull). | none | New — no official equivalent. |
 | [`serve`](#serve) | Serve Drive over WebDAV / FUSE / SMB / NFS / SFTP (foreground). | at least one of `webdav`, `fuse` (unix), `smb`, `nfs`, `sftp` — each protocol needs its own feature; `webdav`+`fuse` default on | WebDAV mirrors the official server, run inline instead of as a daemon. FUSE/SMB/NFS/SFTP are new. |
 | [`mount`](#mount) | Mount Drive as a local filesystem via FUSE (Unix). | `fuse` (default on, Unix only) | New — no official equivalent. |
 | [`id-from-path`](#id-from-path) | Print the uuid of the item at a Drive path. | none | New — no official equivalent. |
@@ -171,8 +187,9 @@ like a secret. On failure: `{ "success": false, "message": "..." }`.
 
 ### `login-legacy`
 
-Alias: `login:legacy`. Logs in with email + password (+ 2FA if the account
-requires it). Prompts for any missing value unless `-x/--non-interactive`.
+Same command name as the official CLI's `login-legacy`. Logs in with email +
+password (+ 2FA if the account requires it). Prompts for any missing value
+unless `-x/--non-interactive`.
 
 Flags: `-e/--email`, `-p/--password`, `-w/--twofactor`, `-t/--twofactortoken`
 (takes priority over `--twofactor` when both are given).
@@ -186,8 +203,9 @@ JSON output: same shape as [`login`](#login).
 
 ### `login-sso`
 
-Alias: `login:sso`. Forces the web-based SSO flow. Errors if built without the
-`sso` feature.
+New — no official equivalent (the official CLI's plain `login` is already
+SSO-only, so it has no separate `login-sso`). Forces the web-based SSO flow.
+Errors if built without the `sso` feature.
 
 Flags: `--host <HOST>`, `--port <PORT>`.
 
@@ -271,7 +289,7 @@ JSON output: `{ "success": true, "list": { "folders": [...], "files": [...] } }`
 
 ### `create-folder`
 
-Alias: `create:folder`. Creates a folder.
+Also invocable as `create folder`. Creates a folder.
 
 Flags: `-n/--name <NAME>` (required), `-i/--id <PARENT_ID>` (default: root),
 `-p/--path <PATH>` (alternative to `--id`).
@@ -285,8 +303,8 @@ JSON output: `{ "success": true, "folder": <DriveFolderData> }`.
 
 ### `upload-file`
 
-Alias: `upload:file`. Uploads a single file (streaming; single-part or
-multipart depending on size).
+Also invocable as `upload file`. Uploads a single file
+(streaming; single-part or multipart depending on size).
 
 Flags: `-f/--file <PATH>` (omit when using `--stdin`), `-i/--destination
 <FOLDER_ID>` (default: root), `--dest-path <PATH>` (alternative to
@@ -311,8 +329,8 @@ JSON output: `{ "success": true, "file": { "uuid": "..." } }`.
 
 ### `upload-folder`
 
-Alias: `upload:folder`. Recursively uploads a folder tree (concurrent file
-uploads).
+Also invocable as `upload folder`. Recursively uploads a
+folder tree (concurrent file uploads).
 
 Flags: `-f/--folder <PATH>` (required), `-i/--destination <FOLDER_ID>`
 (default: root), `--dest-path <PATH>` (alternative to `--destination`), plus
@@ -327,8 +345,8 @@ JSON output: `{ "success": true, "folder": { "uuid": "..." }, "totalBytes": N, "
 
 ### `download-file`
 
-Alias: `download:file`. Downloads and decrypts a file, streaming to disk (or
-stdout).
+Also invocable as `download file`. Downloads and decrypts
+a file, streaming to disk (or stdout).
 
 Flags: `-i/--id <FILE_ID>`, `-p/--path <PATH>` (alternative to `--id`),
 `-d/--directory <DIR>` (default: current dir), `-o/--overwrite`, `--stdout`
@@ -347,8 +365,8 @@ line on stderr in non-JSON mode) — the file bytes own stdout instead.
 
 ### `move-file` / `move-folder`
 
-Aliases: `move:file` / `move:folder`. Moves a file or folder into a
-destination folder.
+Also invocable as `move file`/`move folder`.
+Moves a file or folder into a destination folder.
 
 Flags: `-i/--id <ID>`, `-p/--path <PATH>` (alternative to `--id`),
 `-d/--destination <FOLDER_ID>` (default: root), `--dest-path <PATH>`
@@ -364,8 +382,9 @@ JSON output: `move-file` → `{ "success": true, "file": <DriveFileData> }`.
 
 ### `rename-file` / `rename-folder`
 
-Aliases: `rename:file` / `rename:folder`. Renames a file or folder (for
-files, name/extension are split automatically).
+Also invocable as `rename file`/`rename
+folder`. Renames a file or folder (for files, name/extension are split
+automatically).
 
 Flags: `-i/--id <ID>`, `-p/--path <PATH>` (alternative to `--id`), `-n/--name
 <NAME>` (required).
@@ -380,7 +399,8 @@ JSON output: `rename-file` → `{ "success": true, "file": { "uuid", "plainName"
 
 ### `trash-file` / `trash-folder`
 
-Aliases: `trash:file` / `trash:folder`. Moves a file or folder to the trash.
+Also invocable as `trash file`/`trash folder`.
+Moves a file or folder to the trash.
 
 Flags: `-i/--id <ID>`, `-p/--path <PATH>` (alternative to `--id`).
 
@@ -389,7 +409,8 @@ JSON output: `{ "success": true, "file": { "uuid": "..." } }` or
 
 ### `trash-list`
 
-Alias: `trash:list`. Lists the contents of the trash.
+Also invocable as `trash list`. Lists the contents of the
+trash.
 
 Flags: `-e/--extended`.
 
@@ -398,8 +419,9 @@ JSON output: `{ "success": true, "list": { "folders": [...], "files": [...] } }`
 
 ### `trash-restore-file` / `trash-restore-folder`
 
-Aliases: `trash:restore:file` / `trash:restore:folder`. Restores a trashed
-file or folder into a destination folder.
+Also invocable as `trash
+restore file`/`trash restore folder`. Restores a trashed file or folder into
+a destination folder.
 
 Flags: `-i/--id <ID>`, `-d/--destination <FOLDER_ID>` (default: root),
 `--dest-path <PATH>` (alternative to `--destination`).
@@ -409,7 +431,8 @@ JSON output: `{ "success": true, "file": <DriveFileData> }` or
 
 ### `trash-clear`
 
-Alias: `trash:clear`. Empties the trash permanently — **cannot be undone**.
+Also invocable as `trash clear`. Empties the trash
+permanently — **cannot be undone**.
 Prompts for confirmation unless `--force` (required in `--json`/non-interactive
 mode).
 
@@ -423,7 +446,7 @@ JSON output: `{ "success": true, "message": "Trash emptied successfully." }`.
 
 ### `delete-permanently-file` / `delete-permanently-folder`
 
-Aliases: `delete:permanently:file` / `delete:permanently:folder`.
+Also invocable as `delete permanently file`/`delete permanently folder`.
 Permanently deletes a file or folder — **cannot be undone**.
 
 Flags: `-i/--id <ID>`.
@@ -433,7 +456,8 @@ or `{ "success": true, "message": "Folder permanently deleted successfully" }`.
 
 ### `workspaces-list`
 
-Alias: `workspaces:list`. Lists the workspaces you belong to.
+Also invocable as `workspaces list`. Lists the
+workspaces you belong to.
 
 Flags: `-e/--extended` (owner, address, created-at in the human-readable view).
 
@@ -442,7 +466,8 @@ full objects, regardless of `--extended`).
 
 ### `workspaces-use`
 
-Alias: `workspaces:use`. Sets the active workspace for subsequent commands —
+Also invocable as `workspaces use`. Sets the active
+workspace for subsequent commands —
 switches where drive calls and transfers route (its own bucket, network
 credentials and mnemonic).
 
@@ -459,15 +484,17 @@ JSON output: `{ "success": true, "workspace": { "id", "name", "bucket", "rootFol
 
 ### `workspaces-unset`
 
-Alias: `workspaces:unset`. Unsets the active workspace (equivalent to
+Also invocable as `workspaces unset`. Unsets the active
+workspace (equivalent to
 `workspaces-use --personal`). No flags.
 
 JSON output: `{ "success": true, "message": "Personal drive space selected successfully." }`.
 
 ### `sync-up` / `sync-down`
 
-Aliases: `sync:up` / `sync:down`. A single **one-way** reconcile pass, then
-exit (not a daemon). The source side always wins — no bidirectional mode, no
+New — no official equivalent. A single **one-way**
+reconcile pass, then exit (not a daemon). The source side always wins — no
+bidirectional mode, no
 conflict resolution. Files are keyed by relative path; change detection
 compares size, then modification time (±2s tolerance). Downloaded files are
 stamped with the remote modification time so repeat `sync-down` runs are
