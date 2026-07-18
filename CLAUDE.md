@@ -48,8 +48,8 @@ preserve when adding features: engine logic in core, UX/IO in cli.
   single-file metadata endpoint doesn't include them.
 - **Transfers stay streaming end-to-end**, including ranged/partial downloads and
   chunked multipart uploads — RAM use stays bounded regardless of file size.
-- **Credentials are stored encrypted**, same file location and format as the node CLI,
-  so the two are interchangeable on the same machine.
+- **Credentials are stored encrypted** at `~/.ixr/credentials` (own directory, not
+  shared with the official CLI's `~/.internxt-cli`) — same crypto, different location.
 
 ## serve
 

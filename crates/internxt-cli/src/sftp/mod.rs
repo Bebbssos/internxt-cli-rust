@@ -51,8 +51,8 @@ pub struct SftpConfig {
 }
 
 /// Load (or, on first use, generate + persist) the default SFTP host key at
-/// `~/.internxt-cli/sftp_host_key`. Persisting it keeps the server's fingerprint
-/// stable across restarts so clients don't reject a changed host key.
+/// `~/.ixr/sftp_host_key`. Persisting it keeps the server's fingerprint stable
+/// across restarts so clients don't reject a changed host key.
 fn default_host_key() -> Result<PrivateKey> {
     use russh::keys::ssh_key::LineEnding;
 

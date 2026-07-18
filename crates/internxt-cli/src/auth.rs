@@ -2,28 +2,28 @@
 //!
 //! Core deliberately does no filesystem I/O and leaves the terminal concerns
 //! (2FA prompt, refresh warnings) to the front-end. This module owns *where and
-//! how* credentials are stored (`~/.internxt-cli/.inxtcli`, CryptoJS-AES via
-//! core's crypto) and injects the terminal callbacks, so the rest of the CLI can
-//! keep calling `auth::*` unchanged.
+//! how* credentials are stored (`~/.ixr/credentials`, CryptoJS-AES via core's
+//! crypto) and injects the terminal callbacks, so the rest of the CLI can keep
+//! calling `auth::*` unchanged.
 
 use anyhow::{anyhow, Result};
 use internxt_core::crypto;
 use internxt_core::models::Credentials;
 use std::path::PathBuf;
 
-/// The CLI's data directory (`~/.internxt-cli`) — same location as the node CLI.
+/// The CLI's data directory (`~/.ixr`). Separate from the official CLI's
+/// `~/.internxt-cli` — the two don't share credentials.
 pub fn data_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("no home dir")
-        .join(".internxt-cli")
+    dirs::home_dir().expect("no home dir").join(".ixr")
 }
 
-/// The credentials file (`~/.internxt-cli/.inxtcli`).
+/// The credentials file (`~/.ixr/credentials`).
 pub fn credentials_file() -> PathBuf {
-    data_dir().join(".inxtcli")
+    data_dir().join("credentials")
 }
 
-/// Save credentials encrypted (CryptoJS AES with APP_CRYPTO_SECRET), like the node CLI.
+/// Save credentials encrypted (CryptoJS AES with APP_CRYPTO_SECRET), same
+/// crypto as the official CLI.
 pub fn save_credentials(creds: &Credentials) -> Result<()> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;

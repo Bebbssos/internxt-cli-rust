@@ -102,7 +102,7 @@ ARG TARGETVARIANT
 COPY --from=builder /out/ixr-${TARGETARCH}${TARGETVARIANT} /usr/local/bin/ixr
 
 WORKDIR /root
-VOLUME ["/root/.internxt-cli"]
+VOLUME ["/root/.ixr"]
 
 # webdav, smb, nfs, sftp default ports (see `ixr serve --help`)
 EXPOSE 3005 4445 12049 2022
