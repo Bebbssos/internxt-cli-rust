@@ -129,7 +129,7 @@ enum Commands {
     UploadFolder {
         /// The path to the folder on your system.
         #[arg(short, long)]
-        folder: String,
+        folder: Option<String>,
         /// Destination folder id. Leave empty for the root folder.
         #[arg(short = 'i', long)]
         destination: Option<String>,
@@ -181,7 +181,7 @@ enum Commands {
     CreateFolder {
         /// The name for the new folder.
         #[arg(short, long)]
-        name: String,
+        name: Option<String>,
         /// Parent folder id. Leave empty for the root folder.
         #[arg(short = 'i', long)]
         id: Option<String>,
@@ -232,7 +232,7 @@ enum Commands {
         path: Option<String>,
         /// The new name for the file.
         #[arg(short, long)]
-        name: String,
+        name: Option<String>,
     },
     /// Rename a folder.
     #[command(alias = "rename:folder")]
@@ -245,7 +245,7 @@ enum Commands {
         path: Option<String>,
         /// The new name for the folder.
         #[arg(short, long)]
-        name: String,
+        name: Option<String>,
     },
     /// Move a file to the trash.
     #[command(alias = "trash:file")]
@@ -279,7 +279,7 @@ enum Commands {
     TrashRestoreFile {
         /// The id of the file to restore.
         #[arg(short = 'i', long)]
-        id: String,
+        id: Option<String>,
         /// Destination folder id. Leave empty for the root folder.
         #[arg(short, long)]
         destination: Option<String>,
@@ -292,7 +292,7 @@ enum Commands {
     TrashRestoreFolder {
         /// The id of the folder to restore.
         #[arg(short = 'i', long)]
-        id: String,
+        id: Option<String>,
         /// Destination folder id. Leave empty for the root folder.
         #[arg(short, long)]
         destination: Option<String>,
@@ -312,19 +312,19 @@ enum Commands {
     DeletePermanentlyFile {
         /// The id of the file to permanently delete.
         #[arg(short = 'i', long)]
-        id: String,
+        id: Option<String>,
     },
     /// Permanently delete a folder. This action cannot be undone.
     #[command(alias = "delete:permanently:folder")]
     DeletePermanentlyFolder {
         /// The id of the folder to permanently delete.
         #[arg(short = 'i', long)]
-        id: String,
+        id: Option<String>,
     },
     /// List the workspaces you belong to.
     #[command(alias = "workspaces:list")]
     WorkspacesList {
-        /// Display additional information (owner, address).
+        /// Display additional information (owner, address, created at).
         #[arg(short, long, default_value_t = false)]
         extended: bool,
     },
@@ -332,7 +332,7 @@ enum Commands {
     #[command(alias = "workspaces:use")]
     WorkspacesUse {
         /// The workspace id to activate. Use `workspaces-list` to view ids.
-        #[arg(short = 'i', long)]
+        #[arg(short = 'i', long, conflicts_with = "personal")]
         id: Option<String>,
         /// Switch back to your personal drive space (unset the active workspace).
         #[arg(short, long, default_value_t = false)]
@@ -683,6 +683,18 @@ fn prompt(msg: &str) -> Result<String> {
     Ok(s.trim().to_string())
 }
 
+/// Resolve a required flag: use the given value, else prompt interactively
+/// (og's `CLIUtils.getValueFromFlag` fallback), else error in non-interactive mode.
+fn required_or_prompt(value: Option<String>, flag: &str, prompt_msg: &str) -> Result<String> {
+    match value {
+        Some(v) => Ok(v),
+        None if output::is_non_interactive() => {
+            Err(anyhow::anyhow!("No value provided for required flag: {flag}"))
+        }
+        None => prompt(prompt_msg),
+    }
+}
+
 async fn run_legacy_login(
     email: Option<String>,
     password: Option<String>,
@@ -713,9 +725,10 @@ async fn run_legacy_login(
     )
     .await?;
     auth::save_credentials(&creds)?;
+    let message = format!("Successfully logged in to: {}", creds.user.email);
     output::emit(
-        &format!("✓ Successfully logged in to: {}", creds.user.email),
-        serde_json::json!({ "success": true, "login": { "email": creds.user.email } }),
+        &format!("✓ {message}"),
+        serde_json::json!({ "success": true, "message": message, "login": creds }),
     );
     Ok(())
 }
@@ -724,9 +737,10 @@ async fn run_legacy_login(
 async fn run_sso_login(host: Option<String>, port: Option<u16>) -> Result<()> {
     let creds = sso::login(host.as_deref(), port).await?;
     auth::save_credentials(&creds)?;
+    let message = format!("Successfully logged in to: {}", creds.user.email);
     output::emit(
-        &format!("✓ Successfully logged in to: {}", creds.user.email),
-        serde_json::json!({ "success": true, "login": { "email": creds.user.email } }),
+        &format!("✓ {message}"),
+        serde_json::json!({ "success": true, "message": message, "login": creds }),
     );
     Ok(())
 }
@@ -819,6 +833,11 @@ async fn run(cli: Cli) -> Result<()> {
             dest_path,
             limit,
         } => {
+            let folder = required_or_prompt(
+                folder,
+                "folder",
+                "What is the path to the folder on your computer? ",
+            )?;
             commands::upload_folder(&folder, destination.as_deref(), dest_path.as_deref(), &limit)
                 .await?;
         }
@@ -845,6 +864,11 @@ async fn run(cli: Cli) -> Result<()> {
             drive_ops::list(id.as_deref(), path.as_deref(), extended).await?
         }
         Commands::CreateFolder { name, id, path } => {
+            let name = required_or_prompt(
+                name,
+                "name",
+                "What would you like to name the new folder? ",
+            )?;
             drive_ops::create_folder(&name, id.as_deref(), path.as_deref()).await?
         }
         Commands::MoveFile {
@@ -876,9 +900,13 @@ async fn run(cli: Cli) -> Result<()> {
             .await?
         }
         Commands::RenameFile { id, path, name } => {
+            let name =
+                required_or_prompt(name, "name", "What is the new name of the file? ")?;
             drive_ops::rename_file(id.as_deref(), path.as_deref(), &name).await?
         }
         Commands::RenameFolder { id, path, name } => {
+            let name =
+                required_or_prompt(name, "name", "What is the new name of the folder? ")?;
             drive_ops::rename_folder(id.as_deref(), path.as_deref(), &name).await?
         }
         Commands::TrashFile { id, path } => {
@@ -893,6 +921,8 @@ async fn run(cli: Cli) -> Result<()> {
             destination,
             dest_path,
         } => {
+            let id =
+                required_or_prompt(id, "id", "What is the file id you want to restore? ")?;
             drive_ops::trash_restore_file(&id, destination.as_deref(), dest_path.as_deref()).await?
         }
         Commands::TrashRestoreFolder {
@@ -900,14 +930,26 @@ async fn run(cli: Cli) -> Result<()> {
             destination,
             dest_path,
         } => {
+            let id =
+                required_or_prompt(id, "id", "What is the folder id you want to restore? ")?;
             drive_ops::trash_restore_folder(&id, destination.as_deref(), dest_path.as_deref())
                 .await?
         }
         Commands::TrashClear { force } => drive_ops::trash_clear(force).await?,
         Commands::DeletePermanentlyFile { id } => {
+            let id = required_or_prompt(
+                id,
+                "id",
+                "What is the file id you want to permanently delete? (This action cannot be undone) ",
+            )?;
             drive_ops::delete_permanently_file(&id).await?
         }
         Commands::DeletePermanentlyFolder { id } => {
+            let id = required_or_prompt(
+                id,
+                "id",
+                "What is the folder id you want to permanently delete? (This action cannot be undone) ",
+            )?;
             drive_ops::delete_permanently_folder(&id).await?
         }
         Commands::WorkspacesList { extended } => workspaces::list(extended).await?,

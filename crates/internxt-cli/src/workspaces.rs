@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use internxt_core::api::DriveApi;
 use crate::auth;
 use internxt_core::crypto;
-use crate::drive_ops::{human_file_size, print_table};
+use crate::drive_ops::{format_date, human_file_size, print_table};
 use internxt_core::models::{Credentials, WorkspaceContext};
 use crate::output;
 
@@ -55,6 +55,7 @@ pub async fn list(extended: bool) -> Result<()> {
             if extended {
                 row.push(ws["workspace"]["ownerId"].as_str().unwrap_or("").to_string());
                 row.push(ws["workspace"]["address"].as_str().unwrap_or("").to_string());
+                row.push(format_date(ws["workspace"]["createdAt"].as_str().unwrap_or("")));
             }
             rows.push(row);
         }
@@ -62,6 +63,7 @@ pub async fn list(extended: bool) -> Result<()> {
         if extended {
             headers.push("Owner ID");
             headers.push("Address");
+            headers.push("Created at");
         }
         if rows.is_empty() {
             output::status("No workspaces found.");

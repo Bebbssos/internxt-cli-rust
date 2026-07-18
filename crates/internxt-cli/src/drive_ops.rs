@@ -35,7 +35,7 @@ pub(crate) fn human_file_size(size: f64) -> String {
 }
 
 /// Node FormatUtils.formatDate parity: "D MMMM, YYYY [at] HH:mm" in local time.
-fn format_date(iso: &str) -> String {
+pub(crate) fn format_date(iso: &str) -> String {
     match DateTime::parse_from_rfc3339(iso) {
         Ok(dt) => dt
             .with_timezone(&Local)
@@ -103,22 +103,43 @@ pub async fn logout() -> Result<()> {
 }
 
 pub async fn whoami() -> Result<()> {
-    match auth::read_credentials() {
-        Ok(creds) => {
-            output::emit(
-                &format!("✓ You are logged in as: {}.", creds.user.email),
-                json!({ "success": true, "login": { "email": creds.user.email } }),
-            );
-            Ok(())
-        }
+    let creds = match auth::read_credentials() {
+        Ok(c) => c,
         Err(_) => {
             output::emit(
                 "You are not logged in.",
                 json!({ "success": false, "message": "You are not logged in." }),
             );
-            Ok(())
+            return Ok(());
+        }
+    };
+    match internxt_core::auth::refresh_credentials(creds, |m| {
+        output::status(&format!("warning: {m}"))
+    })
+    .await
+    {
+        Ok((creds, changed)) => {
+            if changed {
+                let _ = auth::save_credentials(&creds);
+            }
+            let message = format!("You are logged in as: {}.", creds.user.email);
+            output::emit(
+                &format!("✓ {message}"),
+                json!({ "success": true, "message": message, "login": creds }),
+            );
+        }
+        Err(_) => {
+            // Session is expired or otherwise invalid: clear it, matching og's
+            // whoami behaviour of logging the user out on a dead session.
+            let path = auth::credentials_file();
+            if path.exists() {
+                let _ = std::fs::remove_file(&path);
+            }
+            let message = "Your session has expired. You have been logged out. Please log in again.";
+            output::emit(message, json!({ "success": false, "message": message }));
         }
     }
+    Ok(())
 }
 
 /// og `UsageService.INFINITE_LIMIT` — space limits at/above this mean "unlimited".
