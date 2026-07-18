@@ -12,11 +12,12 @@ name = "internxt"
 path = "src/main.rs"
 
 [features]
-default = ["sso", "webdav", "fuse", "termimage"]
-# In-terminal thumbnail display (`internxt thumbnail display`). `viuer` renders via
-# the Kitty / iTerm2 graphics protocols with a Unicode half-block fallback (all
-# pure Rust — no Sixel, so no libsixel C dependency). Needs `image` to decode the
-# downloaded thumbnail bytes. Disable for a smaller binary without image display.
+default = ["sso", "webdav", "fuse"]
+# In-terminal thumbnail display (`internxt thumbnail display`). Off by default.
+# `viuer` renders via the Kitty / iTerm2 graphics protocols with a Unicode
+# half-block fallback (all pure Rust — no Sixel, so no libsixel C dependency).
+# Needs `image` to decode the downloaded thumbnail bytes. Enable to build with
+# image display.
 termimage = ["dep:viuer", "dep:image"]
 # Web-based (universal-link) SSO login. The flow lives in internxt-core (portable);
 # this adds the native transport — a local axum callback server — plus `open` for
