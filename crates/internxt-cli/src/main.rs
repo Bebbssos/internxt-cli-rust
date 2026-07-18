@@ -27,7 +27,7 @@ use clap::{Parser, Subcommand};
 use std::io::Write;
 
 #[derive(Parser)]
-#[command(name = "internxt", version, about = "Internxt CLI (Rust port)")]
+#[command(name = "ixr", version, about = "Internxt CLI (Rust port)")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

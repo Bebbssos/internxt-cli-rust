@@ -5,10 +5,10 @@ edition = "2024"
 rust-version = "1.85"
 license = "AGPL-3.0-or-later"
 description = "Unofficial Rust port of the Internxt CLI"
-repository = "https://github.com/Bebbssos/internxt-cli-rust"
+repository = "https://github.com/Bebbssos/internxt-rust"
 
 [[bin]]
-name = "internxt"
+name = "ixr"
 path = "src/main.rs"
 
 [features]

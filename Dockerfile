@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
-# Multi-arch build for the `internxt` binary (Alpine runtime).
+# Multi-arch build for the `ixr` binary (Alpine runtime).
 #
 # Unlike the official Node CLI image (which wraps the CLI in a WebDAV-only
 # entrypoint script), this image just ships the binary: run any subcommand you
-# like, e.g. `docker run internxt serve webdav ...` or `... serve smb,sftp ...`.
+# like, e.g. `docker run ixr serve webdav ...` or `... serve smb,sftp ...`.
 #
 # Cross-compilation, not emulation: the builder stage always runs on
 # $BUILDPLATFORM (your native host arch) and cross-compiles every target with
@@ -17,7 +17,7 @@
 # Build all platforms:
 #   docker buildx build \
 #     --platform linux/amd64,linux/386,linux/arm64,linux/arm/v7,linux/arm/v6 \
-#     -t internxt-cli-rust:latest --push .
+#     -t internxt-rust:latest --push .
 
 ARG RUST_VERSION=1.85
 ARG ZIG_VERSION=0.13.0
@@ -81,12 +81,12 @@ RUN set -eux; \
         --no-default-features --features "${CLI_FEATURES}" \
         --target "$target"; \
     done; \
-    cp "target/x86_64-unknown-linux-musl/release/internxt"      /out/internxt-amd64; \
-    cp "target/i686-unknown-linux-musl/release/internxt"        /out/internxt-386; \
-    cp "target/aarch64-unknown-linux-musl/release/internxt"     /out/internxt-arm64; \
-    cp "target/aarch64-unknown-linux-musl/release/internxt"     /out/internxt-arm64v8; \
-    cp "target/armv7-unknown-linux-musleabihf/release/internxt" /out/internxt-armv7; \
-    cp "target/arm-unknown-linux-musleabihf/release/internxt"   /out/internxt-armv6
+    cp "target/x86_64-unknown-linux-musl/release/ixr"      /out/ixr-amd64; \
+    cp "target/i686-unknown-linux-musl/release/ixr"        /out/ixr-386; \
+    cp "target/aarch64-unknown-linux-musl/release/ixr"     /out/ixr-arm64; \
+    cp "target/aarch64-unknown-linux-musl/release/ixr"     /out/ixr-arm64v8; \
+    cp "target/armv7-unknown-linux-musleabihf/release/ixr" /out/ixr-armv7; \
+    cp "target/arm-unknown-linux-musleabihf/release/ixr"   /out/ixr-armv6
 
 # ---------------------------------------------------------------------------
 # final: one per-platform image, binary picked by TARGETARCH/TARGETVARIANT
@@ -99,13 +99,13 @@ RUN apk add --no-cache ca-certificates
 
 ARG TARGETARCH
 ARG TARGETVARIANT
-COPY --from=builder /out/internxt-${TARGETARCH}${TARGETVARIANT} /usr/local/bin/internxt
+COPY --from=builder /out/ixr-${TARGETARCH}${TARGETVARIANT} /usr/local/bin/ixr
 
 WORKDIR /root
 VOLUME ["/root/.internxt-cli"]
 
-# webdav, smb, nfs, sftp default ports (see `internxt serve --help`)
+# webdav, smb, nfs, sftp default ports (see `ixr serve --help`)
 EXPOSE 3005 4445 12049 2022
 
-ENTRYPOINT ["internxt"]
+ENTRYPOINT ["ixr"]
 CMD ["--help"]
