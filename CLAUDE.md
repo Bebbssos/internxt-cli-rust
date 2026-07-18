@@ -1,289 +1,80 @@
 # CLAUDE.md
 
-Context for working on this repo. Read this first.
+Context for work here. Read first.
 
 ## What this is
 
-An unofficial **Rust port of the Internxt CLI** (official one is Node/TypeScript).
-Goal: faster, lower memory, single static binary. Fully streaming transfers (handles
-100GB+ files without loading them into RAM). Not affiliated with Internxt.
+Unofficial **Rust port of Internxt CLI** (official = Node/TypeScript). Goal: faster,
+less memory, single static binary, fully streaming transfers. Not affiliated with Internxt.
 
-Commands: **login** (legacy email/password + web **SSO**), **upload-file /
-download-file / upload-folder**, drive management (**logout, whoami, list,
-create-folder, move/rename/trash/restore, trash-list/clear, delete-permanently**,
-**get-id** path→uuid / **get-path** uuid→path),
-**thumbnail** (generate/upload/download/display — on-demand previews incl. inline
-terminal rendering, beyond og),
-**workspaces** (list/use/unset, workspace-scoped), one-way **sync** (sync-up/down),
-a foreground multi-protocol **serve** (`serve webdav,fuse,smb,nfs,sftp`) exposing
-Drive over **WebDAV**, a **FUSE mount** (Unix), an **SMB/CIFS** share, an **NFSv3**
-export and an **SFTP** share, plus a top-level **mount** convenience command.
-Global **`--json`** flag on all commands.
+Commands: login (legacy + SSO), file/folder transfers, drive management, thumbnails,
+workspaces, one-way sync, multi-protocol **serve** (WebDAV/FUSE/SMB/NFS/SFTP) + `mount`
+shortcut. Global `--json`. Full list: `internxt --help`.
 
-Roadmap + what's missing, pinned upstream commits: see [TODO.md](TODO.md).
+Roadmap: [TODO.md](TODO.md). Library-reuse overview: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Reference (original) sources — `./og`
+## Porting source — `./og`
 
-Node sources we port from live in `./og` (**git-ignored**, not pushed). Recreate:
+Original node sources live in `./og` (**git-ignored**; recreate with
+`./scripts/fetch-og-sources.sh`). Whenever porting a command or chasing a behavioral
+mismatch with the official CLI, read the matching og source and mirror it — don't
+guess at endpoints, payloads, or crypto.
 
-```sh
-./scripts/fetch-og-sources.sh
-```
+## Architecture
 
-- `og/cli/` — official CLI (`src/commands`, `src/services`, `src/utils`)
-- `og/sdk/` — `@internxt/sdk` (auth, drive/storage, network up/download)
-- `og/inxt-js/` — `@internxt/inxt-js` (network upload V2 + multipart, file-key crypto)
-- `og/lib/` — `@internxt/lib` (aes-gcm helpers)
-- `og/node_modules/@internxt/*` — the published deps the released CLI runs
+Cargo **workspace**, two crates:
 
-Where each ported piece comes from:
-- Password hash / CryptoJS AES / creds file → `og/cli/src/services/crypto.service.ts`, `config.service.ts`
-- Private-key AES-GCM decrypt → `og/lib/src/aes/`
-- Login flow + endpoints → `og/sdk/src/auth/index.ts`, `og/cli/src/services/auth.service.ts`
-- SSO / universal-link login → `og/cli/src/commands/login.ts`, `og/cli/src/services/universal-link.service.ts`
-- File-key derivation, shard hash → `og/inxt-js/src/lib/utils/crypto/crypto.ts`, `.../streams/Hasher.ts`
-- Upload start/PUT/finish + multipart → `og/sdk/src/network/`, `og/inxt-js/src/lib/core/upload/`
-- Drive REST → `og/sdk/src/drive/storage/index.ts`, `og/cli/src/services/drive/`
-- Workspaces → `og/cli/src/commands/workspaces-*.ts`, `.../workspace.service.ts`, `og/sdk/src/workspaces/`
-- Workspace mnemonic decrypt (PGP ecc + Kyber512 + blake3) → `og/cli/src/services/keys.service.ts`, `.../utils/crypto.utils.ts`
+- **`internxt-core`** — protocol-agnostic Drive engine (crypto, API, transfers). No
+  terminal/clap/browser deps, so it works equally under the CLI, WebDAV/FUSE, or a
+  future GUI.
+- **`internxt-cli`** — front-end: clap dispatch, transfer UX, serve backends.
 
-## Workspace layout
+Core never touches stdio, prompts, or the filesystem for credentials — it exposes
+progress, 2FA, browser-open, and refresh-warning hooks as injected closures/traits, and
+the cli supplies them plus owns all credential persistence. This split is the thing to
+preserve when adding features: engine logic in core, UX/IO in cli.
 
-Cargo **workspace**, two crates (bin `internxt` built by the cli crate):
+## Key facts / gotchas
 
-- **`crates/internxt-core`** (lib `internxt_core`) — the Drive **engine**: *how
-  Internxt works* (endpoints, payloads, encryption) as a protocol-agnostic library.
-  No terminal output, clap, indicatif, prompts, or browser — a CLI, a WebDAV/FUSE
-  server, or a future GUI all build on it.
-- **`crates/internxt-cli`** (bin `internxt`) — the **front-end**: clap dispatch, the
-  transfer UX, drive-ops/workspaces wrappers, sync, WebDAV + FUSE + serve backends.
+- **Crypto is byte-for-byte compatible with node**, checked against reference test
+  vectors. Touching crypto → run `cargo test` before considering it done.
+- **SSO login can't carry the Kyber key** (the callback link/refresh never exposes it
+  decrypted) — hybrid-Kyber workspaces need legacy (password) login instead.
+- **Workspaces are a separate context**, not just a filter: their own bucket, network
+  credentials, and mnemonic. Switching workspace changes where drive calls and
+  transfers route.
+- **Thumbnails are best-effort**, generated automatically after upload, silenceable via
+  an env kill switch, and only visible through the folder-listing endpoint — the
+  single-file metadata endpoint doesn't include them.
+- **Transfers stay streaming end-to-end**, including ranged/partial downloads and
+  chunked multipart uploads — RAM use stays bounded regardless of file size.
+- **Credentials are stored encrypted**, same file location and format as the node CLI,
+  so the two are interchangeable on the same machine.
 
-**Core↔front-end seams** (core leaves these to the caller):
-- byte progress → [`ProgressSink`] trait (`inc(bytes)`); cli wraps indicatif via
-  `output::bar_sink`. Transfers take `Option<Arc<dyn ProgressSink>>` (`None` = discard).
-- `auth::login` 2FA code → injected `on_need_2fa` closure.
-- `sso::login` browser-open + URL → injected `on_login_url` closure.
-- refresh warnings → injected `on_warn` closure on `auth::refresh_credentials`.
-- **credential persistence** → entirely cli. Core `refresh_credentials(creds, on_warn)`
-  is pure (returns refreshed creds + `changed` flag, no fs). cli `auth.rs` owns the file
-  (`~/.internxt-cli/.inxtcli`), read/save, and the read→refresh→save `get_auth_details`.
-- **native transfers** → core `fs` feature (default on): path-based
-  `upload_file_to_network` / multipart / `create_folder_with_retry` (`tokio::fs`/`spawn`/`time`).
-  `--no-default-features` leaves the reader/writer surface (crypto/api/network + generic
-  streaming `upload_stream_to_network` / `download_file_to_writer`). cli always enables `fs`.
-- cli keeps thin shim modules `auth`/`sso` wrapping the core fns with these callbacks +
-  persistence, so the rest of the cli calls `auth::*` / `sso::*` unchanged.
+## serve
 
-| File | Responsibility |
-|---|---|
-| **core** `config.rs` | API URLs + app constants (public; env-overridable) |
-| **core** `crypto.rs` | passToHash, CryptoJS AES-CBC, lib AES-GCM, GenerateFileKey, AES-256-CTR, hashes, workspace-key decrypt (PGP/Kyber512/blake3) |
-| **core** `auth.rs` | legacy login (+ ecc/kyber key decrypt; `on_need_2fa`), SSO cred build, pure `refresh_credentials` (token + workspace-cred refresh; `on_warn`; no fs) |
-| **core** `sso.rs` | web SSO flow logic (no axum/tokio-net): build login URL, decode callback, build creds. Local transport behind `SsoCallbackServer` trait; `on_login_url` callback |
-| **core** `api.rs` | Drive REST client; workspace-aware via `for_credentials` (`x-internxt-workspace` + `/workspaces/{id}/…`) |
-| **core** `network.rs` | bridge/network client, streaming PUT/GET |
-| **core** `transfer.rs` | streaming transfer primitives + `ProgressSink`. Always on: generic `upload_stream_to_network` / `download_file_to_writer` (ranged). `fs` feature: path-based `upload_file_to_network`, multipart, `create_folder_with_retry` |
-| **core** `thumbnail.rs` | image thumbnail gen+upload (feature `thumbnails`, default-on): decode/resize/encode 300x300 PNG via `image` crate, `POST /files/thumbnail`. jpg/png/webp/gif/tiff only |
-| **core** `progress.rs` | `ProgressSink` trait + `noop_sink` |
-| **core** `models.rs` | serde DTOs; `Credentials` workspace/keys + net/bucket/mnemonic helpers |
-| **cli** `main.rs` | clap dispatch (all subcommands) |
-| **cli** `auth.rs` / `sso.rs` | shims over core: cred persistence, 2FA prompt, browser-open, refresh warnings |
-| **cli** `commands.rs` | upload/download/folder-upload orchestration (args, progress bars, `--json`) |
-| **cli** `sync.rs` | sync-up/down: one-way folder reconcile (tree diff, size+mtime detection, optional `--delete`) |
-| **cli** `serve/` | shared serve code: `run.rs` (orchestrator: parse protocol comma-list, build one `Shared` bundle — creds+cache+global upload semaphore+root — spawn each backend, own the single Ctrl-C via a `watch` flag), `tree.rs` (Drive-tree walk), `cache.rs` (`FolderCache` TTL cache), `creds.rs` (`SharedCreds` + hourly refresh), `thumbnail.rs` (`upload_thumbnail_best_effort` — every backend calls it after a write to register an image thumbnail; gated by `INTERNXT_THUMBNAILS`) |
-| **cli** `webdav/` | WebDAV server (feature `webdav`): `mod.rs` (axum + dispatch + auth + TLS), `handlers.rs`, `resource.rs` (URL parse + resolve), `xml.rs` |
-| **cli** `fuse/` | FUSE mount (feature `fuse`, Unix): `mod.rs` (mount + Ctrl-C unmount), `fs.rs` (`fuser::Filesystem`: inode table, sync→tokio bridge, streaming reads, temp-file writes) |
-| **cli** `smb/` | SMB/CIFS server (feature `smb`, default-off): `mod.rs` (`SmbConfig` + `serve`: build `SmbServer`, wire shutdown), `fs.rs` (Drive-backed `ShareBackend`/`Handle`: path resolve, streaming reads, temp-file writes). SMB2/3 wire protocol from the `smb-server` git-dep fork |
-| **cli** `nfs/` | NFSv3 server (feature `nfs`, default-off, all platforms): `mod.rs` (`NfsConfig` + `serve`: bind `NFSTcpListener`, spawn idle-flush sweeper, wire shutdown), `fs.rs` (Drive-backed `NFSFileSystem`: id-based inode table like FUSE, streaming reads, temp-buffer writes flushed on idle — NFS has no close). Wire protocol from `nfsserve` |
-| **cli** `sftp/` | SFTP server (feature `sftp`, default-off, all platforms): `mod.rs` (`SftpConfig` + `serve`: build `russh` SSH server w/ host key, wire shutdown), `fs.rs` (`SshServer`/`SshSession` = `russh::server::Handler` for transport+auth; `SftpSession` = `russh_sftp::server::Handler` over Drive: path resolve, per-session open/close handle map, streaming reads, temp-file writes uploaded on `close`). SSH transport from `russh`, SFTP subsystem from `russh-sftp` |
-| **cli** `drive_ops.rs` | logout, whoami, list, create/move/rename/trash/delete |
-| **cli** `thumbnail_ops.rs` | on-demand `thumbnail generate/upload/download/display`: generate (download file → 300x300 PNG → upload+register), upload (custom preview, `--raw` = bytes as-is), download (fetch current), display (render inline via `viuer` — Kitty/iTerm2 + half-block fallback, feature `termimage`, default-off). Reads a file's thumbnails from the folder-content listing (the `/meta` endpoint omits them) |
-| **cli** `paths.rs` | path↔uuid resolution: cache-free workspace-aware tree walk (path→uuid) + folder `ancestors` endpoint (uuid→path). `get-id`/`get-path` commands; `resolve_opt` powers the `--path`/`--dest-path`/`--remote-path` alternatives to `-i` on most drive/upload/download/sync ops (live items only, not trash) |
-| **cli** `workspaces.rs` | workspaces list/use/unset; decrypts workspace mnemonic |
-| **cli** `output.rs` | `--json` vs human switch (`emit`/`status`/`emit_error`); `bar_sink` |
+One foreground process can run several protocol backends at once (WebDAV, FUSE, SMB,
+NFS, SFTP), sharing credentials, a folder cache, and upload throttling. All backends
+follow the same model: reads are streaming (forward reads stay cheap, backward seeks
+become ranged fetches); writes are whole-file (Internxt has no partial update), so a
+write materializes, then replaces the old Drive entry on completion. SMB/NFS/FUSE/SFTP
+diverge on protocol-specific quirks (e.g. NFS has no close, so it flushes on idle) —
+read the relevant backend module for those details rather than assuming parity.
 
-## Key facts / decisions
-
-- **Crypto is byte-for-byte compatible with node.** Verified by tests in
-  `crates/internxt-core/src/crypto.rs` vs `scripts/ref.js`, plus
-  `crates/internxt-core/tests/keys_crypto.rs` vs `scripts/ref-keys.json` (workspace key
-  crypto). **If you touch crypto, run `cargo test`.** Regenerate keys vectors:
-  `NODE_PATH=og/node_modules node scripts/ref-keys.js > scripts/ref-keys.json` (git-ignored;
-  the keys test skips if absent).
-- **Login** (legacy) uses `/auth/login/access` WITHOUT *sending* keys, but reads the
-  returned `keys.ecc/kyber`, decrypts them (lib AES-GCM), and persists base64 — needed to
-  decrypt workspace mnemonics. 2FA prompted when required.
-- **Subcommands**: `login` = SSO when built with `sso` (default) else legacy;
-  `login-legacy` = always email/password; `login-sso` = always SSO. Aliases `login:legacy` / `login:sso`.
-- **SSO login** (cli feature `sso`): flow logic in core `sso.rs` builds
-  `{DRIVE_WEB_URL}/login?universalLink=true&redirectUri={b64}`, decodes the callback's
-  base64 `mnemonic`/`newToken`/`privateKey`, builds creds via `refreshUserCredentials`. Local
-  callback transport behind the `SsoCallbackServer` trait; native impl (temp axum server on
-  `0.0.0.0:port`, redirects browser to `auth-link-ok`/`-error`) + browser-open live in cli
-  `sso.rs`. `--host` sets the browser-facing address (cross-device); `--port` fixes the
-  callback port. **Kyber key dropped in SSO** (link never carries it, refresh returns it
-  encrypted, no password) — ecc-only workspaces work; hybrid-Kyber ones need `login-legacy`.
-- **Workspaces**: `workspaces use` decrypts the mnemonic (`crypto::decrypt_workspace_key`:
-  ecc-only or `HybridMode$kyberCt$eccCt`), stores a `WorkspaceContext`. When active, drive
-  calls carry `x-internxt-workspace` + route to `/workspaces/{id}/…`; transfers use the
-  workspace bucket + network creds (`sha256(networkPass)`) + workspace mnemonic.
-- **Kyber512** (`safe_pqc_kyber`) interops with node's `@dashlane/pqc-kem-kyber512`. Stored
-  key coerced to raw 1632-byte secret (handles base64(raw) and node's double-base64). **`pgp`
-  crate needs aes-gcm's re-exported `aes` (`aes_gcm::aes::Aes256`), not top-level `aes` 0.9.**
-- **Thumbnails** (core `thumbnail.rs`, feature `thumbnails` default-on): after a file
-  upload, thumbnailable images (jpg/png/webp/gif/tiff, ≤500MB) get a 300x300 PNG preview
-  via the `image` crate, uploaded to the network + `POST /files/thumbnail`. Best-effort —
-  never fails the parent upload. Wired into upload-file, upload-folder, and every serve
-  backend write (WebDAV PUT spools the image so the bytes survive the main upload). Disable
-  everywhere with `INTERNXT_THUMBNAILS=0` (or `false`/`no`/`off`). PDFs are never
-  thumbnailed (og defines a PDF set but never uses it). On-demand `thumbnail
-  generate/upload/download` (cli `thumbnail_ops.rs`) manage previews for existing files.
-  A file keeps a **single** thumbnail — a new `create_thumbnail_entry` replaces it (server
-  side), so generate/upload never pile up duplicates. Reading a file's thumbnail requires
-  the **folder-content file listing** (`/folders/content/{uuid}/files` → `files[].thumbnails[]`);
-  the `/files/{uuid}/meta` endpoint does NOT include thumbnails.
-- **Network auth**: bridge basic auth = `user : sha256(pass).hex` — personal `pass = userId`,
-  workspace `pass = networkPass`.
-- **File key**: `sha512( sha512(seed || bucketIdBytes)[0..32] || index )[0..32]`, where
-  `seed = bip39 mnemonicToSeed(mnemonic)`, `iv = index[0..16]`, cipher = AES-256-CTR.
-- **Shard hash** (sent in finish): `ripemd160(sha256(ciphertext))`, incremental.
-- **Multipart**: threshold 100MB, 15MB parts, 10 concurrent PUTs. Continuous CTR stream
-  sliced into parts. RAM bounded (~150MB) regardless of file size.
-- **Ranged download** (`download_file_to_writer` `range` arg): with per-shard sizes, seeks the
-  CTR keystream to the window start and fetches only the covering shards (boundary shards
-  byte-ranged over HTTP, expects `206`). Single- and multi-shard; falls back to
-  decrypt-from-0-and-skip-prefix when a multi-shard file's per-shard sizes are absent.
-- **Credentials**: AES-encrypted (CryptoJS-compatible, `APP_CRYPTO_SECRET`) at
-  `~/.internxt-cli/.inxtcli` — same path/format as the node CLI.
-- **No secrets in the repo.** `APP_CRYPTO_SECRET` / `DESKTOP_HEADER` in `config.rs` are public
-  per-client constants from upstream `.env.template`, not user data. `og/`, `target/` git-ignored.
-
-### serve / WebDAV / FUSE / SMB / NFS / SFTP
-
-- **serve** (`serve/run.rs`): `serve` takes a **comma-separated positional protocol list**
-  (`serve webdav,fuse,smb,nfs,sftp`) — not a clap subcommand — so several backends run in one
-  foreground process (Ctrl-C stops all). **Shared** flags (`-i/--folder-uuid`,
-  `--cache-ttl`/`--no-cache`, `-d/--delete-permanently`, `--spool`, `--spool-dir`,
-  `--max-concurrent-uploads`, `--read-only`) back one `SharedCreds`, one `FolderCache`, one
-  global upload `Semaphore`. **Protocol-specific** flags are prefixed (`--webdav-*`, `--fuse-*`,
-  `--smb-*`, `--nfs-*`, `--sftp-*`). `mount` is a thin wrapper calling the orchestrator with a
-  single-`fuse` list. Unknown / feature-off protocols error at parse time.
-- **Logging** (`serve/log.rs`): a process-global `--verbose`/`-v` flag (set once by `serve`/`mount`)
-  gates the per-op request traces. Every backend's `log()` routes to `serve::log::trace`
-  (verbose-only); errors/warnings go through `serve::log::warn` (always). WebDAV's header dump is
-  gated by `--verbose` **or** `INTERNXT_WEBDAV_DEBUG`. Default output = errors/warnings only.
-- **WebDAV** (feature `webdav`, default-on): foreground backend, not og's pm2 daemon. axum
-  `Router::fallback` dispatches by method. Path→item walks the folder tree (workspace-aware),
-  subfolder listings cached in-process (`--cache-ttl`, default 5s); file listings stay live.
-  Concurrent same-folder creation is conflict-tolerant (`get_or_create_child` re-lists and
-  adopts the winner). GET streams through `download_file_to_writer` (RAM-bounded) and honours
-  HTTP `Range:`. PUT: **default** streams the live body straight to storage
-  (`upload_stream_to_network`, needs Content-Length; else spools); **`--spool`** writes the
-  body to a temp file first then uploads from disk (more robust for slow/concurrent clients,
-  costs temp disk + latency). `--max-concurrent-uploads N` (0 = unlimited) gates PUTs via a
-  semaphore; the permit is taken *before* the body is read. DELETE trashes unless
-  `--delete-permanently`. **HTTPS** = separate `webdav-tls` feature (rustls, self-signed or
-  `--cert`/`--key`). **Every method that returns without consuming its body drains it first**
-  — WinSCP pipelines requests and an undrained body makes hyper drop the connection (the actual
-  cause of WinSCP aborts; see `handlers.rs` for the full story). Response XML hand-built in
-  `xml.rs` to match og's `D:`-namespaced shape.
-- **FUSE mount** (feature `fuse`, default-on, **Unix only**): foreground `mount <MOUNTPOINT>`
-  exposing Drive as a **read-write** filesystem via `fuser`. Declared under
-  `[target.'cfg(unix)'.dependencies]`, code gated `cfg(all(unix, feature = "fuse"))` — Windows
-  default builds still compile (feature inert). `fuser` links **libfuse** → build needs
-  `libfuse3-dev`+`pkg-config` (macFUSE on macOS) and a FUSE driver at runtime. `Filesystem`
-  callbacks are synchronous; each network op spawns a tokio task and replies async, so ops run
-  concurrent. Stable `u64` inodes via a two-way `InodeTable`. **Reads**: per-handle sequential
-  streaming reader — one continuous decrypt for a forward read; a backward seek restarts as a
-  true ranged seek (fetches only covering shards). **Writes**: whole-file model (Internxt has no
-  partial update) — a temp file backs the handle, existing content materialized lazily (skipped
-  on truncate-to-0), on `release` the temp uploads whole and a **new** Drive file entry replaces
-  the old. `mkdir`/`rmdir`/`unlink`/`rename` → Drive REST; mutations invalidate the cache. Uses
-  shared serve flags; fuse-only `--fuse-allow-other` (needs `user_allow_other` in
-  `/etc/fuse.conf`). Under `mount` the shared flags use bare names; under `serve` fuse-only ones
-  are `--fuse-`-prefixed.
-- **SMB/CIFS** (feature `smb`, **default-OFF**, all platforms): foreground `serve smb` exposing
-  Drive as a **read-write** SMB2/3 share (`net use` on Windows, `mount -t cifs` on Linux/macOS).
-  The wire protocol + NTLM auth + signing come from the `smb-server` crate (MIT), pulled as a
-  **git dependency** on a fork (`github.com/Bebbssos/rust-smb-server`) — upstream 0.4.1 doesn't
-  re-export its own trait types and returned a per-open volatile id from QUERY_INFO (stale-handle
-  on the Linux cifs client); the fork fixes both, pending an upstream PR. We only implement its
-  `ShareBackend`/`Handle`
-  over Drive in `smb/fs.rs` — the SMB analog of `fuser::Filesystem`. **Path-based** (no inode
-  table): every op re-resolves the path via the shared `tree` walk. **Reads** reuse FUSE's
-  sequential streaming reader (forward-skip, backward-seek → ranged download). **Writes** reuse
-  FUSE's whole-file temp model (materialize existing lazily, upload whole on `close`, replace the
-  Drive entry). Delete = CREATE `delete_on_close` / SET_INFO disposition → backend `unlink`
-  (trash unless `-d`); `rename` = SET_INFO → Drive move+rename. `--smb-host/-port/-share/
-  -username/-password` (port default 4445, since 445 needs root/admin; a password is recommended
-  — Windows refuses anonymous). The `smb-server` git-dep is optional, only pulled when the `smb`
-  feature is on, so a default `cargo build` never fetches or compiles it.
-- **NFSv3** (feature `nfs`, **default-OFF**, all platforms): foreground `serve nfs` exposing Drive
-  as a **read-write** NFSv3 export (`mount -t nfs` on Linux/macOS). Wire protocol + mount + portmap
-  from the `nfsserve` crate; we implement its `NFSFileSystem` over Drive in `nfs/fs.rs`. **Id-based**
-  like FUSE (`fileid3` = u64), so it keeps an `InodeTable` interning items on `lookup`/`readdir`
-  (root id 1). **Reads** reuse FUSE's sequential streaming reader, cached per file id. **Writes** are
-  the awkward part — NFSv3 has **no open/close for data**, so nothing signals "done": each written
-  file is buffered to a temp file (existing content materialized lazily) and marked dirty; a
-  background **sweeper** (`Inner::sweep`, ticked from `nfs::serve`) uploads it once writes have been
-  idle ~2s (`FLUSH_IDLE`), replacing the Drive entry in place (`replace_file`), then evicts the
-  buffer after ~30s quiet (`EVICT_IDLE`); a final `flush_all` runs on shutdown. `create` only
-  **interns a pending node** (empty uuid, no Drive call); the entry is created lazily on the first
-  flush **with content** (`existing_uuid: None` → `createFileEntry`, then remembers the uuid so later
-  flushes replace). A file created but never written never persists — deliberate, since free/legacy
-  plans 402 on empty files (`createFileEntry` of a 0-byte file). `--nfs-host/-port` (port
-  default 12049, since 2049 needs root/admin; mount with `-o port=…,mountport=…`). `nfsserve` is
-  optional, only pulled with the `nfs` feature.
-- **SFTP** (feature `sftp`, **default-OFF**, all platforms): foreground `serve sftp` exposing Drive
-  as a **read-write** SFTP share (`sftp`/`scp -s`/WinSCP/FileZilla/`sshfs`). SSH transport + kex +
-  auth from `russh`; SFTP subsystem wire protocol from `russh-sftp`. `sftp/fs.rs` implements
-  `russh::server::Handler` (`SshSession`: password auth — public-key rejected to force password;
-  `sftp` subsystem → `russh_sftp::server::run`) and `russh_sftp::server::Handler` (`SftpSession`:
-  the Drive backend). **Path-based** like SMB (re-resolve via the shared `tree` walk); SFTP has
-  explicit **open/close**, so it keeps a **per-session** open-handle map (`&mut self`, no locks) and
-  **reads** reuse the sequential streaming reader while **writes** reuse the whole-file temp model
-  uploaded on `close` (SMB/FUSE-style). Host key: `--sftp-host-key <PATH>` (OpenSSH), else a
-  **persistent** Ed25519 key auto-generated once at `~/.internxt-cli/sftp_host_key` (mode 0600) and
-  reused after, so the fingerprint is stable across restarts. `--sftp-host/-port/-username/-password`
-  (port default 2022, since
-  22 needs root/admin; omit `--sftp-password` to accept any). `russh`/`russh-sftp` are optional, only
-  pulled with the `sftp` feature.
-
-## Build / test / run
+## Build / test
 
 ```sh
-cargo build --release        # -> target/release/internxt (SSO + WebDAV-over-HTTP + FUSE default; FUSE needs libfuse3-dev+pkg-config on Unix)
-cargo build --release --features webdav-tls    # + HTTPS for WebDAV
-cargo build --release --features smb           # + SMB/CIFS share (default-off; pulls smb-server fork)
-cargo build --release --features nfs           # + NFSv3 export (default-off; pulls nfsserve)
-cargo build --release --features sftp          # + SFTP share (default-off; pulls russh)
-cargo build --release --features termimage     # + `thumbnail display` inline rendering (default-off; pulls viuer+image)
-cargo build --release --no-default-features    # smaller: legacy login only (no axum/open/webdav/fuse)
-cargo test                                     # crypto cross-check vs node (no network)
-
-target/release/internxt login                                  # SSO (opens browser); --host/--port for another device
-target/release/internxt login-legacy --email you@example.com
-target/release/internxt upload-file -f ./file -i <folder-uuid>
-target/release/internxt download-file -i <file-uuid> -d ./out --overwrite
-target/release/internxt thumbnail generate -i <file-uuid>      # make a preview for an existing file
-target/release/internxt thumbnail download --path /a/pic.jpg -d ./out --overwrite
-target/release/internxt thumbnail display --path /a/pic.jpg    # render inline (Kitty/iTerm2, else half-blocks)
-target/release/internxt workspaces-use -i <workspace-uuid>     # scope later commands; --personal to unset
-target/release/internxt serve webdav,fuse --fuse-mountpoint ~/drive   # both, shared cache/creds
-target/release/internxt serve smb --smb-password secret               # SMB share (needs --features smb); mount -t cifs //host/internxt /mnt -o port=4445
-target/release/internxt serve nfs --nfs-host 0.0.0.0                  # NFSv3 export (needs --features nfs); mount -t nfs -o nolock,vers=3,tcp,port=12049,mountport=12049 host:/ /mnt
-target/release/internxt serve sftp --sftp-password secret             # SFTP share (needs --features sftp); sftp -P 2022 internxt@host
-target/release/internxt mount ~/drive                          # FUSE only (Unix; Ctrl-C to unmount)
+cargo build --release          # default build; some backends are opt-in Cargo features
+cargo test                     # crypto cross-check vs node (no network)
+cargo clippy --workspace --all-targets
 ```
+
+Feature flags and command flags: see `Cargo.toml` / `internxt <cmd> --help` — not
+duplicated here.
 
 ## Conventions
 
-- Match the node CLI's observable behaviour (endpoints, payloads, file locations) so the two
-  are interchangeable. When in doubt, read `og/` and mirror it.
+- Match the node CLI's observable behaviour so the two stay interchangeable. When
+  unsure, read `og/` and mirror it.
 - Keep transfers streaming — never read a whole file into memory.
-- Endpoints/constants belong in `crates/internxt-core/src/config.rs`, env-overridable.
-
-## License
-
-AGPL-3.0 (see `LICENSE`, `NOTICE`). Chosen because `@internxt/inxt-js` ships an AGPL-3.0
-license file (its `package.json` says ISC — upstream conflict). `sdk`/`lib`/`cli` are MIT.
+- Endpoints/constants live in `crates/internxt-core/src/config.rs`, env-overridable.
