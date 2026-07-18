@@ -10,10 +10,11 @@ server-side; `ixr` doesn't hit that gate.
 ## Compatibility with the official Internxt CLI
 
 This is intended to be a **mostly drop-in replacement**. For ported commands the
-names, flags, endpoints, payloads, crypto and the credential file
-(`~/.internxt-cli/.inxtcli`, same location/format as the official CLI) all match,
-so the two are interchangeable for everyday login / upload / download / list /
-move / rename / trash workflows.
+names, flags, endpoints, payloads and crypto all match, so the two behave the
+same for everyday login / upload / download / list / move / rename / trash
+workflows. Credentials are **not** shared between the two — `ixr` stores its
+own session at `~/.ixr/credentials`, separate from the official CLI's
+`~/.internxt-cli`, so each needs its own `login`.
 
 The official CLI's commands (built with [oclif](https://oclif.io)) are named with
 a `topic:command` colon style, e.g. `upload:file`, `move:file`, `sync:up`. `ixr`
@@ -72,13 +73,27 @@ cargo build --release --features sftp         # SFTP over SSH (pulls in russh)
 cargo build --release --no-default-features
 ```
 
-Feature flags: `sso` (web-based login), `webdav` (WebDAV server, HTTP) and
-`fuse` (FUSE mount, Unix) are on by default; `webdav-tls` adds HTTPS. The
-`fuse` feature needs `libfuse3-dev` + `pkg-config` at build time on Unix (it's
-inert on Windows, so default builds still compile there).
+See [Features](#features) below for what each `--features`/`--no-default-features`
+flag enables and disables.
 
 A multi-arch Docker image is available — see the [`Dockerfile`](../Dockerfile)
 at the repo root.
+
+## Features
+
+Cargo feature flags gate optional command surface, mainly to keep the default
+binary small and dependency-light. `default = ["sso", "webdav", "fuse"]`.
+
+| Feature | Default | Enables | Notes |
+|---|---|---|---|
+| `sso` | on | Web-based SSO flow for `login`/`login-sso` (local callback server + browser launch) | Without it, `login` falls back to the legacy flow and `login-sso` errors. Pulls in `axum` + `open`. |
+| `webdav` | on | `serve webdav` over plain HTTP | Pulls in `axum` + `tokio-util` + `mime_guess`. |
+| `webdav-tls` | off | HTTPS for `serve webdav` (`--webdav-https`) | Requires `webdav`. Pulls in `axum-server` + `rustls-pemfile` + `rcgen` (self-signed or your own cert/key). |
+| `fuse` | on (Unix only) | `mount`, `serve fuse` | Needs `libfuse3-dev` + `pkg-config` at build time and a FUSE driver at runtime (fuse3/macFUSE/`fusefs-libs3`). Inert on Windows — default builds still compile there, just without these commands. |
+| `smb` | off | `serve smb` — SMB2/3 share | Experimental. All platforms. Built on a fork of the `smb-server` crate. |
+| `nfs` | off | `serve nfs` — NFSv3 export | Experimental. All platforms. |
+| `sftp` | off | `serve sftp` — SFTP over SSH | Experimental. All platforms. Pulls in `russh` + `russh-sftp`. |
+| `termimage` | off | `thumbnail display` — inline terminal image rendering | Pulls in `viuer` + `image`. Kitty/iTerm2 graphics protocol, with a Unicode half-block fallback. |
 
 ## Global flags
 
@@ -96,41 +111,42 @@ targets your root folder (or workspace root, if a workspace is active).
 
 ## Commands
 
-| Command | Description | Official CLI compatibility |
-|---|---|---|
-| [`login`](#login) | Log in to your Internxt account. | Same command; SSO by default here matches the official default. |
-| [`login-legacy`](#login-legacy) | Log in with email + password (legacy flow). | Mirrors `login:legacy`, kept as alias. |
-| [`login-sso`](#login-sso) | Log in via the web-based SSO flow. | Mirrors `login:sso`, kept as alias. |
-| [`logout`](#logout) | Log out the current user. | Same command. |
-| [`whoami`](#whoami) | Show the currently logged-in user. | Same command. |
-| [`usage`](#usage) | Show account plan, used space, and upload limit. | New — no official equivalent. |
-| [`list`](#list) | List a folder's contents. | Same command; adds `--path`. |
-| [`create-folder`](#create-folder) | Create a folder. | Mirrors `create:folder`, kept as alias; adds `--path`. |
-| [`upload-file`](#upload-file) | Upload a file. | Mirrors `upload:file`, kept as alias; adds `--dest-path`, `--stdin`, `--size`. |
-| [`upload-folder`](#upload-folder) | Recursively upload a folder tree. | Mirrors `upload:folder`, kept as alias; adds `--dest-path`. |
-| [`download-file`](#download-file) | Download + decrypt a file. | Mirrors `download:file`, kept as alias; adds `--path`, `--stdout`. |
-| [`move-file`](#move-file--move-folder) | Move a file into a destination folder. | Mirrors `move:file`, kept as alias; adds `--path`/`--dest-path`. |
-| [`move-folder`](#move-file--move-folder) | Move a folder into a destination folder. | Mirrors `move:folder`, kept as alias; adds `--path`/`--dest-path`. |
-| [`rename-file`](#rename-file--rename-folder) | Rename a file. | Mirrors `rename:file`, kept as alias; adds `--path`. |
-| [`rename-folder`](#rename-file--rename-folder) | Rename a folder. | Mirrors `rename:folder`, kept as alias; adds `--path`. |
-| [`trash-file`](#trash-file--trash-folder) | Move a file to the trash. | Mirrors `trash:file`, kept as alias; adds `--path`. |
-| [`trash-folder`](#trash-file--trash-folder) | Move a folder to the trash. | Mirrors `trash:folder`, kept as alias; adds `--path`. |
-| [`trash-list`](#trash-list) | List the contents of the trash. | Mirrors `trash:list`, kept as alias. |
-| [`trash-restore-file`](#trash-restore-file--trash-restore-folder) | Restore a trashed file. | Mirrors `trash:restore:file`, kept as alias; adds `--dest-path`. |
-| [`trash-restore-folder`](#trash-restore-file--trash-restore-folder) | Restore a trashed folder. | Mirrors `trash:restore:folder`, kept as alias; adds `--dest-path`. |
-| [`trash-clear`](#trash-clear) | Empty the trash permanently. | Mirrors `trash:clear`, kept as alias. |
-| [`delete-permanently-file`](#delete-permanently-file--delete-permanently-folder) | Permanently delete a file. | Mirrors `delete:permanently:file`, kept as alias. |
-| [`delete-permanently-folder`](#delete-permanently-file--delete-permanently-folder) | Permanently delete a folder. | Mirrors `delete:permanently:folder`, kept as alias. |
-| [`workspaces-list`](#workspaces-list) | List the workspaces you belong to. | Mirrors `workspaces:list`, kept as alias. |
-| [`workspaces-use`](#workspaces-use) | Set the active workspace. | Mirrors `workspaces:use`, kept as alias. |
-| [`workspaces-unset`](#workspaces-unset) | Unset the active workspace. | Mirrors `workspaces:unset`, kept as alias. |
-| [`sync-up`](#sync-up--sync-down) | One-way sync, local → remote (push). | Mirrors `sync:up`, kept as alias; adds `--remote-path`. |
-| [`sync-down`](#sync-up--sync-down) | One-way sync, remote → local (pull). | Mirrors `sync:down`, kept as alias; adds `--remote-path`. |
-| [`serve`](#serve) | Serve Drive over WebDAV / FUSE / SMB / NFS / SFTP (foreground). | WebDAV mirrors the official server, run inline instead of as a daemon. FUSE/SMB/NFS/SFTP are new. |
-| [`mount`](#mount) | Mount Drive as a local filesystem via FUSE (Unix). | New — no official equivalent. |
-| [`id-from-path`](#id-from-path) | Print the uuid of the item at a Drive path. | New — no official equivalent. |
-| [`path-from-id`](#path-from-id) | Print the Drive path of an item given its uuid. | New — no official equivalent. |
-| [`thumbnail generate\|upload\|download\|display`](#thumbnail) | Manage a file's thumbnail. | New — the official CLI only generates thumbnails automatically on upload; it has no management commands. |
+| Command | Description | Feature(s) | Official CLI compatibility |
+|---|---|---|---|
+| [`login`](#login) | Log in to your Internxt account. | none (flow varies with `sso`, default on) | Same command; SSO by default here matches the official default. |
+| [`login-legacy`](#login-legacy) | Log in with email + password (legacy flow). | none | Mirrors `login:legacy`, kept as alias. |
+| [`login-sso`](#login-sso) | Log in via the web-based SSO flow. | `sso` (default on) | Mirrors `login:sso`, kept as alias. |
+| [`logout`](#logout) | Log out the current user. | none | Same command. |
+| [`whoami`](#whoami) | Show the currently logged-in user. | none | Same command. |
+| [`usage`](#usage) | Show account plan, used space, and upload limit. | none | New — no official equivalent. |
+| [`list`](#list) | List a folder's contents. | none | Same command; adds `--path`. |
+| [`create-folder`](#create-folder) | Create a folder. | none | Mirrors `create:folder`, kept as alias; adds `--path`. |
+| [`upload-file`](#upload-file) | Upload a file. | none | Mirrors `upload:file`, kept as alias; adds `--dest-path`, `--stdin`, `--size`. |
+| [`upload-folder`](#upload-folder) | Recursively upload a folder tree. | none | Mirrors `upload:folder`, kept as alias; adds `--dest-path`. |
+| [`download-file`](#download-file) | Download + decrypt a file. | none | Mirrors `download:file`, kept as alias; adds `--path`, `--stdout`. |
+| [`move-file`](#move-file--move-folder) | Move a file into a destination folder. | none | Mirrors `move:file`, kept as alias; adds `--path`/`--dest-path`. |
+| [`move-folder`](#move-file--move-folder) | Move a folder into a destination folder. | none | Mirrors `move:folder`, kept as alias; adds `--path`/`--dest-path`. |
+| [`rename-file`](#rename-file--rename-folder) | Rename a file. | none | Mirrors `rename:file`, kept as alias; adds `--path`. |
+| [`rename-folder`](#rename-file--rename-folder) | Rename a folder. | none | Mirrors `rename:folder`, kept as alias; adds `--path`. |
+| [`trash-file`](#trash-file--trash-folder) | Move a file to the trash. | none | Mirrors `trash:file`, kept as alias; adds `--path`. |
+| [`trash-folder`](#trash-file--trash-folder) | Move a folder to the trash. | none | Mirrors `trash:folder`, kept as alias; adds `--path`. |
+| [`trash-list`](#trash-list) | List the contents of the trash. | none | Mirrors `trash:list`, kept as alias. |
+| [`trash-restore-file`](#trash-restore-file--trash-restore-folder) | Restore a trashed file. | none | Mirrors `trash:restore:file`, kept as alias; adds `--dest-path`. |
+| [`trash-restore-folder`](#trash-restore-file--trash-restore-folder) | Restore a trashed folder. | none | Mirrors `trash:restore:folder`, kept as alias; adds `--dest-path`. |
+| [`trash-clear`](#trash-clear) | Empty the trash permanently. | none | Mirrors `trash:clear`, kept as alias. |
+| [`delete-permanently-file`](#delete-permanently-file--delete-permanently-folder) | Permanently delete a file. | none | Mirrors `delete:permanently:file`, kept as alias. |
+| [`delete-permanently-folder`](#delete-permanently-file--delete-permanently-folder) | Permanently delete a folder. | none | Mirrors `delete:permanently:folder`, kept as alias. |
+| [`workspaces-list`](#workspaces-list) | List the workspaces you belong to. | none | Mirrors `workspaces:list`, kept as alias. |
+| [`workspaces-use`](#workspaces-use) | Set the active workspace. | none | Mirrors `workspaces:use`, kept as alias. |
+| [`workspaces-unset`](#workspaces-unset) | Unset the active workspace. | none | Mirrors `workspaces:unset`, kept as alias. |
+| [`sync-up`](#sync-up--sync-down) | One-way sync, local → remote (push). | none | Mirrors `sync:up`, kept as alias; adds `--remote-path`. |
+| [`sync-down`](#sync-up--sync-down) | One-way sync, remote → local (pull). | none | Mirrors `sync:down`, kept as alias; adds `--remote-path`. |
+| [`serve`](#serve) | Serve Drive over WebDAV / FUSE / SMB / NFS / SFTP (foreground). | at least one of `webdav`, `fuse` (unix), `smb`, `nfs`, `sftp` — each protocol needs its own feature; `webdav`+`fuse` default on | WebDAV mirrors the official server, run inline instead of as a daemon. FUSE/SMB/NFS/SFTP are new. |
+| [`mount`](#mount) | Mount Drive as a local filesystem via FUSE (Unix). | `fuse` (default on, Unix only) | New — no official equivalent. |
+| [`id-from-path`](#id-from-path) | Print the uuid of the item at a Drive path. | none | New — no official equivalent. |
+| [`path-from-id`](#path-from-id) | Print the Drive path of an item given its uuid. | none | New — no official equivalent. |
+| [`thumbnail generate\|upload\|download`](#thumbnail) | Manage a file's thumbnail. | none | New — the official CLI only generates thumbnails automatically on upload; it has no management commands. |
+| [`thumbnail display`](#thumbnail) | Show a file's thumbnail inline in the terminal. | `termimage` (default off) | New — no official equivalent. |
 
 ## Command reference
 
@@ -530,7 +546,7 @@ Protocol-specific flags are prefixed:
   (default `2022` — port 22 needs root/admin), `--sftp-username` (default
   `internxt`), `--sftp-password` (omit to accept any password), `--sftp-host-key
   <PATH>` (persistent host key; omit and one is generated once under
-  `~/.internxt-cli/sftp_host_key`).
+  `~/.ixr/sftp_host_key`).
 
 ```sh
 ixr serve webdav                                             # http://127.0.0.1:3005
@@ -661,6 +677,5 @@ API endpoints and app constants default to the public Internxt values (see
 variables of the same name (`DRIVE_NEW_API_URL`, `NETWORK_URL`,
 `PAYMENTS_API_URL`, etc).
 
-Credentials are stored AES-encrypted at `~/.internxt-cli/.inxtcli` — same
-location and format as the official CLI, so the two are interchangeable on
-the same machine.
+Credentials are stored AES-encrypted at `~/.ixr/credentials` — its own
+directory, separate from the official CLI's `~/.internxt-cli`.
