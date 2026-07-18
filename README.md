@@ -48,6 +48,25 @@ cargo build --release --no-default-features
 
 Feature flags: `sso` (web-based login), `webdav` (WebDAV server, HTTP) and `fuse` (FUSE mount, Unix) are on by default; `webdav-tls` adds HTTPS. Disable any of them for a smaller binary. The `fuse` feature needs `libfuse3-dev` + `pkg-config` at build time on Unix (it is inert on Windows, so default builds still compile there).
 
+### Docker
+
+The [`Dockerfile`](Dockerfile) builds a multi-arch Alpine image (`amd64`, `386`, `arm64`, `arm/v7`, `arm/v6`) with `sso`, `webdav`, `webdav-tls`, `smb`, `nfs` and `sftp` (no `fuse` — no libfuse in the container). Unlike the official image, it's not wired to WebDAV only: the entrypoint is the `internxt` binary itself, so any subcommand works.
+
+```sh
+docker buildx build \
+  --platform linux/amd64,linux/386,linux/arm64,linux/arm/v7,linux/arm/v6 \
+  -t internxt-cli-rust:latest .
+
+# log in once (persists to the named volume)
+docker run --rm -it -v internxt-cli:/root/.internxt-cli internxt-cli-rust:latest login-legacy
+
+# serve WebDAV on the host network
+docker run --rm -v internxt-cli:/root/.internxt-cli -p 3005:3005 internxt-cli-rust:latest \
+  serve webdav --webdav-host 0.0.0.0
+```
+
+Builds cross-compile (via `cargo zigbuild`) rather than emulate — see the comments at the top of the Dockerfile for the tradeoffs.
+
 ## Commands
 
 All commands accept the global `--json` flag, which prints a single JSON result object and suppresses progress output. IDs are Drive UUIDs. Where a destination/parent folder id is optional, leaving it empty targets your root folder.
