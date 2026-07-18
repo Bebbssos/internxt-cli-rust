@@ -71,12 +71,13 @@ pub async fn upload_file(
     let size = meta.len();
     limit.check(size)?;
 
-    let stem = path
+    let name_path = name.map(Path::new).unwrap_or(path);
+    let stem = name_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("file")
         .to_string();
-    let file_type = path
+    let file_type = name_path
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("")

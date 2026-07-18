@@ -113,7 +113,8 @@ enum Commands {
         /// Read the file body from stdin instead of --file. Requires --name.
         #[arg(long, default_value_t = false)]
         stdin: bool,
-        /// Drive filename (with extension) for the uploaded file. Required with --stdin.
+        /// Drive filename (with extension) for the uploaded file. Required with --stdin;
+        /// with --file, overrides the name/extension taken from the source path.
         #[arg(short, long)]
         name: Option<String>,
         /// Exact byte length of stdin. If given, streams directly; otherwise stdin is
