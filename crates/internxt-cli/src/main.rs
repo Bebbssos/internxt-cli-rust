@@ -24,7 +24,7 @@ mod webdav;
 mod workspaces;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::io::Write;
 
 #[derive(Parser)]
@@ -122,13 +122,13 @@ enum Commands {
         replace: bool,
     },
     /// Upload a file to Internxt Drive.
-    #[command(alias = "upload:file")]
+    #[command(hide = true)]
     UploadFile(UploadFileArgs),
     /// Upload a folder (recursively) to Internxt Drive.
-    #[command(alias = "upload:folder")]
+    #[command(hide = true)]
     UploadFolder(UploadFolderArgs),
     /// Download a file from Internxt Drive by uuid or path.
-    #[command(alias = "download:file")]
+    #[command(hide = true)]
     DownloadFile(DownloadFileArgs),
     /// Log out the current user from the Internxt CLI.
     Logout {
@@ -161,54 +161,55 @@ enum Commands {
         extended: bool,
     },
     /// Create a folder in your Internxt Drive.
-    #[command(alias = "create:folder")]
+    #[command(hide = true)]
     CreateFolder(CreateFolderArgs),
     /// Move a file into a destination folder.
-    #[command(alias = "move:file")]
+    #[command(hide = true)]
     MoveFile(MoveFileArgs),
     /// Move a folder into a destination folder.
-    #[command(alias = "move:folder")]
+    #[command(hide = true)]
     MoveFolder(MoveFolderArgs),
     /// Rename a file.
-    #[command(alias = "rename:file")]
+    #[command(hide = true)]
     RenameFile(RenameFileArgs),
     /// Rename a folder.
-    #[command(alias = "rename:folder")]
+    #[command(hide = true)]
     RenameFolder(RenameFolderArgs),
     /// Move a file to the trash.
-    #[command(alias = "trash:file")]
+    #[command(hide = true)]
     TrashFile(TrashFileArgs),
     /// Move a folder to the trash.
-    #[command(alias = "trash:folder")]
+    #[command(hide = true)]
     TrashFolder(TrashFolderArgs),
     /// List the contents of the trash.
-    #[command(alias = "trash:list")]
+    #[command(hide = true)]
     TrashList(TrashListArgs),
     /// Restore a trashed file into a destination folder.
-    #[command(alias = "trash:restore:file")]
+    #[command(hide = true)]
     TrashRestoreFile(TrashRestoreFileArgs),
     /// Restore a trashed folder into a destination folder.
-    #[command(alias = "trash:restore:folder")]
+    #[command(hide = true)]
     TrashRestoreFolder(TrashRestoreFolderArgs),
     /// Empty the trash permanently. This action cannot be undone.
-    #[command(alias = "trash:clear")]
+    #[command(hide = true)]
     TrashClear(TrashClearArgs),
     /// Permanently delete a file. This action cannot be undone.
-    #[command(alias = "delete:permanently:file")]
+    #[command(hide = true)]
     DeletePermanentlyFile(DeletePermanentlyFileArgs),
     /// Permanently delete a folder. This action cannot be undone.
-    #[command(alias = "delete:permanently:folder")]
+    #[command(hide = true)]
     DeletePermanentlyFolder(DeletePermanentlyFolderArgs),
     /// List the workspaces you belong to.
-    #[command(alias = "workspaces:list")]
+    #[command(hide = true)]
     WorkspacesList(WorkspacesListArgs),
     /// Set the active workspace for subsequent commands.
-    #[command(alias = "workspaces:use")]
+    #[command(hide = true)]
     WorkspacesUse(WorkspacesUseArgs),
     /// Unset the active workspace (operate within your personal drive space).
-    #[command(alias = "workspaces:unset")]
+    #[command(hide = true)]
     WorkspacesUnset,
     /// One-way sync: make a remote Drive folder match a local folder (push).
+    #[command(hide = true)]
     SyncUp {
         /// The local directory to sync from.
         #[arg(short, long)]
@@ -436,6 +437,7 @@ enum Commands {
         limit: upload_limit::UploadLimitArgs,
     },
     /// One-way sync: make a local folder match a remote Drive folder (pull).
+    #[command(hide = true)]
     SyncDown {
         /// The local directory to sync into.
         #[arg(short, long)]
@@ -455,14 +457,14 @@ enum Commands {
         dry_run: bool,
     },
     /// Print the uuid of the Drive file/folder at a given path.
-    #[command(alias = "get-id", alias = "id:from:path")]
+    #[command(alias = "get-id")]
     IdFromPath {
         /// The Drive path (e.g. `/a/b/file.txt` or `/a/b`).
         #[arg(short, long)]
         path: String,
     },
     /// Print the full Drive path of a file/folder given its uuid.
-    #[command(alias = "get-path", alias = "path:from:id")]
+    #[command(alias = "get-path")]
     PathFromId {
         /// The uuid of the file or folder.
         #[arg(short, long)]
@@ -474,16 +476,14 @@ enum Commands {
 
     // ---- space-form topic groups ----
     //
-    // The official CLI is built on oclif, whose command ids are the flat
-    // hyphenated names above (e.g. `upload-file`) with the colon form
-    // (`upload:file`) as a real secondary alias (see each command's
-    // `static readonly aliases` in og's source). oclif resolves space-separated
-    // invocation (`internxt upload file`) by joining argv with `:` and matching
-    // it against that alias — so all three forms work on the real official CLI.
-    // clap has no such joining, so these groups exist purely to make the space
-    // form parse the same way. Only for commands with a genuine og alias —
-    // `login-legacy`/`login-sso`/`sync-up`/`sync-down` have no og equivalent, so
-    // they're flat-only.
+    // These are the primary, documented command surface (`upload file`, `trash
+    // folder`, `workspaces use`, ...). The flat hyphenated variants above (e.g.
+    // `UploadFile`, `TrashFolder`) are kept only as hidden compatibility
+    // aliases — they still parse (matches the official oclif-based CLI, which
+    // accepts both `upload-file` and `upload file`), but are hidden from
+    // `--help` to keep the top-level command list short. Use `help-all` to see
+    // every hidden alias. `login-legacy`/`login-sso`/`id-from-path`/
+    // `path-from-id` have no natural resource group and stay flat-only.
     /// Upload a file or folder (see `upload file` / `upload folder`).
     #[command(subcommand)]
     Upload(UploadCmd),
@@ -508,6 +508,12 @@ enum Commands {
     /// Manage workspaces (see `workspaces list|use|unset`).
     #[command(subcommand)]
     Workspaces(WorkspacesCmd),
+    /// One-way sync (see `sync up` / `sync down`).
+    #[command(subcommand)]
+    Sync(SyncCmd),
+    /// Show every command, including hidden compatibility aliases for the
+    /// flat/hyphenated names (e.g. `upload-file`).
+    HelpAll,
 }
 
 #[derive(clap::Args)]
@@ -827,6 +833,50 @@ enum WorkspacesCmd {
 }
 
 #[derive(Subcommand)]
+enum SyncCmd {
+    /// One-way sync: make a remote Drive folder match a local folder (push).
+    Up {
+        /// The local directory to sync from.
+        #[arg(short, long)]
+        local: String,
+        /// The remote folder uuid to sync into. Leave empty for the root folder.
+        #[arg(short, long)]
+        remote: Option<String>,
+        /// The remote folder path to sync into (e.g. `/a/b`), alternative to --remote.
+        #[arg(long)]
+        remote_path: Option<String>,
+        /// Delete remote files not present locally. Optional value: `trash`
+        /// (default) or `permanent`.
+        #[arg(long, num_args = 0..=1, default_missing_value = "default")]
+        delete: Option<String>,
+        /// Print the planned actions without transferring anything.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[command(flatten)]
+        limit: upload_limit::UploadLimitArgs,
+    },
+    /// One-way sync: make a local folder match a remote Drive folder (pull).
+    Down {
+        /// The local directory to sync into.
+        #[arg(short, long)]
+        local: String,
+        /// The remote folder uuid to sync from. Leave empty for the root folder.
+        #[arg(short, long)]
+        remote: Option<String>,
+        /// The remote folder path to sync from (e.g. `/a/b`), alternative to --remote.
+        #[arg(long)]
+        remote_path: Option<String>,
+        /// Delete local files not present remotely. Optional value: `remove`
+        /// (default; OS trash not yet supported).
+        #[arg(long, num_args = 0..=1, default_missing_value = "default")]
+        delete: Option<String>,
+        /// Print the planned actions without transferring anything.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ThumbnailCmd {
     /// Generate a thumbnail for a Drive file from its own image content.
     Generate {
@@ -910,6 +960,33 @@ fn required_or_prompt(value: Option<String>, flag: &str, prompt_msg: &str) -> Re
             Err(anyhow::anyhow!("No value provided for required flag: {flag}"))
         }
         None => prompt(prompt_msg),
+    }
+}
+
+/// Prints every command in the tree, including ones hidden from normal
+/// `--help` output (the flat/hyphenated compatibility aliases).
+fn print_help_all() {
+    let cmd = Cli::command();
+    println!("All commands, including hidden compatibility aliases ([hidden]):\n");
+    print_subcommands(&cmd, 0);
+}
+
+fn print_subcommands(cmd: &clap::Command, depth: usize) {
+    let indent = "  ".repeat(depth);
+    for sub in cmd.get_subcommands() {
+        if sub.get_name() == "help" {
+            continue;
+        }
+        let hidden = if sub.is_hide_set() { " [hidden]" } else { "" };
+        let aliases: Vec<&str> = sub.get_all_aliases().collect();
+        let alias_str = if aliases.is_empty() {
+            String::new()
+        } else {
+            format!(" (alias: {})", aliases.join(", "))
+        };
+        let about = sub.get_about().map(|s| s.to_string()).unwrap_or_default();
+        println!("{indent}{}{}{} - {}", sub.get_name(), alias_str, hidden, about);
+        print_subcommands(sub, depth + 1);
     }
 }
 
@@ -1526,6 +1603,37 @@ async fn run(cli: Cli) -> Result<()> {
             WorkspacesCmd::Use(args) => do_workspaces_use(args).await?,
             WorkspacesCmd::Unset => workspaces::unset().await?,
         },
+        Commands::Sync(cmd) => match cmd {
+            SyncCmd::Up {
+                local,
+                remote,
+                remote_path,
+                delete,
+                dry_run,
+                limit,
+            } => {
+                sync::sync_up(
+                    &local,
+                    remote.as_deref(),
+                    remote_path.as_deref(),
+                    delete.as_deref(),
+                    dry_run,
+                    &limit,
+                )
+                .await?
+            }
+            SyncCmd::Down {
+                local,
+                remote,
+                remote_path,
+                delete,
+                dry_run,
+            } => {
+                sync::sync_down(&local, remote.as_deref(), remote_path.as_deref(), delete.as_deref(), dry_run)
+                    .await?
+            }
+        },
+        Commands::HelpAll => print_help_all(),
     }
     Ok(())
 }
