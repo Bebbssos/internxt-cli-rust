@@ -62,7 +62,7 @@ sftp = ["dep:russh", "dep:russh-sftp"]
 # `ixr update`: replace the running binary with the latest GitHub release.
 # Pointless (and actively wrong) for package-manager installs, so leave off
 # those builds (AUR, Docker) — only the standalone-binary distribution wants it.
-self-update = ["dep:self_update"]
+self-update = ["dep:self_update", "dep:semver"]
 
 [dependencies]
 internxt-core = { path = "../internxt-core", version = "0.1.0" }
@@ -97,6 +97,9 @@ self_update = { version = "0.41", default-features = false, features = [
   "compression-zip-deflate",
   "rustls",
 ], optional = true }
+# self-update: semver-correct comparison against the GitHub release tag (a
+# prerelease like 0.1.0-rc.1 must never outrank the 0.1.0 it precedes).
+semver = { version = "1", optional = true }
 
 # webdav: axum server + stream <-> AsyncRead adapters + MIME lookup
 axum = { version = "0.8", optional = true }

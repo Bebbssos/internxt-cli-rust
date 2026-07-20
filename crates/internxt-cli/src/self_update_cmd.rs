@@ -40,7 +40,14 @@ fn run_blocking(check: bool, yes: bool) -> Result<()> {
         .ok_or_else(|| anyhow!("no releases found for {owner}/{repo}"))?;
     let latest_version = latest.version.trim_start_matches('v').to_string();
 
-    if latest_version == current {
+    // Semver, not string equality: a prerelease (0.1.0-rc.1) must never
+    // outrank the 0.1.0 it precedes, and this must agree with what
+    // `Update::update()` below decides on its own.
+    let current_semver = semver::Version::parse(current).context("CARGO_PKG_VERSION is not valid semver")?;
+    let latest_semver = semver::Version::parse(&latest_version)
+        .with_context(|| format!("release tag v{latest_version} is not valid semver"))?;
+
+    if latest_semver <= current_semver {
         output::emit(
             &format!("✓ Already up to date (v{current})."),
             json!({ "current": current, "latest": latest_version, "updated": false }),

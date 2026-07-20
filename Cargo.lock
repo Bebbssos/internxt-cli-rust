@@ -2424,6 +2424,7 @@ dependencies = [
  "russh-sftp",
  "rustls-pemfile",
  "self_update",
+ "semver",
  "serde",
  "serde_json",
  "smb-server",
