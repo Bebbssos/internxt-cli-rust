@@ -81,7 +81,7 @@ jobs:
             os: windows-latest
             features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -141,7 +141,7 @@ jobs:
             fi
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ixr-${{ matrix.name }}
           path: out/*
@@ -150,7 +150,7 @@ jobs:
     name: build (x86_64-unknown-freebsd)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # No usable cross-compile sysroot for FreeBSD (unlike the musl targets,
       # zig doesn't bundle one) — build natively inside a real FreeBSD guest
       # instead. vmactions boots the VM under QEMU and mounts this checkout
@@ -175,7 +175,7 @@ jobs:
           tar -C out -czf "ixr-x86_64-unknown-freebsd.tar.gz" ixr
           shasum -a 256 "ixr-x86_64-unknown-freebsd.tar.gz" > "ixr-x86_64-unknown-freebsd.tar.gz.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ixr-x86_64-unknown-freebsd
           path: ixr-x86_64-unknown-freebsd.tar.gz*
@@ -185,11 +185,11 @@ jobs:
     needs: [build, build-freebsd]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
@@ -203,12 +203,12 @@ jobs:
     name: Docker image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: v
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -229,7 +229,7 @@ jobs:
             echo "$tags"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           push: true
@@ -245,12 +245,13 @@ jobs:
     # stable tags (no `-`).
     if: ${{ !contains(github.ref_name, '-') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      # internxt-cli depends on internxt-core by path+version; core must land
-      # (and be indexed) on crates.io before cli's publish dry-run resolves it.
-      - run: cargo publish -p internxt-core --locked --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - run: sleep 30
+      # internxt-core is published from its own repo (internxt-core-rust); this
+      # only publishes the cli crate. Requires internxt-core already on
+      # crates.io AND the dependency in crates/internxt-cli/Cargo.toml switched
+      # from the git dep (used during the 0.x churn) to a crates.io version dep —
+      # cargo refuses to publish a crate that has a git dependency.
       - run: cargo publish -p internxt-cli --locked --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   aur:
@@ -260,12 +261,12 @@ jobs:
     # Same reasoning as crates-io: a test tag shouldn't push a real AUR update.
     if: ${{ !contains(github.ref_name, '-') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: v
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - name: Render PKGBUILD + .SRCINFO
         run: ./pkg/aur/render.sh "${{ steps.v.outputs.version }}"
-      - uses: KSXGitHub/github-actions-deploy-aur@v3
+      - uses: KSXGitHub/github-actions-deploy-aur@v4
         with:
           pkgname: ixr-bin
           pkgbuild: pkg/aur/PKGBUILD
