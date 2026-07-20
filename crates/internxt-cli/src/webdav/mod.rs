@@ -427,7 +427,7 @@ fn self_signed_cert(host: &str) -> Result<(String, String)> {
     }
     let cert = rcgen::generate_simple_self_signed(sans)
         .map_err(|e| anyhow!("failed to generate self-signed cert: {e}"))?;
-    Ok((cert.cert.pem(), cert.key_pair.serialize_pem()))
+    Ok((cert.cert.pem(), cert.signing_key.serialize_pem()))
 }
 
 #[cfg(feature = "webdav-tls")]
