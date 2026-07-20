@@ -12,6 +12,12 @@ on:
     tags:
       - "v*"
 
+# Default GITHUB_TOKEN here is read-only; gh-release (create the release) and
+# docker (push to GHCR) both need write access explicitly granted.
+permissions:
+  contents: write
+  packages: write
+
 env:
   CARGO_TERM_COLOR: always
   ZIG_VERSION: 0.13.0
