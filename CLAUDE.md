@@ -42,7 +42,9 @@ preserve when adding features: engine logic in core, UX/IO in cli.
   decrypted) — hybrid-Kyber workspaces need legacy (password) login instead.
 - **Workspaces are a separate context**, not just a filter: their own bucket, network
   credentials, and mnemonic. Switching workspace changes where drive calls and
-  transfers route.
+  transfers route. `IXR_WORKSPACE_ID` sets the workspace for one invocation only
+  (mirrors og's docker `INXT_WORKSPACE_ID`, but scoped like `IXR_USER` — never
+  persisted, never touches what `workspaces use` left active).
 - **Thumbnails are best-effort**, generated automatically after upload, silenceable via
   an env kill switch, and only visible through the folder-listing endpoint — the
   single-file metadata endpoint doesn't include them.

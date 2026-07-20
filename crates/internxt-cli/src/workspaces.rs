@@ -13,7 +13,7 @@ use internxt_core::models::{Credentials, WorkspaceContext};
 use crate::output;
 
 /// `availableWorkspaces` entries from GET /workspaces/.
-fn available_workspaces(resp: &Value) -> Vec<Value> {
+pub(crate) fn available_workspaces(resp: &Value) -> Vec<Value> {
     resp["availableWorkspaces"]
         .as_array()
         .cloned()
@@ -77,7 +77,7 @@ pub async fn list(extended: bool) -> Result<()> {
 
 /// Build the active-workspace context for `workspace_id`: fetch credentials and
 /// decrypt the workspace mnemonic with the user's keys.
-async fn build_context(
+pub(crate) async fn build_context(
     creds: &Credentials,
     workspaces: &[Value],
     workspace_id: &str,

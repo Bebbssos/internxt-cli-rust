@@ -211,6 +211,16 @@ fn env_no_persist() -> bool {
     std::env::var("IXR_NO_PERSIST").is_ok()
 }
 
+/// `IXR_WORKSPACE_ID`: mirrors og's docker-entrypoint `INXT_WORKSPACE_ID`, but
+/// scoped to this invocation only instead of persisting via `workspaces use`.
+/// Never written to disk.
+fn env_workspace_override() -> Option<String> {
+    std::env::var("IXR_WORKSPACE_ID")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Refreshing credential accessor: resolve the target account (`IXR_USER`, else
 /// the active one), auto-login it via `IXR_PASSWORD`/`IXR_TWOFACTORCODE`/
 /// `IXR_OTPTOKEN` if it's an `IXR_USER` override with no stored session yet, let
@@ -220,6 +230,10 @@ fn env_no_persist() -> bool {
 ///
 /// With `IXR_USER` + `IXR_NO_PERSIST` both set, nothing this call learns or
 /// refreshes is written to disk — the account lives only for this invocation.
+///
+/// If `IXR_WORKSPACE_ID` is set and differs from the persisted workspace (if
+/// any), it overrides `creds.workspace` for this call only — never persisted,
+/// never changes what `workspaces use` left active.
 pub async fn get_auth_details() -> Result<Credentials> {
     let env_override = env_account_override();
     let no_persist = env_override.is_some() && env_no_persist();
@@ -250,12 +264,23 @@ pub async fn get_auth_details() -> Result<Credentials> {
         None => return Err(anyhow!("Account {email} is not logged in.")),
     };
 
-    let (creds, changed) = internxt_core::auth::refresh_credentials(creds, |m| {
+    let (mut creds, changed) = internxt_core::auth::refresh_credentials(creds, |m| {
         crate::output::status(&format!("warning: {m}"))
     })
     .await?;
     if changed && !no_persist {
         save_account_credentials_only(&creds)?;
+    }
+
+    if let Some(workspace_id) = env_workspace_override() {
+        if creds.workspace.as_ref().map(|w| w.id.as_str()) != Some(workspace_id.as_str()) {
+            let resp = internxt_core::api::DriveApi::new()
+                .get_workspaces(&creds.token)
+                .await?;
+            let workspaces = crate::workspaces::available_workspaces(&resp);
+            creds.workspace =
+                Some(crate::workspaces::build_context(&creds, &workspaces, &workspace_id).await?);
+        }
     }
     Ok(creds)
 }
