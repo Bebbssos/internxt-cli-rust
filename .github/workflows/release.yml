@@ -1,0 +1,211 @@
+name: Release
+
+# Tag-triggered: push a `v*` tag to fan out into every distribution channel —
+# GitHub release binaries (also what `ixr update` and cargo-binstall consume),
+# a multi-arch Docker image, crates.io, and the AUR package. Asset naming
+# below (`ixr-<rust-target-triple>.tar.gz`/`.zip`) is load-bearing: it must
+# match `self_update::get_target()` (self_update_cmd.rs) and the
+# `[package.metadata.binstall]` template in crates/internxt-cli/Cargo.toml.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  ZIG_VERSION: 0.13.0
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native glibc builds get the full feature set, including `fuse`
+          # (needs libfuse headers at build time; not worth cross-compiling —
+          # see Dockerfile's CLI_FEATURES comment).
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            apt: libfuse3-dev
+            features: --all-features
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            apt: libfuse3-dev
+            features: --all-features
+          # 32-bit/legacy-ARM Linux: no GitHub-hosted native runner, so cross via
+          # zig (same toolchain as the Dockerfile). No libfuse sysroot for these
+          # targets, so `fuse` is dropped; everything else is pure Rust.
+          - target: i686-unknown-linux-musl
+            os: ubuntu-latest
+            cross: zig
+            features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
+          - target: armv7-unknown-linux-musleabihf
+            os: ubuntu-latest
+            cross: zig
+            features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
+          - target: arm-unknown-linux-musleabihf
+            os: ubuntu-latest
+            cross: zig
+            features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
+          # macOS: fuse dropped too (macFUSE needs a kernel-ext install that
+          # doesn't work unattended in CI); everything else native.
+          - target: x86_64-apple-darwin
+            os: macos-13
+            features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
+          # Windows: `fuse` feature is inert here regardless (fuser is a
+          # cfg(unix) dependency), left off explicitly for clarity. termimage
+          # dropped too (Kitty/iTerm2 graphics protocols don't apply).
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install libfuse (native linux only)
+        if: matrix.apt
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+
+      - name: Install zig + cargo-zigbuild (musl cross only)
+        if: matrix.cross == 'zig'
+        run: |
+          set -eux
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          echo "/opt/zig" >> "$GITHUB_PATH"
+          cargo install cargo-zigbuild --locked
+
+      - name: Build (native)
+        if: matrix.cross != 'zig'
+        run: cargo build --release --locked -p internxt-cli --target ${{ matrix.target }} ${{ matrix.features }}
+
+      - name: Build (zigbuild cross)
+        if: matrix.cross == 'zig'
+        run: cargo zigbuild --release --locked -p internxt-cli --target ${{ matrix.target }} ${{ matrix.features }}
+
+      - name: Package
+        shell: bash
+        run: |
+          set -eux
+          mkdir -p dist out
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            cp "target/${{ matrix.target }}/release/ixr.exe" dist/ixr.exe
+            (cd dist && 7z a "../out/ixr-${{ matrix.target }}.zip" ixr.exe)
+            (cd out && sha256sum "ixr-${{ matrix.target }}.zip" > "ixr-${{ matrix.target }}.zip.sha256")
+          else
+            cp "target/${{ matrix.target }}/release/ixr" dist/ixr
+            tar -C dist -czf "out/ixr-${{ matrix.target }}.tar.gz" ixr
+            (cd out && shasum -a 256 "ixr-${{ matrix.target }}.tar.gz" > "ixr-${{ matrix.target }}.tar.gz.sha256")
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ixr-${{ matrix.target }}
+          path: out/*
+
+  gh-release:
+    name: GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          # Tags with a `-` (e.g. v0.1.0-rc.1) are pre-releases: marked as
+          # such on GitHub, and skipped by crates.io/AUR below — lets you
+          # dry-run the whole binary/docker pipeline on a test tag without
+          # touching those registries.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # `latest` only follows stable tags — a pushed rc/test tag must not
+      # clobber it.
+      - id: tags
+        run: |
+          version="${{ steps.v.outputs.version }}"
+          image="ghcr.io/${{ github.repository_owner }}/ixr"
+          tags="${image}:${version}"
+          if [[ "$version" != *-* ]]; then
+            tags="${tags}"$'\n'"${image}:latest"
+          fi
+          {
+            echo "tags<<EOF"
+            echo "$tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/386,linux/arm64,linux/arm/v7,linux/arm/v6
+          build-args: VERSION=${{ steps.v.outputs.version }}
+          tags: ${{ steps.tags.outputs.tags }}
+
+  crates-io:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    # crates.io has no concept of "unlisted" pre-release cargo-side cleanup —
+    # a test tag would leave a permanent published version. Only run for
+    # stable tags (no `-`).
+    if: ${{ !contains(github.ref_name, '-') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # internxt-cli depends on internxt-core by path+version; core must land
+      # (and be indexed) on crates.io before cli's publish dry-run resolves it.
+      - run: cargo publish -p internxt-core --locked --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - run: sleep 30
+      - run: cargo publish -p internxt-cli --locked --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  aur:
+    name: Publish AUR package
+    needs: gh-release
+    runs-on: ubuntu-latest
+    # Same reasoning as crates-io: a test tag shouldn't push a real AUR update.
+    if: ${{ !contains(github.ref_name, '-') }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Render PKGBUILD + .SRCINFO
+        run: ./pkg/aur/render.sh "${{ steps.v.outputs.version }}"
+      - uses: KSXGitHub/github-actions-deploy-aur@v3
+        with:
+          pkgname: ixr-bin
+          pkgbuild: pkg/aur/PKGBUILD
+          commit_username: ${{ github.actor }}
+          commit_email: ${{ github.actor }}@users.noreply.github.com
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "ixr-bin ${{ steps.v.outputs.version }}"

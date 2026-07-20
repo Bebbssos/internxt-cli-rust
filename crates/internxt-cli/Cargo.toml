@@ -11,8 +11,19 @@ repository = "https://github.com/Bebbssos/internxt-rust"
 name = "ixr"
 path = "src/main.rs"
 
+# `cargo binstall ixr`: fetches the prebuilt archive from the GitHub release
+# instead of compiling. Asset naming must match release.yml's `Package` step
+# and self_update_cmd.rs's target string exactly.
+[package.metadata.binstall]
+pkg-url = "{repo}/releases/download/v{version}/ixr-{target}{archive-suffix}"
+bin-dir = "ixr{binary-ext}"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [features]
-default = ["sso", "webdav", "fuse", "dotenv"]
+default = ["sso", "webdav", "fuse", "dotenv", "self-update"]
 # Load a `.env` file from the current directory (if present) at startup,
 # before argument parsing, so `INXT_*`/`INTERNXT_*` env-backed flags can be
 # set there instead of the real environment. Off disables the dep entirely.
@@ -48,9 +59,13 @@ nfs = ["dep:nfsserve", "dep:async-trait"]
 # auth come from `russh`; the SFTP subsystem from `russh-sftp`. We implement its
 # `Handler` over Drive. All platforms.
 sftp = ["dep:russh", "dep:russh-sftp"]
+# `ixr update`: replace the running binary with the latest GitHub release.
+# Pointless (and actively wrong) for package-manager installs, so leave off
+# those builds (AUR, Docker) — only the standalone-binary distribution wants it.
+self-update = ["dep:self_update"]
 
 [dependencies]
-internxt-core = { path = "../internxt-core" }
+internxt-core = { path = "../internxt-core", version = "0.1.0" }
 
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -71,6 +86,17 @@ filetime = "0.2.29"
 
 # sso: browser launcher + the local axum callback server (the flow logic lives in internxt-core)
 open = { version = "5", optional = true }
+
+# self-update: fetches/downloads GitHub releases and replaces the running binary.
+# rustls (not native-tls) to match core's reqwest backend — keeps musl cross-builds
+# free of an OpenSSL dependency.
+self_update = { version = "0.41", default-features = false, features = [
+  "archive-tar",
+  "archive-zip",
+  "compression-flate2",
+  "compression-zip-deflate",
+  "rustls",
+], optional = true }
 
 # webdav: axum server + stream <-> AsyncRead adapters + MIME lookup
 axum = { version = "0.8", optional = true }

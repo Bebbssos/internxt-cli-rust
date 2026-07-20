@@ -12,6 +12,8 @@ mod paths;
 mod serve;
 #[cfg(feature = "sftp")]
 mod sftp;
+#[cfg(feature = "self-update")]
+mod self_update_cmd;
 #[cfg(feature = "smb")]
 mod smb;
 #[cfg(feature = "sso")]
@@ -523,6 +525,20 @@ enum Commands {
     /// Show every command, including hidden compatibility aliases for the
     /// flat/hyphenated names (e.g. `upload-file`).
     HelpAll,
+    /// Update this binary to the latest GitHub release in place.
+    ///
+    /// Only meaningful for the standalone binary distribution. If `ixr` was
+    /// installed via a package manager (AUR, `cargo install`, Docker), use
+    /// that instead — this will fight it for ownership of the file.
+    #[cfg(feature = "self-update")]
+    Update {
+        /// Only check whether a newer release exists; don't install it.
+        #[arg(long, default_value_t = false)]
+        check: bool,
+        /// Install without prompting for confirmation.
+        #[arg(short = 'y', long, default_value_t = false)]
+        yes: bool,
+    },
 }
 
 #[derive(clap::Args)]
@@ -1722,6 +1738,8 @@ async fn run(cli: Cli) -> Result<()> {
             }
         },
         Commands::HelpAll => print_help_all(),
+        #[cfg(feature = "self-update")]
+        Commands::Update { check, yes } => self_update_cmd::run(check, yes).await?,
     }
     Ok(())
 }

@@ -63,10 +63,14 @@ RUN rustup target add \
 WORKDIR /src
 COPY . .
 
-# fuse/termimage need libfuse/no cross story worth the pain in a headless
-# container image; sso + webdav(-tls) + smb + nfs + sftp are all pure-Rust and
-# cross-compile cleanly. Adjust to taste.
-ARG CLI_FEATURES="sso,webdav,webdav-tls,smb,nfs,sftp"
+# fuse needs libfuse (no cross story worth the pain in a headless container,
+# and a container-local FUSE mount can't be seen from the host anyway); sso
+# needs a real browser to open (headless + legacy/env-var login covers
+# Kyber-hybrid workspaces that SSO can't anyway, see CLAUDE.md); dotenv and
+# self-update are pointless when the image itself is the update/config unit
+# (docker pull / -e / --env-file replace both). webdav(-tls) + smb + nfs +
+# sftp are all pure-Rust and cross-compile cleanly. Adjust to taste.
+ARG CLI_FEATURES="webdav,webdav-tls,smb,nfs,sftp"
 
 RUN set -eux; \
     mkdir -p /out; \
@@ -93,9 +97,19 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 FROM alpine:${ALPINE_VERSION} AS final
 
-# ca-certificates: rustls-platform-verifier (used for HTTPS API/SSO calls)
+# ca-certificates: rustls-platform-verifier (used for HTTPS API calls)
 # validates against the system trust store on Linux.
 RUN apk add --no-cache ca-certificates
+
+# VERSION: set by the release workflow to the tag (e.g. `1.2.3`); left `dev`
+# for local/manual builds. Purely metadata (OCI labels) — not baked into the
+# binary, which gets its version from Cargo.toml at compile time.
+ARG VERSION=dev
+LABEL org.opencontainers.image.title="ixr" \
+      org.opencontainers.image.description="Unofficial Rust port of the Internxt CLI" \
+      org.opencontainers.image.source="https://github.com/Bebbssos/internxt-rust" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.version="${VERSION}"
 
 ARG TARGETARCH
 ARG TARGETVARIANT
