@@ -542,6 +542,31 @@ pub async fn trash_folder(id: Option<&str>, path: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+pub async fn delete_file(id: Option<&str>, path: Option<&str>, permanent: bool) -> Result<()> {
+    if !permanent {
+        return trash_file(id, path).await;
+    }
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
+    let file_id = paths::resolve_opt(&api, &creds.token, creds.root_folder(), id, path, Expect::File)
+        .await?
+        .ok_or_else(|| anyhow!("Provide the file id (--id) or path (--path)"))?;
+    delete_permanently_file(&file_id).await
+}
+
+pub async fn delete_folder(id: Option<&str>, path: Option<&str>, permanent: bool) -> Result<()> {
+    if !permanent {
+        return trash_folder(id, path).await;
+    }
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
+    let folder_id =
+        paths::resolve_opt(&api, &creds.token, creds.root_folder(), id, path, Expect::Folder)
+            .await?
+            .ok_or_else(|| anyhow!("Provide the folder id (--id) or path (--path)"))?;
+    delete_permanently_folder(&folder_id).await
+}
+
 pub async fn trash_list(extended: bool) -> Result<()> {
     let creds = auth::get_auth_details().await?;
     let api = DriveApi::for_credentials(&creds);

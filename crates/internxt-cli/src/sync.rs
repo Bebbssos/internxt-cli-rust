@@ -790,6 +790,49 @@ pub async fn sync_down(
     Ok(())
 }
 
+/// Recursively download a remote Drive folder into a local directory (a subfolder
+/// named after the Drive folder is created inside `directory`). One-shot; reuses
+/// `sync_down`'s tree diff so a re-run only re-fetches changed files.
+pub async fn download_folder(
+    id: Option<&str>,
+    path: Option<&str>,
+    directory: Option<&str>,
+    overwrite: bool,
+) -> Result<()> {
+    let creds = auth::get_auth_details().await?;
+    let api = DriveApi::for_credentials(&creds);
+    let uuid = crate::paths::resolve_opt(
+        &api,
+        &creds.token,
+        creds.root_folder(),
+        id,
+        path,
+        crate::paths::Expect::Folder,
+    )
+    .await?
+    .ok_or_else(|| anyhow!("Provide the folder id (--id) or path (--path)"))?;
+
+    let meta = api.get_folder_meta(&creds.token, &uuid).await?;
+    let name = meta
+        .get("plainName")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid.clone());
+
+    let dir = directory.filter(|d| !d.trim().is_empty()).unwrap_or(".");
+    let dest = Path::new(dir).join(&name);
+    let non_empty = std::fs::read_dir(&dest).map(|mut d| d.next().is_some()).unwrap_or(false);
+    if non_empty && !overwrite {
+        return Err(anyhow!(
+            "Folder already exists, use --overwrite to overwrite: {}",
+            dest.display()
+        ));
+    }
+
+    sync_down(&dest.display().to_string(), Some(&uuid), None, None, false).await
+}
+
 /// Download + decrypt one remote file to `dest` via a temp sibling + atomic rename.
 async fn download_one(
     net: &NetworkApi,

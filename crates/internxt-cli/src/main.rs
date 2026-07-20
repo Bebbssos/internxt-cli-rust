@@ -130,6 +130,9 @@ enum Commands {
     /// Download a file from Internxt Drive by uuid or path.
     #[command(hide = true)]
     DownloadFile(DownloadFileArgs),
+    /// Download a folder (recursively) from Internxt Drive.
+    #[command(hide = true)]
+    DownloadFolder(DownloadFolderArgs),
     /// Log out the current user from the Internxt CLI.
     Logout {
         /// Log out of every stored account instead of just the resolved one.
@@ -199,6 +202,12 @@ enum Commands {
     /// Permanently delete a folder. This action cannot be undone.
     #[command(hide = true)]
     DeletePermanentlyFolder(DeletePermanentlyFolderArgs),
+    /// Move a file to the trash (or permanently delete with --permanent).
+    #[command(hide = true)]
+    DeleteFile(DeleteFileArgs),
+    /// Move a folder to the trash (or permanently delete with --permanent).
+    #[command(hide = true)]
+    DeleteFolder(DeleteFolderArgs),
     /// List the workspaces you belong to.
     #[command(hide = true)]
     WorkspacesList(WorkspacesListArgs),
@@ -487,7 +496,7 @@ enum Commands {
     /// Upload a file or folder (see `upload file` / `upload folder`).
     #[command(subcommand)]
     Upload(UploadCmd),
-    /// Download a file (see `download file`).
+    /// Download a file or folder (see `download file` / `download folder`).
     #[command(subcommand)]
     Download(DownloadCmd),
     /// Create a folder (see `create folder`).
@@ -502,7 +511,7 @@ enum Commands {
     /// Manage the trash (see `trash file|folder|list|clear|restore`).
     #[command(subcommand)]
     Trash(TrashCmd),
-    /// Permanently delete a file or folder (see `delete permanently file|folder`).
+    /// Delete a file or folder (see `delete file|folder`, `delete permanently file|folder`).
     #[command(subcommand)]
     Delete(DeleteCmd),
     /// Manage workspaces (see `workspaces list|use|unset`).
@@ -582,10 +591,29 @@ struct DownloadFileArgs {
     stdout: bool,
 }
 
+#[derive(clap::Args)]
+struct DownloadFolderArgs {
+    /// The uuid of the folder to download.
+    #[arg(short, long)]
+    id: Option<String>,
+    /// The Drive path of the folder (e.g. `/a/b`), alternative to --id.
+    #[arg(short, long)]
+    path: Option<String>,
+    /// Local directory to download into (a subfolder named after the Drive
+    /// folder is created inside it). Defaults to the current directory.
+    #[arg(short, long)]
+    directory: Option<String>,
+    /// Overwrite/merge into an already-existing destination folder.
+    #[arg(short, long, default_value_t = false)]
+    overwrite: bool,
+}
+
 #[derive(Subcommand)]
 enum DownloadCmd {
     /// Download a file from Internxt Drive by uuid or path.
     File(DownloadFileArgs),
+    /// Download a folder (recursively) from Internxt Drive.
+    Folder(DownloadFolderArgs),
 }
 
 #[derive(clap::Args)]
@@ -786,8 +814,38 @@ enum DeletePermanentlyCmd {
     Folder(DeletePermanentlyFolderArgs),
 }
 
+#[derive(clap::Args)]
+struct DeleteFileArgs {
+    /// The id of the file to delete.
+    #[arg(short = 'i', long)]
+    id: Option<String>,
+    /// The Drive path of the file to delete, alternative to --id.
+    #[arg(short, long)]
+    path: Option<String>,
+    /// Delete permanently instead of moving to the trash. This action cannot be undone.
+    #[arg(long, default_value_t = false)]
+    permanent: bool,
+}
+
+#[derive(clap::Args)]
+struct DeleteFolderArgs {
+    /// The id of the folder to delete.
+    #[arg(short = 'i', long)]
+    id: Option<String>,
+    /// The Drive path of the folder to delete, alternative to --id.
+    #[arg(short, long)]
+    path: Option<String>,
+    /// Delete permanently instead of moving to the trash. This action cannot be undone.
+    #[arg(long, default_value_t = false)]
+    permanent: bool,
+}
+
 #[derive(Subcommand)]
 enum DeleteCmd {
+    /// Move a file to the trash (or permanently delete with --permanent).
+    File(DeleteFileArgs),
+    /// Move a folder to the trash (or permanently delete with --permanent).
+    Folder(DeleteFolderArgs),
     /// Permanently delete a file or folder (cannot be undone).
     #[command(subcommand)]
     Permanently(DeletePermanentlyCmd),
@@ -1077,6 +1135,16 @@ async fn do_download_file(args: DownloadFileArgs) -> Result<()> {
     .await
 }
 
+async fn do_download_folder(args: DownloadFolderArgs) -> Result<()> {
+    sync::download_folder(
+        args.id.as_deref(),
+        args.path.as_deref(),
+        args.directory.as_deref(),
+        args.overwrite,
+    )
+    .await
+}
+
 async fn do_create_folder(args: CreateFolderArgs) -> Result<()> {
     let name = required_or_prompt(
         args.name,
@@ -1114,6 +1182,14 @@ async fn do_rename_file(args: RenameFileArgs) -> Result<()> {
 async fn do_rename_folder(args: RenameFolderArgs) -> Result<()> {
     let name = required_or_prompt(args.name, "name", "What is the new name of the folder? ")?;
     drive_ops::rename_folder(args.id.as_deref(), args.path.as_deref(), &name).await
+}
+
+async fn do_delete_file(args: DeleteFileArgs) -> Result<()> {
+    drive_ops::delete_file(args.id.as_deref(), args.path.as_deref(), args.permanent).await
+}
+
+async fn do_delete_folder(args: DeleteFolderArgs) -> Result<()> {
+    drive_ops::delete_folder(args.id.as_deref(), args.path.as_deref(), args.permanent).await
 }
 
 async fn do_trash_file(args: TrashFileArgs) -> Result<()> {
@@ -1243,6 +1319,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::UploadFile(args) => do_upload_file(args).await?,
         Commands::UploadFolder(args) => do_upload_folder(args).await?,
         Commands::DownloadFile(args) => do_download_file(args).await?,
+        Commands::DownloadFolder(args) => do_download_folder(args).await?,
         Commands::Logout { all } => drive_ops::logout(all).await?,
         Commands::Whoami => drive_ops::whoami().await?,
         Commands::Accounts(cmd) => match cmd {
@@ -1266,6 +1343,8 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::TrashClear(args) => do_trash_clear(args).await?,
         Commands::DeletePermanentlyFile(args) => do_delete_permanently_file(args).await?,
         Commands::DeletePermanentlyFolder(args) => do_delete_permanently_folder(args).await?,
+        Commands::DeleteFile(args) => do_delete_file(args).await?,
+        Commands::DeleteFolder(args) => do_delete_folder(args).await?,
         Commands::WorkspacesList(args) => do_workspaces_list(args).await?,
         Commands::WorkspacesUse(args) => do_workspaces_use(args).await?,
         Commands::WorkspacesUnset => workspaces::unset().await?,
@@ -1576,6 +1655,7 @@ async fn run(cli: Cli) -> Result<()> {
         },
         Commands::Download(cmd) => match cmd {
             DownloadCmd::File(args) => do_download_file(args).await?,
+            DownloadCmd::Folder(args) => do_download_folder(args).await?,
         },
         Commands::Create(cmd) => match cmd {
             CreateCmd::Folder(args) => do_create_folder(args).await?,
@@ -1599,6 +1679,8 @@ async fn run(cli: Cli) -> Result<()> {
             },
         },
         Commands::Delete(cmd) => match cmd {
+            DeleteCmd::File(args) => do_delete_file(args).await?,
+            DeleteCmd::Folder(args) => do_delete_folder(args).await?,
             DeleteCmd::Permanently(perm) => match perm {
                 DeletePermanentlyCmd::File(args) => do_delete_permanently_file(args).await?,
                 DeletePermanentlyCmd::Folder(args) => do_delete_permanently_folder(args).await?,
