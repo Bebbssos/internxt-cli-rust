@@ -17,7 +17,7 @@
 # Build all platforms:
 #   docker buildx build \
 #     --platform linux/amd64,linux/386,linux/arm64,linux/arm/v7,linux/arm/v6 \
-#     -t internxt-rust:latest --push .
+#     -t internxt-cli-rust:latest --push .
 
 # Must satisfy the highest rust-version any locked dependency declares, not
 # just our own MSRV (crates/*/Cargo.toml say 1.85, but the smb-server fork
@@ -111,7 +111,7 @@ RUN apk add --no-cache ca-certificates
 ARG VERSION=dev
 LABEL org.opencontainers.image.title="ixr" \
       org.opencontainers.image.description="Unofficial Rust port of the Internxt CLI" \
-      org.opencontainers.image.source="https://github.com/Bebbssos/internxt-rust" \
+      org.opencontainers.image.source="https://github.com/Bebbssos/internxt-cli-rust" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${VERSION}"
 

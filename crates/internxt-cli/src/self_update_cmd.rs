@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::json;
 
 fn owner_and_repo() -> Result<(&'static str, &'static str)> {
-    // e.g. "https://github.com/Bebbssos/internxt-rust" -> ("Bebbssos", "internxt-rust")
+    // e.g. "https://github.com/Bebbssos/internxt-cli-rust" -> ("Bebbssos", "internxt-cli-rust")
     let repo_url = env!("CARGO_PKG_REPOSITORY");
     let path = repo_url
         .trim_end_matches('/')

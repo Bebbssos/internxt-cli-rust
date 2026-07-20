@@ -7,13 +7,13 @@ pkgver=@PKGVER@
 pkgrel=1
 pkgdesc="Unofficial Rust port of the Internxt CLI (faster, single static binary, streaming transfers)"
 arch=('x86_64' 'aarch64')
-url="https://github.com/Bebbssos/internxt-rust"
+url="https://github.com/Bebbssos/internxt-cli-rust"
 license=('MIT')
 provides=('ixr')
 conflicts=('ixr')
 
-source_x86_64=("https://github.com/Bebbssos/internxt-rust/releases/download/v${pkgver}/ixr-x86_64-unknown-linux-gnu.tar.gz")
-source_aarch64=("https://github.com/Bebbssos/internxt-rust/releases/download/v${pkgver}/ixr-aarch64-unknown-linux-gnu.tar.gz")
+source_x86_64=("https://github.com/Bebbssos/internxt-cli-rust/releases/download/v${pkgver}/ixr-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("https://github.com/Bebbssos/internxt-cli-rust/releases/download/v${pkgver}/ixr-aarch64-unknown-linux-gnu.tar.gz")
 sha256sums_x86_64=('@SHA256_X86_64@')
 sha256sums_aarch64=('@SHA256_AARCH64@')
 

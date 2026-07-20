@@ -1,4 +1,4 @@
-# internxt-cli (`ixr`)
+# internxt-cli-rust (`ixr`)
 
 A Rust port of Internxt's official CLI, aiming to be a fast, low-memory, single
 static binary with fully streaming transfers.
@@ -45,7 +45,7 @@ CLI front-end built on top of it.
   local compile.
 - **AUR** (Arch Linux): `ixr-bin`, e.g. `yay -S ixr-bin`.
 - **Prebuilt binary**: download an archive from the
-  [releases page](https://github.com/Bebbssos/internxt-rust/releases) for your
+  [releases page](https://github.com/Bebbssos/internxt-cli-rust/releases) for your
   platform. `ixr update` self-updates in place afterwards (standalone-binary
   installs only — the other methods above manage updates themselves).
 - **From source**: see [Build](#build) below.

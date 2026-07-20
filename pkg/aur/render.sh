@@ -5,7 +5,7 @@
 set -euo pipefail
 
 version="${1:?usage: render.sh <version, e.g. 1.2.3>}"
-repo="Bebbssos/internxt-rust"
+repo="Bebbssos/internxt-cli-rust"
 tag="v${version}"
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
