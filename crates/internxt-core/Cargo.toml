@@ -2,7 +2,7 @@
 name = "internxt-core"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "AGPL-3.0-or-later"
 description = "Internxt Drive engine: auth, crypto, Drive REST + streaming network transfers"
 repository = "https://github.com/Bebbssos/internxt-rust"

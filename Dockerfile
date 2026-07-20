@@ -19,7 +19,11 @@
 #     --platform linux/amd64,linux/386,linux/arm64,linux/arm/v7,linux/arm/v6 \
 #     -t internxt-rust:latest --push .
 
-ARG RUST_VERSION=1.85
+# Must satisfy the highest rust-version any locked dependency declares, not
+# just our own MSRV (crates/*/Cargo.toml say 1.85, but the smb-server fork
+# (crates/internxt-cli/Cargo.toml) currently declares 1.95 — bump this
+# together with that whenever Cargo.lock's transitive deps move).
+ARG RUST_VERSION=1.96
 ARG ZIG_VERSION=0.13.0
 ARG ALPINE_VERSION=3.21
 
@@ -51,9 +55,7 @@ RUN set -eux; \
     rm /tmp/zig.tar.xz
 ENV PATH="/opt/zig:${PATH}"
 
-# Pinned: cargo-zigbuild 0.23+ requires rustc 1.88+, newer than RUST_VERSION
-# (kept at our MSRV). 0.21.8 is the last release supporting rustc 1.85.
-RUN cargo install cargo-zigbuild --locked --version 0.21.8
+RUN cargo install cargo-zigbuild --locked
 
 RUN rustup target add \
       x86_64-unknown-linux-musl \

@@ -18,7 +18,7 @@ env:
 
 jobs:
   build:
-    name: build (${{ matrix.target }})
+    name: build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -27,41 +27,51 @@ jobs:
           # Native glibc builds get the full feature set, including `fuse`
           # (needs libfuse headers at build time; not worth cross-compiling —
           # see Dockerfile's CLI_FEATURES comment).
-          - target: x86_64-unknown-linux-gnu
+          - name: x86_64-unknown-linux-gnu
+            targets: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             apt: libfuse3-dev
             features: --all-features
-          - target: aarch64-unknown-linux-gnu
+          - name: aarch64-unknown-linux-gnu
+            targets: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             apt: libfuse3-dev
             features: --all-features
           # 32-bit/legacy-ARM Linux: no GitHub-hosted native runner, so cross via
           # zig (same toolchain as the Dockerfile). No libfuse sysroot for these
           # targets, so `fuse` is dropped; everything else is pure Rust.
-          - target: i686-unknown-linux-musl
+          - name: i686-unknown-linux-musl
+            targets: i686-unknown-linux-musl
             os: ubuntu-latest
             cross: zig
             features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
-          - target: armv7-unknown-linux-musleabihf
+          - name: armv7-unknown-linux-musleabihf
+            targets: armv7-unknown-linux-musleabihf
             os: ubuntu-latest
             cross: zig
             features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
-          - target: arm-unknown-linux-musleabihf
+          - name: arm-unknown-linux-musleabihf
+            targets: arm-unknown-linux-musleabihf
             os: ubuntu-latest
             cross: zig
             features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
-          # macOS: fuse dropped too (macFUSE needs a kernel-ext install that
-          # doesn't work unattended in CI); everything else native.
-          - target: x86_64-apple-darwin
-            os: macos-13
-            features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
-          - target: aarch64-apple-darwin
+          # macOS: one arm64 runner builds *both* apple targets — Xcode's
+          # clang cross-links x86_64 from an Apple Silicon host natively (no
+          # separate toolchain needed), so this doesn't need its own
+          # macos-13 (Intel) runner. GitHub's macOS runner pool is small and
+          # shared account-wide, so halving the number of macOS jobs is the
+          # main lever for shorter queue times, not build speed itself.
+          # fuse dropped (macFUSE needs a kernel-ext install that doesn't
+          # work unattended in CI); everything else native.
+          - name: macos
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
             os: macos-latest
             features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
           # Windows: `fuse` feature is inert here regardless (fuser is a
           # cfg(unix) dependency), left off explicitly for clarity. termimage
           # dropped too (Kitty/iTerm2 graphics protocols don't apply).
-          - target: x86_64-pc-windows-msvc
+          - name: x86_64-pc-windows-msvc
+            targets: x86_64-pc-windows-msvc
             os: windows-latest
             features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update
     steps:
@@ -69,11 +79,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.targets }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.name }}
 
       - name: Install libfuse (native linux only)
         if: matrix.apt
@@ -91,38 +101,82 @@ jobs:
 
       - name: Build (native)
         if: matrix.cross != 'zig'
-        run: cargo build --release --locked -p internxt-cli --target ${{ matrix.target }} ${{ matrix.features }}
+        shell: bash
+        run: |
+          set -eux
+          IFS=',' read -ra targets <<< "${{ matrix.targets }}"
+          for t in "${targets[@]}"; do
+            cargo build --release --locked -p internxt-cli --target "$t" ${{ matrix.features }}
+          done
 
       - name: Build (zigbuild cross)
         if: matrix.cross == 'zig'
         # i686's blake3 AVX-512 cross-compile gap is worked around in
         # crates/internxt-core/Cargo.toml (forces the `pure` feature for
         # target_arch = "x86"), not here.
-        run: cargo zigbuild --release --locked -p internxt-cli --target ${{ matrix.target }} ${{ matrix.features }}
+        run: cargo zigbuild --release --locked -p internxt-cli --target ${{ matrix.targets }} ${{ matrix.features }}
 
       - name: Package
         shell: bash
         run: |
           set -eux
-          mkdir -p dist out
-          if [[ "${{ matrix.target }}" == *windows* ]]; then
-            cp "target/${{ matrix.target }}/release/ixr.exe" dist/ixr.exe
-            (cd dist && 7z a "../out/ixr-${{ matrix.target }}.zip" ixr.exe)
-            (cd out && sha256sum "ixr-${{ matrix.target }}.zip" > "ixr-${{ matrix.target }}.zip.sha256")
-          else
-            cp "target/${{ matrix.target }}/release/ixr" dist/ixr
-            tar -C dist -czf "out/ixr-${{ matrix.target }}.tar.gz" ixr
-            (cd out && shasum -a 256 "ixr-${{ matrix.target }}.tar.gz" > "ixr-${{ matrix.target }}.tar.gz.sha256")
-          fi
+          mkdir -p out
+          IFS=',' read -ra targets <<< "${{ matrix.targets }}"
+          for t in "${targets[@]}"; do
+            rm -rf dist && mkdir -p dist
+            if [[ "$t" == *windows* ]]; then
+              cp "target/$t/release/ixr.exe" dist/ixr.exe
+              (cd dist && 7z a "../out/ixr-$t.zip" ixr.exe)
+              (cd out && sha256sum "ixr-$t.zip" > "ixr-$t.zip.sha256")
+            else
+              cp "target/$t/release/ixr" dist/ixr
+              tar -C dist -czf "out/ixr-$t.tar.gz" ixr
+              (cd out && shasum -a 256 "ixr-$t.tar.gz" > "ixr-$t.tar.gz.sha256")
+            fi
+          done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ixr-${{ matrix.target }}
+          name: ixr-${{ matrix.name }}
           path: out/*
+
+  build-freebsd:
+    name: build (x86_64-unknown-freebsd)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No usable cross-compile sysroot for FreeBSD (unlike the musl targets,
+      # zig doesn't bundle one) — build natively inside a real FreeBSD guest
+      # instead. vmactions boots the VM under QEMU and mounts this checkout
+      # into it, so files written under the repo path here are visible back
+      # on the ubuntu host once the step completes (no separate copy-back).
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg install -y curl
+            curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+          run: |
+            . "$HOME/.cargo/env"
+            cargo build --release --locked -p internxt-cli \
+              --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
+            mkdir -p out
+            cp target/release/ixr out/ixr
+
+      - name: Package
+        run: |
+          set -eux
+          tar -C out -czf "ixr-x86_64-unknown-freebsd.tar.gz" ixr
+          shasum -a 256 "ixr-x86_64-unknown-freebsd.tar.gz" > "ixr-x86_64-unknown-freebsd.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ixr-x86_64-unknown-freebsd
+          path: ixr-x86_64-unknown-freebsd.tar.gz*
 
   gh-release:
     name: GitHub release
-    needs: build
+    needs: [build, build-freebsd]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

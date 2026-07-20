@@ -2,7 +2,7 @@
 name = "internxt-cli"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95" # smb feature (smb-server fork) needs this; without it, 1.88 (pgp, via internxt-core)
 license = "AGPL-3.0-or-later"
 description = "Unofficial Rust port of the Internxt CLI"
 repository = "https://github.com/Bebbssos/internxt-rust"
