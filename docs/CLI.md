@@ -104,7 +104,7 @@ at the repo root.
 ## Features
 
 Cargo feature flags gate optional command surface, mainly to keep the default
-binary small and dependency-light. `default = ["sso", "webdav", "fuse"]`.
+binary small and dependency-light. `default = ["sso", "webdav", "fuse", "dotenv"]`.
 
 | Feature | Default | Enables | Notes |
 |---|---|---|---|
@@ -116,6 +116,7 @@ binary small and dependency-light. `default = ["sso", "webdav", "fuse"]`.
 | `nfs` | off | `serve nfs` — NFSv3 export | Experimental. All platforms. |
 | `sftp` | off | `serve sftp` — SFTP over SSH | Experimental. All platforms. Pulls in `russh` + `russh-sftp`. |
 | `termimage` | off | `thumbnail display` — inline terminal image rendering | Pulls in `viuer` + `image`. Kitty/iTerm2 graphics protocol, with a Unicode half-block fallback. |
+| `dotenv` | on | Loads a `.env` file from the current directory at startup, before arg/env parsing | Lets `INXT_*`/`IXR_*` env-backed flags live in `.env` instead of the real environment. Never overrides vars already set in the environment. Pulls in `dotenvy`. |
 
 ## Global flags
 
@@ -648,8 +649,8 @@ items by default (`--delete-permanently` for a hard delete).
 `serve`/`mount` run until interrupted — there's no terminal JSON result
 object to speak of; `--json` mainly suppresses the startup/progress banner.
 
-Set `INTERNXT_WEBDAV_DEBUG=1` (or pass `--verbose`) to dump each WebDAV
-request/response, headers included, to stderr.
+Pass `--verbose` to dump each WebDAV request/response, headers included, to
+stderr.
 
 ### `mount`
 
@@ -732,7 +733,7 @@ ixr thumbnail display -p /Photos/cat.jpg          # needs --features termimage
 ```
 
 Automatic thumbnailing (on `upload-file`, `upload-folder`, and any `serve`
-backend write) can be disabled everywhere with `INTERNXT_THUMBNAILS=0`.
+backend write) can be disabled everywhere with `IXR_THUMBNAILS=0`.
 
 ## Upload size limit
 
@@ -743,7 +744,7 @@ unbounded. The cap is resolved in this order (first match wins):
 1. `--no-upload-limit` — disable the check entirely.
 2. `--max-upload-size <SIZE>` — a custom cap (`5GB`, `500M`, `1073741824`, …
    binary units).
-3. `INTERNXT_MAX_UPLOAD_SIZE` env var — universal override for every upload
+3. `IXR_MAX_UPLOAD_SIZE` env var — universal override for every upload
    command. A size string sets a cap; `off`/`none`/`unlimited`/`0` disables it.
 4. Otherwise, your plan's `maxUploadFileSize` (from `/files/limits`; unlimited
    if unset).
@@ -808,7 +809,8 @@ that shouldn't leave a session file behind:
 IXR_USER=ci@example.com IXR_PASSWORD=... IXR_NO_PERSIST=1 ixr upload-file -f ./report.csv
 ```
 
-These are distinct from the existing `INXT_USER`/`INXT_PASSWORD`/
-`INXT_TWOFACTORCODE`/`INXT_OTPTOKEN`, which remain scoped to filling in
-`login`'s/`login-legacy`'s own flags (`-e`/`-p`/`-w`/`-t`) and have no effect
-on any other command.
+These replace the official CLI's `INXT_USER`/`INXT_PASSWORD`/
+`INXT_TWOFACTORCODE`/`INXT_OTPTOKEN` env vars (which only filled in
+`login`'s/`login-legacy`'s own flags) — `ixr` has no equivalent on `login`
+itself; use `IXR_USER`/`IXR_PASSWORD` for the env-driven auto-login case
+instead, on any command.

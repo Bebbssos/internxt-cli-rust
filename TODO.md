@@ -50,7 +50,7 @@ diff upstream against them to find changes worth pulling in.
   (best-effort, never fails the upload). Only image sources (jpg/png/webp/gif/tiff), as in og.
   PDF thumbnails still TODO (og also never generates them — its PDF set is unused).
   Serve backends (WebDAV/FUSE/SMB/NFS/SFTP) also upload thumbnails on write (og only
-  does WebDAV; the rest are our backends). `INTERNXT_THUMBNAILS=0` disables everywhere.
+  does WebDAV; the rest are our backends). `IXR_THUMBNAILS=0` disables everywhere.
 - Retry with backoff on transient failures (`uploadFileWithRetry`, MAX_RETRIES/DELAYS_MS).
 - Upload size limit check (node enforces a per-file limit; see CLI README "40GB").
 - HMAC on upload (sdk now stores hmac on upload — see sdk commit; node inxt-js

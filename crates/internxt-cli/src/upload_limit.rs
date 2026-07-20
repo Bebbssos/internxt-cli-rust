@@ -8,7 +8,7 @@
 //!
 //! 1. `--no-upload-limit` flag        → unlimited
 //! 2. `--max-upload-size <SIZE>` flag → that cap
-//! 3. `INTERNXT_MAX_UPLOAD_SIZE` env  → `off`/`none`/… = unlimited, else a cap
+//! 3. `IXR_MAX_UPLOAD_SIZE` env       → `off`/`none`/… = unlimited, else a cap
 //! 4. otherwise                       → the plan's cap (or unlimited)
 
 use anyhow::{anyhow, Result};
@@ -18,7 +18,7 @@ use internxt_core::models::Credentials;
 /// Universal env var: applies to every upload command. A size string
 /// (`5GB`, `500M`, raw bytes) sets a custom cap; a disable word
 /// (`off`/`none`/`no`/`false`/`unlimited`/`disabled`/`0`) removes the limit.
-pub const ENV_VAR: &str = "INTERNXT_MAX_UPLOAD_SIZE";
+pub const ENV_VAR: &str = "IXR_MAX_UPLOAD_SIZE";
 
 /// The upload-limit CLI flags, shared (via `#[command(flatten)]`) by every
 /// upload command.
@@ -28,7 +28,7 @@ pub struct UploadLimitArgs {
     #[arg(long, default_value_t = false)]
     pub no_upload_limit: bool,
     /// Custom per-file upload size cap, e.g. `5GB`, `500M`, or raw bytes.
-    /// Overrides the plan's cap. Also settable via the INTERNXT_MAX_UPLOAD_SIZE
+    /// Overrides the plan's cap. Also settable via the IXR_MAX_UPLOAD_SIZE
     /// env var (which additionally accepts `off`/`none`/… to disable).
     #[arg(long, value_name = "SIZE")]
     pub max_upload_size: Option<String>,

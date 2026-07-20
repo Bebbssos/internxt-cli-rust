@@ -159,10 +159,9 @@ pub(crate) fn log(msg: &str) {
     crate::serve::log::trace(msg);
 }
 
-/// Whether the wire-level header dump is enabled: the legacy
-/// `INTERNXT_WEBDAV_DEBUG` env var, or the shared `--verbose` flag.
+/// Whether the wire-level header dump is enabled: the shared `--verbose` flag.
 fn debug_enabled() -> bool {
-    std::env::var("INTERNXT_WEBDAV_DEBUG").is_ok() || crate::serve::log::verbose()
+    crate::serve::log::verbose()
 }
 
 /// Run the WebDAV backend until `shutdown` resolves. Credentials, the folder
@@ -261,8 +260,7 @@ async fn dispatch(State(ctx): State<Arc<Ctx>>, req: Request) -> Response {
     log(&format!("[{}] {}", method.as_str(), req.uri().path()));
 
     // Opt-in wire-level debug: dump the request line + all headers so we can see
-    // exactly what a client (e.g. WinSCP) sends. Enable with INTERNXT_WEBDAV_DEBUG=1
-    // or --verbose.
+    // exactly what a client (e.g. WinSCP) sends. Enable with --verbose.
     if debug_enabled() {
         eprintln!("  >> {} {} {:?}", method.as_str(), req.uri(), req.version());
         for (name, value) in req.headers() {

@@ -38,10 +38,10 @@ pub fn desktop_header() -> String {
 }
 
 /// Whether image thumbnail generation/upload is enabled (default on). Set
-/// `INTERNXT_THUMBNAILS` to `0`/`false`/`no`/`off` (case-insensitive) to turn it
+/// `IXR_THUMBNAILS` to `0`/`false`/`no`/`off` (case-insensitive) to turn it
 /// off across every upload path (upload-file/-folder and the serve backends).
 pub fn thumbnails_enabled() -> bool {
-    match std::env::var("INTERNXT_THUMBNAILS") {
+    match std::env::var("IXR_THUMBNAILS") {
         Ok(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
             "0" | "false" | "no" | "off"
@@ -60,8 +60,8 @@ static CLIENT_VERSION: OnceLock<String> = OnceLock::new();
 /// use. The cli front-end sets `internxt-cli-rust` + its own crate version; a
 /// GUI or other embedder picks its own. Only the first call per process takes
 /// effect. Core reads no env here — any ad-hoc env override is the front-end's
-/// concern (the cli reads `INTERNXT_CLIENT` / `INTERNXT_VERSION` and passes them
-/// in), keeping core free of environment/config policy.
+/// concern (the cli reads `IXR_INTERNXT_CLIENT` / `IXR_INTERNXT_VERSION` and
+/// passes them in), keeping core free of environment/config policy.
 pub fn set_client_identity(name: impl Into<String>, version: impl Into<String>) {
     let _ = CLIENT_NAME.set(name.into());
     let _ = CLIENT_VERSION.set(version.into());

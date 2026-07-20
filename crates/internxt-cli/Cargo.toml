@@ -12,7 +12,11 @@ name = "ixr"
 path = "src/main.rs"
 
 [features]
-default = ["sso", "webdav", "fuse"]
+default = ["sso", "webdav", "fuse", "dotenv"]
+# Load a `.env` file from the current directory (if present) at startup,
+# before argument parsing, so `INXT_*`/`INTERNXT_*` env-backed flags can be
+# set there instead of the real environment. Off disables the dep entirely.
+dotenv = ["dep:dotenvy"]
 # In-terminal thumbnail display (`internxt thumbnail display`). Off by default.
 # `viuer` renders via the Kitty / iTerm2 graphics protocols with a Unicode
 # half-block fallback (all pure Rust — no Sixel, so no libsixel C dependency).
@@ -57,6 +61,7 @@ hex = "0.4"
 base64 = "0.22"
 dirs = "6"
 rand = "0.10"
+dotenvy = { version = "0.15", optional = true }
 rpassword = "7"
 futures-util = "0.3"
 bytes = "1"

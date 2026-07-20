@@ -64,15 +64,15 @@ enum Commands {
         /// SSO: port for the local callback server (default: a random free port).
         #[arg(long, env = "INXT_LOGIN_SERVER_PORT")]
         port: Option<u16>,
-        #[arg(short, long, env = "INXT_USER")]
+        #[arg(short, long)]
         email: Option<String>,
-        #[arg(short, long, env = "INXT_PASSWORD")]
+        #[arg(short, long)]
         password: Option<String>,
         /// The two-factor auth code (TOTP).
-        #[arg(short = 'w', long, env = "INXT_TWOFACTORCODE")]
+        #[arg(short = 'w', long)]
         twofactor: Option<String>,
         /// The TOTP secret token, used to generate a code. Takes priority over --twofactor.
-        #[arg(short = 't', long, env = "INXT_OTPTOKEN")]
+        #[arg(short = 't', long)]
         twofactortoken: Option<String>,
         /// If already logged in as a different account, add this one alongside it
         /// (and switch to it) instead of prompting.
@@ -85,15 +85,15 @@ enum Commands {
     },
     /// Log in with email and password (legacy flow).
     LoginLegacy {
-        #[arg(short, long, env = "INXT_USER")]
+        #[arg(short, long)]
         email: Option<String>,
-        #[arg(short, long, env = "INXT_PASSWORD")]
+        #[arg(short, long)]
         password: Option<String>,
         /// The two-factor auth code (TOTP).
-        #[arg(short = 'w', long, env = "INXT_TWOFACTORCODE")]
+        #[arg(short = 'w', long)]
         twofactor: Option<String>,
         /// The TOTP secret token, used to generate a code. Takes priority over --twofactor.
-        #[arg(short = 't', long, env = "INXT_OTPTOKEN")]
+        #[arg(short = 't', long)]
         twofactortoken: Option<String>,
         /// If already logged in as a different account, add this one alongside it
         /// (and switch to it) instead of prompting.
@@ -1170,12 +1170,18 @@ async fn do_workspaces_use(args: WorkspacesUseArgs) -> Result<()> {
 
 #[tokio::main]
 async fn main() {
+    // Load .env (if present) before parsing args/env, so INXT_*/INTERNXT_*
+    // vars can live there instead of the real environment. Never overrides
+    // vars already set in the environment.
+    #[cfg(feature = "dotenv")]
+    let _ = dotenvy::dotenv();
+
     // Identify as this front-end, not the official node CLI. Env
-    // (INTERNXT_CLIENT / INTERNXT_VERSION) overrides for ad-hoc use — env policy
-    // is the front-end's concern, so core stays env-free.
+    // (IXR_INTERNXT_CLIENT / IXR_INTERNXT_VERSION) overrides for ad-hoc use —
+    // env policy is the front-end's concern, so core stays env-free.
     internxt_core::config::set_client_identity(
-        std::env::var("INTERNXT_CLIENT").unwrap_or_else(|_| "internxt-cli-rust".to_string()),
-        std::env::var("INTERNXT_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string()),
+        std::env::var("IXR_INTERNXT_CLIENT").unwrap_or_else(|_| "internxt-cli-rust".to_string()),
+        std::env::var("IXR_INTERNXT_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string()),
     );
     let cli = Cli::parse();
     output::set_json(cli.json);
