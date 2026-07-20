@@ -57,3 +57,15 @@ bip39 = "2"
 pgp = "0.19"
 safe_pqc_kyber = { version = "0.6", default-features = false, features = ["kyber512", "std"] }
 blake3 = "1"
+
+# blake3's build.rs probes `-mavx512f`/`-mavx512vl` with is_flag_supported(),
+# which zig/clang accepts syntactically for i686 even though the actual
+# AVX-512 intrinsics don't codegen in 32-bit mode ("requires target feature
+# evex512"/"avx512f") — a real upstream cross-compile gap, not a flag we can
+# tune around. `pure` (Rust-only, no C/asm; bit-identical output — it's a
+# different implementation of the same algorithm, not a different one) is
+# the only lever blake3 1.8.5's build.rs actually reads for this (the
+# `no_avx512` feature is declared in its Cargo.toml but never checked in
+# build.rs). Scoped to x86-32 only — x86_64/aarch64/arm keep the fast path.
+[target.'cfg(target_arch = "x86")'.dependencies]
+blake3 = { version = "1", features = ["pure"] }

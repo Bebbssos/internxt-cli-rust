@@ -51,7 +51,9 @@ RUN set -eux; \
     rm /tmp/zig.tar.xz
 ENV PATH="/opt/zig:${PATH}"
 
-RUN cargo install cargo-zigbuild --locked
+# Pinned: cargo-zigbuild 0.23+ requires rustc 1.88+, newer than RUST_VERSION
+# (kept at our MSRV). 0.21.8 is the last release supporting rustc 1.85.
+RUN cargo install cargo-zigbuild --locked --version 0.21.8
 
 RUN rustup target add \
       x86_64-unknown-linux-musl \

@@ -95,13 +95,9 @@ jobs:
 
       - name: Build (zigbuild cross)
         if: matrix.cross == 'zig'
-        # blake3's build.rs picks AVX-512 C sources based on the *host*
-        # CPU (has AVX-512 on GH runners) rather than the target, which
-        # breaks the i686 (32-bit) build with "requires target feature
-        # evex512". Force it off for that target only; the pure-Rust
-        # fallback blake3 uses instead is bit-identical, just slower.
-        env:
-          CFLAGS_i686_unknown_linux_musl: -mno-avx512f -mno-avx512vl
+        # i686's blake3 AVX-512 cross-compile gap is worked around in
+        # crates/internxt-core/Cargo.toml (forces the `pure` feature for
+        # target_arch = "x86"), not here.
         run: cargo zigbuild --release --locked -p internxt-cli --target ${{ matrix.target }} ${{ matrix.features }}
 
       - name: Package
