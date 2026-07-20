@@ -27,8 +27,18 @@ empty (0-byte) files outright (`HTTP 402`).
 
 ## Install
 
-Not yet published to a package registry, AUR, or similar — install from source
-for now (see [Build](#build) below).
+- **Docker**: `docker run ghcr.io/bebbssos/ixr <command>` — see
+  [docs/DOCKER.md](DOCKER.md) for compose examples (serving WebDAV/SMB/SFTP at
+  once, one-shot upload containers, etc).
+- **Cargo**: `cargo install internxt-cli` (crate name; the installed binary is
+  still `ixr`), or `cargo binstall internxt-cli` for a prebuilt binary with no
+  local compile.
+- **AUR** (Arch Linux): `ixr-bin`, e.g. `yay -S ixr-bin`.
+- **Prebuilt binary**: download an archive from the
+  [releases page](https://github.com/Bebbssos/internxt-rust/releases) for your
+  platform. `ixr update` self-updates in place afterwards (standalone-binary
+  installs only — the other methods above manage updates themselves).
+- **From source**: see [Build](#build) below.
 
 ## Build
 
@@ -52,7 +62,8 @@ See [Features](#features) below for what each `--features`/`--no-default-feature
 flag enables and disables.
 
 A multi-arch Docker image is available — see the [`Dockerfile`](../Dockerfile)
-at the repo root.
+at the repo root for how it's built, or [docs/DOCKER.md](DOCKER.md) for usage
+examples.
 
 ## Features
 

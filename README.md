@@ -26,7 +26,7 @@ command that can expose your Drive over WebDAV, FUSE, SMB, NFS and SFTP —
 several at once if you like — beyond just the official CLI's WebDAV-only
 server.
 
-Docs: [docs/CLI.md](docs/CLI.md)
+Docs: [docs/CLI.md](docs/CLI.md) · [docs/DOCKER.md](docs/DOCKER.md)
 
 ### `internxt-core`
 
