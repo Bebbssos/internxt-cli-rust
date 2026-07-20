@@ -40,7 +40,7 @@ struct Cli {
         short = 'x',
         long = "non-interactive",
         global = true,
-        env = "INXT_NONINTERACTIVE",
+        env = "IXR_NONINTERACTIVE",
         default_value_t = false
     )]
     non_interactive: bool,
@@ -54,15 +54,15 @@ struct Cli {
 enum Commands {
     /// Log in to your Internxt account.
     ///
-    /// Uses the web-based SSO flow when built with the `sso` feature (default),
-    /// otherwise falls back to the legacy email/password flow. Use `login-sso`
-    /// or `login-legacy` to force a specific flow.
+    /// Alias for `login-sso` when built with the `sso` feature (default, matching
+    /// the official CLI's SSO-only `login`), otherwise an alias for `login-legacy`.
+    /// Use `login-sso` or `login-legacy` directly to force a specific flow.
     Login {
         /// SSO: address the browser uses to reach this machine (default 127.0.0.1).
-        #[arg(long, env = "INXT_LOGIN_SERVER_HOST")]
+        #[arg(long, env = "IXR_LOGIN_SERVER_HOST")]
         host: Option<String>,
         /// SSO: port for the local callback server (default: a random free port).
-        #[arg(long, env = "INXT_LOGIN_SERVER_PORT")]
+        #[arg(long, env = "IXR_LOGIN_SERVER_PORT")]
         port: Option<u16>,
         #[arg(short, long)]
         email: Option<String>,
@@ -107,10 +107,10 @@ enum Commands {
     /// Log in via the web-based SSO flow (requires the `sso` feature).
     LoginSso {
         /// Address the browser uses to reach this machine (default 127.0.0.1).
-        #[arg(long, env = "INXT_LOGIN_SERVER_HOST")]
+        #[arg(long, env = "IXR_LOGIN_SERVER_HOST")]
         host: Option<String>,
         /// Port for the local callback server (default: a random free port).
-        #[arg(long, env = "INXT_LOGIN_SERVER_PORT")]
+        #[arg(long, env = "IXR_LOGIN_SERVER_PORT")]
         port: Option<u16>,
         /// If already logged in as a different account, add this one alongside it
         /// (and switch to it) instead of prompting.
@@ -1246,9 +1246,9 @@ async fn do_workspaces_use(args: WorkspacesUseArgs) -> Result<()> {
 
 #[tokio::main]
 async fn main() {
-    // Load .env (if present) before parsing args/env, so INXT_*/INTERNXT_*
-    // vars can live there instead of the real environment. Never overrides
-    // vars already set in the environment.
+    // Load .env (if present) before parsing args/env, so IXR_* vars can live
+    // there instead of the real environment. Never overrides vars already set
+    // in the environment.
     #[cfg(feature = "dotenv")]
     let _ = dotenvy::dotenv();
 
