@@ -112,7 +112,7 @@ ARG VERSION=dev
 LABEL org.opencontainers.image.title="ixr" \
       org.opencontainers.image.description="Unofficial Rust port of the Internxt CLI" \
       org.opencontainers.image.source="https://github.com/Bebbssos/internxt-rust" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${VERSION}"
 
 ARG TARGETARCH

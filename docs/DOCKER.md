@@ -18,7 +18,7 @@ subcommand works: `docker run ghcr.io/bebbssos/ixr <command>`.
 except `sso` (no browser in a headless container; use `IXR_USER`/
 `IXR_PASSWORD` below instead), `fuse` (a container-local FUSE mount can't be
 seen from the host, and there's no musl cross story for `libfuse` — see
-[docs/CLI.md § mount](CLI.md#mount) if you want a real mount, run `ixr mount`
+[README § mount](../README.md#mount) if you want a real mount, run `ixr mount`
 on the host instead), `dotenv` and `self-update` (the image itself is the
 update/config unit — `docker pull` and `-e`/`--env-file` cover both).
 
@@ -26,7 +26,7 @@ update/config unit — `docker pull` and `-e`/`--env-file` cover both).
 
 `serve`'s flags have no env fallback of their own, but credential resolution
 is shared with every other command (see
-[docs/CLI.md § Multiple accounts](CLI.md#multiple-accounts)): set `IXR_USER` +
+[README § Multiple accounts](../README.md#multiple-accounts)): set `IXR_USER` +
 `IXR_PASSWORD` and the container logs in on first start and reuses the stored
 session afterwards, as long as `~/.ixr` (i.e. `/root/.ixr` in the container) is
 a persistent volume — without one, every restart re-authenticates from
@@ -49,7 +49,7 @@ Compose's own `.env` handling, resolved before the container ever starts.
 ## docker-compose: serving WebDAV, SMB and SFTP at once
 
 One container, three protocols, sharing the credentials volume, folder cache
-and upload throttle (see [docs/CLI.md § serve](CLI.md#serve)).
+and upload throttle (see [README § serve](../README.md#serve)).
 
 `.env` (next to `docker-compose.yml`, keep out of version control):
 
@@ -112,7 +112,7 @@ docker compose logs -f     # --verbose above logs every request across all three
 **NFS**: add `nfs` to the protocol list and `--nfs-host=0.0.0.0` to `command`,
 and expose its port — but NFSv3 clients (`mount -t nfs`) generally need the
 same unprivileged port passed explicitly (`-o port=12049,mountport=12049`, see
-[docs/CLI.md § serve](CLI.md#serve)) and some NFS clients are picky about
+[README § serve](../README.md#serve)) and some NFS clients are picky about
 mounting from outside the container's network namespace at all. WebDAV/SMB/
 SFTP are the better fit for a container; reach for `ixr mount` (FUSE, host
 install) if you want a real local mount instead.

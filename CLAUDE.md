@@ -11,7 +11,7 @@ Commands: login (legacy + SSO), file/folder transfers, drive management, thumbna
 workspaces, one-way sync, multi-protocol **serve** (WebDAV/FUSE/SMB/NFS/SFTP) + `mount`
 shortcut. Global `--json`. Full list: `internxt --help`.
 
-Roadmap: [TODO.md](TODO.md). Library-reuse overview: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Roadmap: [TODO.md](TODO.md). Engine crate: [internxt-core](https://github.com/Bebbssos/internxt-core-rust).
 
 ## Porting source — `./og`
 
@@ -22,12 +22,18 @@ guess at endpoints, payloads, or crypto.
 
 ## Architecture
 
-Cargo **workspace**, two crates:
+Two crates in **two repos**:
 
 - **`internxt-core`** — protocol-agnostic Drive engine (crypto, API, transfers). No
   terminal/clap/browser deps, so it works equally under the CLI, WebDAV/FUSE, or a
-  future GUI.
-- **`internxt-cli`** — front-end: clap dispatch, transfer UX, serve backends.
+  future GUI. **Lives in its own repo now**:
+  [github.com/Bebbssos/internxt-core-rust](https://github.com/Bebbssos/internxt-core-rust),
+  published to crates.io. This repo depends on it as a library (git dep during the 0.x
+  churn — see `crates/internxt-cli/Cargo.toml` — swapping to a crates.io version dep
+  once the surface settles). To change engine logic you edit the core repo, cut a
+  release, then bump the dep here.
+- **`internxt-cli`** — this repo (a one-crate workspace, binary `ixr`): clap dispatch,
+  transfer UX, serve backends.
 
 Core never touches stdio, prompts, or the filesystem for credentials — it exposes
 progress, 2FA, browser-open, and refresh-warning hooks as injected closures/traits, and
@@ -86,4 +92,5 @@ duplicated here.
 - Match the node CLI's observable behaviour so the two stay interchangeable. When
   unsure, read `og/` and mirror it.
 - Keep transfers streaming — never read a whole file into memory.
-- Endpoints/constants live in `crates/internxt-core/src/config.rs`, env-overridable.
+- Endpoints/constants live in the `internxt-core` crate's `config` module (its own
+  repo), env-overridable.

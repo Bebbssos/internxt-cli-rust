@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/internxt-core", "crates/internxt-cli"]
+members = ["crates/internxt-cli"]
 
 [profile.release]
 opt-level = 3

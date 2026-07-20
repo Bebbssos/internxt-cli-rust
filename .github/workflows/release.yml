@@ -117,8 +117,8 @@ jobs:
 
       - name: Build (zigbuild cross)
         if: matrix.cross == 'zig'
-        # i686's blake3 AVX-512 cross-compile gap is worked around in
-        # crates/internxt-core/Cargo.toml (forces the `pure` feature for
+        # i686's blake3 AVX-512 cross-compile gap is worked around in the
+        # internxt-core crate's Cargo.toml (forces the `pure` feature for
         # target_arch = "x86"), not here.
         run: cargo zigbuild --release --locked -p internxt-cli --target ${{ matrix.targets }} ${{ matrix.features }}
 
