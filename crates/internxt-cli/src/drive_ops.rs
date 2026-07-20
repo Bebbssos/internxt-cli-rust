@@ -89,7 +89,28 @@ pub(crate) fn print_table(headers: &[&str], rows: &[Vec<String>]) {
 
 // ---- auth-adjacent ----
 
-pub async fn logout() -> Result<()> {
+pub async fn logout(all: bool) -> Result<()> {
+    if all {
+        let creds_list = auth::all_credentials()?;
+        if creds_list.is_empty() {
+            output::emit(
+                "No user is currently logged in.",
+                json!({ "success": false, "message": "No user is currently logged in." }),
+            );
+            return Ok(());
+        }
+        // Best effort: invalidate every session server-side, then clear all local accounts.
+        for creds in &creds_list {
+            let _ = DriveApi::for_credentials(creds).logout(&creds.token).await;
+        }
+        let emails: Vec<&str> = creds_list.iter().map(|c| c.user.email.as_str()).collect();
+        auth::clear_all_accounts()?;
+        output::emit(
+            "✓ Logged out of all accounts.",
+            json!({ "success": true, "message": "Logged out of all accounts.", "accounts": emails }),
+        );
+        return Ok(());
+    }
     let creds = match auth::read_credentials() {
         Ok(c) => c,
         Err(_) => {
@@ -100,12 +121,9 @@ pub async fn logout() -> Result<()> {
             return Ok(());
         }
     };
-    // Best effort: invalidate server-side, then always clear local credentials.
+    // Best effort: invalidate server-side, then always clear the local account.
     let _ = DriveApi::for_credentials(&creds).logout(&creds.token).await;
-    let path = auth::credentials_file();
-    if path.exists() {
-        std::fs::remove_file(&path)?;
-    }
+    auth::remove_account(&creds.user.email)?;
     output::emit(
         "✓ User logged out successfully.",
         json!({ "success": true, "message": "User logged out successfully." }),
@@ -124,6 +142,7 @@ pub async fn whoami() -> Result<()> {
             return Ok(());
         }
     };
+    let email = creds.user.email.clone();
     match internxt_core::auth::refresh_credentials(creds, |m| {
         output::status(&format!("warning: {m}"))
     })
@@ -131,7 +150,7 @@ pub async fn whoami() -> Result<()> {
     {
         Ok((creds, changed)) => {
             if changed {
-                let _ = auth::save_credentials(&creds);
+                let _ = auth::save_account_credentials_only(&creds);
             }
             let message = format!("You are logged in as: {}.", creds.user.email);
             output::emit(
@@ -142,10 +161,7 @@ pub async fn whoami() -> Result<()> {
         Err(_) => {
             // Session is expired or otherwise invalid: clear it, matching og's
             // whoami behaviour of logging the user out on a dead session.
-            let path = auth::credentials_file();
-            if path.exists() {
-                let _ = std::fs::remove_file(&path);
-            }
+            let _ = auth::remove_account(&email);
             let message = "Your session has expired. You have been logged out. Please log in again.";
             output::emit(message, json!({ "success": false, "message": message }));
         }

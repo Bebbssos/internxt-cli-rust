@@ -1,3 +1,4 @@
+mod accounts;
 mod auth;
 mod commands;
 mod drive_ops;
@@ -73,6 +74,14 @@ enum Commands {
         /// The TOTP secret token, used to generate a code. Takes priority over --twofactor.
         #[arg(short = 't', long, env = "INXT_OTPTOKEN")]
         twofactortoken: Option<String>,
+        /// If already logged in as a different account, add this one alongside it
+        /// (and switch to it) instead of prompting.
+        #[arg(long, conflicts_with = "replace", default_value_t = false)]
+        add: bool,
+        /// If already logged in as a different account, log it out and replace it
+        /// with this one instead of prompting.
+        #[arg(long, conflicts_with = "add", default_value_t = false)]
+        replace: bool,
     },
     /// Log in with email and password (legacy flow).
     LoginLegacy {
@@ -86,6 +95,14 @@ enum Commands {
         /// The TOTP secret token, used to generate a code. Takes priority over --twofactor.
         #[arg(short = 't', long, env = "INXT_OTPTOKEN")]
         twofactortoken: Option<String>,
+        /// If already logged in as a different account, add this one alongside it
+        /// (and switch to it) instead of prompting.
+        #[arg(long, conflicts_with = "replace", default_value_t = false)]
+        add: bool,
+        /// If already logged in as a different account, log it out and replace it
+        /// with this one instead of prompting.
+        #[arg(long, conflicts_with = "add", default_value_t = false)]
+        replace: bool,
     },
     /// Log in via the web-based SSO flow (requires the `sso` feature).
     LoginSso {
@@ -95,6 +112,14 @@ enum Commands {
         /// Port for the local callback server (default: a random free port).
         #[arg(long, env = "INXT_LOGIN_SERVER_PORT")]
         port: Option<u16>,
+        /// If already logged in as a different account, add this one alongside it
+        /// (and switch to it) instead of prompting.
+        #[arg(long, conflicts_with = "replace", default_value_t = false)]
+        add: bool,
+        /// If already logged in as a different account, log it out and replace it
+        /// with this one instead of prompting.
+        #[arg(long, conflicts_with = "add", default_value_t = false)]
+        replace: bool,
     },
     /// Upload a file to Internxt Drive.
     #[command(alias = "upload:file")]
@@ -106,9 +131,19 @@ enum Commands {
     #[command(alias = "download:file")]
     DownloadFile(DownloadFileArgs),
     /// Log out the current user from the Internxt CLI.
-    Logout,
+    Logout {
+        /// Log out of every stored account instead of just the resolved one.
+        #[arg(long, default_value_t = false)]
+        all: bool,
+    },
     /// Display the current user logged into the Internxt CLI.
     Whoami,
+    /// Manage logged-in accounts (see `accounts list` / `accounts switch`).
+    ///
+    /// New — no official equivalent (the official CLI supports one account at a
+    /// time).
+    #[command(subcommand)]
+    Accounts(AccountsCmd),
     /// Show account usage: plan, used space (drive/backups), space limit and
     /// per-file upload limit.
     #[command(alias = "account", alias = "account-info")]
@@ -770,6 +805,18 @@ struct WorkspacesUseArgs {
 }
 
 #[derive(Subcommand)]
+enum AccountsCmd {
+    /// List every Internxt account currently logged in on this machine.
+    List,
+    /// Switch the active account for subsequent commands.
+    Switch {
+        /// Email of the account to switch to. Omit to pick interactively.
+        #[arg(short, long)]
+        email: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum WorkspacesCmd {
     /// List the workspaces you belong to.
     List(WorkspacesListArgs),
@@ -871,6 +918,8 @@ async fn run_legacy_login(
     password: Option<String>,
     twofactor: Option<String>,
     twofactortoken: Option<String>,
+    add: bool,
+    replace: bool,
 ) -> Result<()> {
     let email = match email {
         Some(e) => e,
@@ -895,7 +944,7 @@ async fn run_legacy_login(
         twofactortoken.as_deref(),
     )
     .await?;
-    auth::save_credentials(&creds)?;
+    auth::save_login_credentials(&creds, add, replace)?;
     let message = format!("Successfully logged in to: {}", creds.user.email);
     output::emit(
         &format!("✓ {message}"),
@@ -905,9 +954,9 @@ async fn run_legacy_login(
 }
 
 #[cfg(feature = "sso")]
-async fn run_sso_login(host: Option<String>, port: Option<u16>) -> Result<()> {
+async fn run_sso_login(host: Option<String>, port: Option<u16>, add: bool, replace: bool) -> Result<()> {
     let creds = sso::login(host.as_deref(), port).await?;
-    auth::save_credentials(&creds)?;
+    auth::save_login_credentials(&creds, add, replace)?;
     let message = format!("Successfully logged in to: {}", creds.user.email);
     output::emit(
         &format!("✓ {message}"),
@@ -1073,16 +1122,18 @@ async fn run(cli: Cli) -> Result<()> {
             password,
             twofactor,
             twofactortoken,
+            add,
+            replace,
         } => {
             #[cfg(feature = "sso")]
             {
                 let _ = (email, password, twofactor, twofactortoken);
-                run_sso_login(host, port).await?;
+                run_sso_login(host, port, add, replace).await?;
             }
             #[cfg(not(feature = "sso"))]
             {
                 let _ = (host, port);
-                run_legacy_login(email, password, twofactor, twofactortoken).await?;
+                run_legacy_login(email, password, twofactor, twofactortoken, add, replace).await?;
             }
         }
         Commands::LoginLegacy {
@@ -1090,15 +1141,17 @@ async fn run(cli: Cli) -> Result<()> {
             password,
             twofactor,
             twofactortoken,
+            add,
+            replace,
         } => {
-            run_legacy_login(email, password, twofactor, twofactortoken).await?;
+            run_legacy_login(email, password, twofactor, twofactortoken, add, replace).await?;
         }
-        Commands::LoginSso { host, port } => {
+        Commands::LoginSso { host, port, add, replace } => {
             #[cfg(feature = "sso")]
-            run_sso_login(host, port).await?;
+            run_sso_login(host, port, add, replace).await?;
             #[cfg(not(feature = "sso"))]
             {
-                let _ = (host, port);
+                let _ = (host, port, add, replace);
                 return Err(anyhow::anyhow!(
                     "SSO login is not available: this binary was built without the `sso` feature"
                 ));
@@ -1107,8 +1160,12 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::UploadFile(args) => do_upload_file(args).await?,
         Commands::UploadFolder(args) => do_upload_folder(args).await?,
         Commands::DownloadFile(args) => do_download_file(args).await?,
-        Commands::Logout => drive_ops::logout().await?,
+        Commands::Logout { all } => drive_ops::logout(all).await?,
         Commands::Whoami => drive_ops::whoami().await?,
+        Commands::Accounts(cmd) => match cmd {
+            AccountsCmd::List => accounts::list().await?,
+            AccountsCmd::Switch { email } => accounts::switch(email).await?,
+        },
         Commands::Usage => drive_ops::usage().await?,
         Commands::List { id, path, extended } => {
             drive_ops::list(id.as_deref(), path.as_deref(), extended).await?

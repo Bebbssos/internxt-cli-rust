@@ -20,8 +20,10 @@ This is intended to be a **mostly drop-in replacement**. For ported commands the
 names, flags, endpoints, payloads and crypto all match, so the two behave the
 same for everyday login / upload / download / list / move / rename / trash
 workflows. Credentials are **not** shared between the two — `ixr` stores its
-own session at `~/.ixr/credentials`, separate from the official CLI's
-`~/.internxt-cli`, so each needs its own `login`.
+own session(s) at `~/.ixr/credentials`, separate from the official CLI's
+`~/.internxt-cli`, so each needs its own `login`. Unlike the official CLI,
+`ixr` supports several logged-in accounts at once — see
+[Multiple accounts](#multiple-accounts).
 
 The official CLI's commands (built with [oclif](https://oclif.io)) are
 hyphenated (`upload-file`, `move-file`, `create-folder`, …) — `ixr` uses the
@@ -49,9 +51,12 @@ Known differences:
   object per command rather than the official CLI's exact JSON envelope. Field
   names mostly match, but don't assume a byte-identical structure — see each
   command's JSON output below.
-- **No interactive prompting for missing flags**, with two exceptions:
-  `login-legacy` (email/password/2FA) and `trash-clear` (confirmation, unless
-  `--force`). Everywhere else, a missing required flag is a clap usage error.
+- **No interactive prompting for missing flags**, with three exceptions:
+  `login-legacy` (email/password/2FA), `login`/`login-legacy`/`login-sso`'s
+  add-vs-replace prompt when a different account is already active (unless
+  `--add`/`--replace` is given — see [Multiple accounts](#multiple-accounts)),
+  and `trash-clear` (confirmation, unless `--force`). Everywhere else, a
+  missing required flag is a clap usage error.
 - **Plain-text table output** uses simple aligned columns rather than the
   official CLI's boxed tables. Use `--json` for stable machine-readable output.
 - **`serve webdav` runs in the foreground**, options passed inline, rather than
@@ -60,11 +65,12 @@ Known differences:
   `add-cert` daemon-management commands aren't ported — the WebDAV server itself
   is, as `serve webdav`.
 - **Not yet ported:** `config`, `logs`.
-- **New, with no official equivalent:** `usage`, `login-sso`, `sync-up`,
-  `sync-down`, `id-from-path`, `path-from-id`, the `thumbnail` command family,
-  `mount`, and the `fuse`/`smb`/`nfs`/`sftp` `serve` backends (the official
-  CLI only serves WebDAV). See the [command reference](#command-reference)
-  below for details on each.
+- **New, with no official equivalent:** `usage`, `login-sso`, `accounts list`,
+  `accounts switch`, `sync-up`, `sync-down`, `id-from-path`, `path-from-id`,
+  the `thumbnail` command family, `mount`, and the `fuse`/`smb`/`nfs`/`sftp`
+  `serve` backends (the official CLI only serves WebDAV, and only supports one
+  logged-in account). See the [command reference](#command-reference) below
+  for details on each.
 
 ## Install
 
@@ -132,8 +138,10 @@ targets your root folder (or workspace root, if a workspace is active).
 | [`login`](#login) | Log in to your Internxt account. | none (flow varies with `sso`, default on) | Same command name; behavior is broader than official's SSO-only `login` — see notes below. |
 | [`login-legacy`](#login-legacy) | Log in with email + password (legacy flow). | none | Same command; no official alias either way. |
 | [`login-sso`](#login-sso) | Log in via the web-based SSO flow. | `sso` (default on) | New — no official equivalent (official's plain `login` is already SSO-only). |
-| [`logout`](#logout) | Log out the current user. | none | Same command. |
-| [`whoami`](#whoami) | Show the currently logged-in user. | none | Same command. |
+| [`logout`](#logout) | Log out the current (or targeted) account. | none | Same command; official supports only one account. |
+| [`whoami`](#whoami) | Show the currently active (or targeted) account. | none | Same command; official supports only one account. |
+| [`accounts list`](#accounts-list) | List every logged-in account. | none | New — no official equivalent. |
+| [`accounts switch`](#accounts-switch) | Switch the active account. | none | New — no official equivalent. |
 | [`usage`](#usage) | Show account plan, used space, and upload limit. | none | New — no official equivalent. |
 | [`list`](#list) | List a folder's contents. | none | Same command; adds `--path`. |
 | [`create-folder`](#create-folder) | Create a folder. | none | Same command, incl. official's `create folder` form; adds `--path`. |
@@ -174,7 +182,8 @@ Logs in. Uses the web-based SSO flow when built with the `sso` feature
 
 Flags: `--host <HOST>`, `--port <PORT>` (SSO callback server address/port,
 default 127.0.0.1 / a random free port); `-e/--email`, `-p/--password`,
-`-w/--twofactor`, `-t/--twofactortoken` (used for the legacy fallback).
+`-w/--twofactor`, `-t/--twofactortoken` (used for the legacy fallback);
+`--add`/`--replace` (see [Multiple accounts](#multiple-accounts)).
 
 ```sh
 ixr login                                  # SSO: opens a browser to authenticate
@@ -192,11 +201,13 @@ password (+ 2FA if the account requires it). Prompts for any missing value
 unless `-x/--non-interactive`.
 
 Flags: `-e/--email`, `-p/--password`, `-w/--twofactor`, `-t/--twofactortoken`
-(takes priority over `--twofactor` when both are given).
+(takes priority over `--twofactor` when both are given); `--add`/`--replace`
+(see [Multiple accounts](#multiple-accounts)).
 
 ```sh
 ixr login-legacy --email you@example.com     # prompts for password (+ 2FA)
 ixr login-legacy -e you@example.com -p '...' -w 123456
+ixr login-legacy -e another@example.com -p '...' --add   # keep both accounts
 ```
 
 JSON output: same shape as [`login`](#login).
@@ -207,25 +218,70 @@ New — no official equivalent (the official CLI's plain `login` is already
 SSO-only, so it has no separate `login-sso`). Forces the web-based SSO flow.
 Errors if built without the `sso` feature.
 
-Flags: `--host <HOST>`, `--port <PORT>`.
+Flags: `--host <HOST>`, `--port <PORT>`, `--add`/`--replace` (see
+[Multiple accounts](#multiple-accounts)).
 
 JSON output: same shape as [`login`](#login).
 
 ### `logout`
 
-Invalidates the session server-side and clears local credentials. No flags.
+Invalidates the session server-side and removes the resolved account (the
+one targeted by `IXR_USER`, else the active one — see
+[Multiple accounts](#multiple-accounts)) from local storage. If it was the
+active account and other accounts remain, none of them is auto-selected —
+run `accounts switch` to pick one.
+
+Flags: `--all` (log out of every stored account instead of just the resolved
+one).
+
+```sh
+ixr logout
+ixr logout --all
+```
 
 JSON output: `{ "success": true, "message": "User logged out successfully." }`,
 or `{ "success": false, "message": "No user is currently logged in." }`.
+With `--all`: `{ "success": true, "message": "Logged out of all accounts.", "accounts": [...] }`.
 
 ### `whoami`
 
-Shows the currently logged-in user. Refreshes the session token if it's near
-expiry; if the session is dead, clears local credentials (matching the
-official CLI's behaviour of logging out on a dead session).
+Shows the resolved account (`IXR_USER`, else the active one). Refreshes the
+session token if it's near expiry; if the session is dead, removes that
+account from local storage (matching the official CLI's behaviour of logging
+out on a dead session) without touching any other stored account.
 
 JSON output: `{ "success": true, "message": "...", "login": <credentials> }`,
 or `{ "success": false, "message": "You are not logged in." }`.
+
+### `accounts list`
+
+New — no official equivalent (the official CLI supports one account at a
+time). Lists every account currently logged in on this machine, marking the
+active one with `*` in the human-readable view.
+
+No flags.
+
+```sh
+ixr accounts list
+```
+
+JSON output: `{ "success": true, "accounts": ["a@example.com", "b@example.com"], "active": "a@example.com" }`.
+
+### `accounts switch`
+
+New — no official equivalent. Sets the active account for subsequent
+commands (until changed again, independent of any `IXR_USER` override on a
+given invocation — see [Multiple accounts](#multiple-accounts)).
+
+Flags: `-e/--email <EMAIL>` (omit for an interactive picker; errors in
+`--json`/`-x` mode if omitted).
+
+```sh
+ixr accounts switch -e b@example.com
+ixr accounts switch                    # interactive picker
+```
+
+JSON output: `{ "success": true, "active": "b@example.com" }`.
 
 ### `usage`
 
@@ -705,4 +761,54 @@ variables of the same name (`DRIVE_NEW_API_URL`, `NETWORK_URL`,
 `PAYMENTS_API_URL`, etc).
 
 Credentials are stored AES-encrypted at `~/.ixr/credentials` — its own
-directory, separate from the official CLI's `~/.internxt-cli`.
+directory, separate from the official CLI's `~/.internxt-cli`. The file holds
+every logged-in account (see below), not just one.
+
+## Multiple accounts
+
+Unlike the official CLI (one account at a time), `ixr` can hold several
+logged-in accounts in `~/.ixr/credentials` and lets you pick which one a given
+command acts on.
+
+**Adding / replacing.** `login`/`login-legacy`/`login-sso` only prompt or need
+a flag when a *different* account is already active:
+
+- Logging in again as the same active account just refreshes it (no prompt).
+- Logging in as a new account while a different one is active: interactively,
+  you're asked to add (keep both, switch to the new one) or replace (log out
+  the old one, switch to the new one); non-interactively (`-x`), pass
+  `--add` or `--replace` explicitly or it errors.
+
+**Switching.** `accounts switch` sets the active account for every subsequent
+command until changed again; `accounts list` shows what's stored and which one
+is active.
+
+**Targeting one account for a single command, without switching.** Set
+`IXR_USER=<email>` — every command resolves credentials for that account
+instead of the active one, without persisting any change to `accounts switch`'s
+active pointer. If that account isn't logged in yet, also set `IXR_PASSWORD`
+(and `IXR_TWOFACTORCODE`/`IXR_OTPTOKEN` if it has 2FA) and the command
+transparently logs it in first and stores it (still without making it active)
+— the built-in equivalent of `og/cli/docker/entrypoint.sh`'s shell-level
+auto-login, useful for containers/CI that always want to act as one specific
+account:
+
+```sh
+IXR_USER=ci@example.com IXR_PASSWORD=... ixr whoami --json   # auto-logs in ci@example.com, first time only
+IXR_USER=ci@example.com ixr upload-file -f ./report.csv       # every later invocation just uses the stored session
+```
+
+Add `IXR_NO_PERSIST` (any value) to make that one invocation leave no trace on
+disk at all: the `IXR_PASSWORD` auto-login result (and any refreshed token) is
+kept in memory for this command only, never written to `~/.ixr/credentials`.
+Every invocation re-authenticates from scratch — useful for one-shot/CI runs
+that shouldn't leave a session file behind:
+
+```sh
+IXR_USER=ci@example.com IXR_PASSWORD=... IXR_NO_PERSIST=1 ixr upload-file -f ./report.csv
+```
+
+These are distinct from the existing `INXT_USER`/`INXT_PASSWORD`/
+`INXT_TWOFACTORCODE`/`INXT_OTPTOKEN`, which remain scoped to filling in
+`login`'s/`login-legacy`'s own flags (`-e`/`-p`/`-w`/`-t`) and have no effect
+on any other command.

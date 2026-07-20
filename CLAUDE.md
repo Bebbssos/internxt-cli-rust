@@ -50,6 +50,11 @@ preserve when adding features: engine logic in core, UX/IO in cli.
   chunked multipart uploads — RAM use stays bounded regardless of file size.
 - **Credentials are stored encrypted** at `~/.ixr/credentials` (own directory, not
   shared with the official CLI's `~/.internxt-cli`) — same crypto, different location.
+  The file holds *every* logged-in account plus an active-account pointer
+  (`auth::AccountsFile`), not a single account — `ixr` supports multiple
+  accounts at once, unlike the official CLI. `IXR_USER` (distinct from the
+  `INXT_USER` used only for `login`'s `-e` flag) lets any command target a
+  specific account for that invocation without switching the active one.
 
 ## serve
 
