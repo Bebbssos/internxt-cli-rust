@@ -309,12 +309,19 @@ async fn spool_stdin_to_temp() -> Result<TempSpool> {
 
 /// Download + decrypt a file by uuid. Writes to a file under `directory` (default),
 /// or to stdout when `to_stdout` is set (binary-clean: all chatter goes to stderr).
+///
+/// By default, writes go to a temp sibling file (`.{name}.inxt-{rand}.part`) that is
+/// renamed into place only on full success, and removed on any error — mirroring
+/// `sync::download_one` — so a failed download never leaves a truncated file at the
+/// destination path. `legacy_write` restores the old behavior: writing directly to
+/// the destination with no cleanup on error.
 pub async fn download_file(
     id: Option<&str>,
     path: Option<&str>,
     directory: Option<&str>,
     overwrite: bool,
     to_stdout: bool,
+    legacy_write: bool,
 ) -> Result<()> {
     if to_stdout && crate::output::is_json() {
         return Err(anyhow!("--stdout cannot be combined with --json"));
@@ -408,26 +415,65 @@ pub async fn download_file(
     let mut shards = links.shards.clone();
     shards.sort_by_key(|s| s.index);
 
+    // Safe (non-legacy) writes to a file land in a temp sibling first, renamed into
+    // place only on success (mirrors `sync::download_one`); `--legacy-write` writes
+    // straight to the destination, matching the old (and official CLI's) behavior.
+    let tmp_path: Option<PathBuf> = match &out_path {
+        Some(p) if !legacy_write => {
+            let mut rnd = [0u8; 8];
+            rand::rng().fill(&mut rnd);
+            Some(p.with_file_name(format!(
+                ".{}.inxt-{}.part",
+                p.file_name().and_then(|s| s.to_str()).unwrap_or("file"),
+                hex::encode(rnd)
+            )))
+        }
+        _ => None,
+    };
+    let write_path = tmp_path.as_deref().or(out_path.as_deref());
+
     let mut ctr = Ctr::new(&key, iv);
-    let mut out: Box<dyn AsyncWrite + Unpin + Send> = match &out_path {
+    let mut out: Box<dyn AsyncWrite + Unpin + Send> = match write_path {
         Some(p) => Box::new(tokio::fs::File::create(p).await?),
         None => Box::new(tokio::io::stdout()),
     };
     // Progress bar draws on stderr, so it never mixes into a piped download.
     let pb = crate::output::progress_bar(size, "Downloading");
 
-    for shard in &shards {
-        let resp = net.download_shard_stream(&shard.url).await?;
-        let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let mut bytes = chunk?.to_vec();
-            ctr.apply(&mut bytes);
-            out.write_all(&bytes).await?;
-            pb.inc(bytes.len() as u64);
+    let result: Result<()> = async {
+        for shard in &shards {
+            let resp = net.download_shard_stream(&shard.url).await?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let mut bytes = chunk?.to_vec();
+                ctr.apply(&mut bytes);
+                out.write_all(&bytes).await?;
+                pb.inc(bytes.len() as u64);
+            }
+        }
+        out.flush().await?;
+        Ok(())
+    }
+    .await;
+
+    if let Err(e) = result {
+        pb.finish_and_clear();
+        if let Some(tmp) = &tmp_path {
+            let _ = tokio::fs::remove_file(tmp).await;
+        }
+        return Err(e);
+    }
+    pb.finish_and_clear();
+
+    if let Some(tmp) = &tmp_path {
+        // Safe to unwrap: tmp_path is only set when out_path is Some.
+        let dest = out_path.as_ref().unwrap();
+        if let Err(e) = tokio::fs::rename(tmp, dest).await {
+            let _ = tokio::fs::remove_file(tmp).await;
+            return Err(e.into());
         }
     }
-    out.flush().await?;
-    pb.finish_and_clear();
+
     match &out_path {
         Some(p) => crate::output::emit(
             &format!("File downloaded successfully to {}", p.display()),
