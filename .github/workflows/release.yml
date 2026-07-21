@@ -223,12 +223,14 @@ jobs:
 
   docker:
     name: Docker image
-    needs: gh-release
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - id: v
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          echo "owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
@@ -236,29 +238,38 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # `latest` only follows stable tags — a pushed rc/test tag must not
-      # clobber it.
-      - id: tags
-        run: |
-          version="${{ steps.v.outputs.version }}"
-          owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
-          image="ghcr.io/${owner}/ixr"
-          tags="${image}:${version}"
-          if [[ "$version" != *-* ]]; then
-            tags="${tags}"$'\n'"${image}:latest"
-          fi
-          {
-            echo "tags<<EOF"
-            echo "$tags"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+      # Version tag only here — never `latest`. That only follows once
+      # gh-release confirms every binary actually built (see docker-latest).
       - uses: docker/build-push-action@v7
         with:
           context: .
           push: true
           platforms: linux/amd64,linux/386,linux/arm64,linux/arm/v7,linux/arm/v6
           build-args: VERSION=${{ steps.v.outputs.version }}
-          tags: ${{ steps.tags.outputs.tags }}
+          tags: ghcr.io/${{ steps.v.outputs.owner }}/ixr:${{ steps.v.outputs.version }}
+
+  docker-latest:
+    name: Docker image (latest tag)
+    needs: [docker, gh-release]
+    runs-on: ubuntu-latest
+    # `latest` only follows stable tags — a pushed rc/test tag must not
+    # clobber it.
+    if: ${{ !contains(github.ref_name, '-') }}
+    steps:
+      - id: v
+        run: |
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          echo "owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Points a new tag at the already-pushed version manifest — no rebuild.
+      - run: |
+          image="ghcr.io/${{ steps.v.outputs.owner }}/ixr"
+          docker buildx imagetools create --tag "${image}:latest" "${image}:${{ steps.v.outputs.version }}"
 
   crates-io:
     name: Publish to crates.io
@@ -276,7 +287,9 @@ jobs:
       # crates.io AND the dependency in Cargo.toml switched
       # from the git dep (used during the 0.x churn) to a crates.io version dep —
       # cargo refuses to publish a crate that has a git dependency.
-      - run: cargo publish -p internxt-cli --locked
+      # --no-verify: preflight's `cargo publish --dry-run` already did the
+      # packaged-tarball verify build; redoing it here is pure redundant compile.
+      - run: cargo publish -p internxt-cli --locked --no-verify
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
