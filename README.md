@@ -3,16 +3,14 @@
 A Rust port of Internxt's official CLI, aiming to be a fast, low-memory, single
 static binary with fully streaming transfers.
 
-The headline difference from the official CLI: **it works on any account type**,
-including Free. The official CLI checks server-side for CLI access on your
-plan (bundled with Ultimate) and refuses to run at all without it; `ixr`
-doesn't hit that check.
+**Works on any account type, including Free.** The official CLI refuses to
+run unless your plan has server-side CLI access (bundled with Ultimate);
+`ixr` skips that check.
 
-Your plan's own server-side limits still apply no matter which client you
-use — this only removes the CLI-access check, nothing else. Notably: a
-per-file upload size cap from `/files/limits` (see
-[Upload size limit](#upload-size-limit)), and Free/legacy plans rejecting
-empty (0-byte) files outright (`HTTP 402`).
+Everything else about your plan still applies — this only removes the
+CLI-access gate. In particular: the per-file upload cap from
+`/files/limits` (see [Upload size limit](#upload-size-limit)), and
+Free/legacy plans rejecting empty (0-byte) files outright (`HTTP 402`).
 
 > Not affiliated with or endorsed by Internxt.
 
