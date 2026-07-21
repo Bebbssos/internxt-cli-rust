@@ -5,7 +5,7 @@ name: Release
 # a multi-arch Docker image, crates.io, and the AUR package. Asset naming
 # below (`ixr-<rust-target-triple>.tar.gz`/`.zip`) is load-bearing: it must
 # match `self_update::get_target()` (self_update_cmd.rs) and the
-# `[package.metadata.binstall]` template in crates/internxt-cli/Cargo.toml.
+# `[package.metadata.binstall]` template in Cargo.toml.
 
 on:
   push:
@@ -249,7 +249,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # internxt-core is published from its own repo (internxt-core-rust); this
       # only publishes the cli crate. Requires internxt-core already on
-      # crates.io AND the dependency in crates/internxt-cli/Cargo.toml switched
+      # crates.io AND the dependency in Cargo.toml switched
       # from the git dep (used during the 0.x churn) to a crates.io version dep —
       # cargo refuses to publish a crate that has a git dependency.
       - run: cargo publish -p internxt-cli --locked --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

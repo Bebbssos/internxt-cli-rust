@@ -1,6 +1,146 @@
-[workspace]
-resolver = "2"
-members = ["crates/internxt-cli"]
+[package]
+name = "internxt-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95" # smb feature (smb-server fork) needs this; without it, 1.88 (pgp, via internxt-core)
+license = "MIT"
+description = "Unofficial Rust port of the Internxt CLI"
+repository = "https://github.com/Bebbssos/internxt-cli-rust"
+
+[[bin]]
+name = "ixr"
+path = "src/main.rs"
+
+# `cargo binstall ixr`: fetches the prebuilt archive from the GitHub release
+# instead of compiling. Asset naming must match release.yml's `Package` step
+# and self_update_cmd.rs's target string exactly.
+[package.metadata.binstall]
+pkg-url = "{repo}/releases/download/v{version}/ixr-{target}{archive-suffix}"
+bin-dir = "ixr{binary-ext}"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
+[features]
+default = ["sso", "webdav", "fuse", "dotenv", "self-update"]
+# Load a `.env` file from the current directory (if present) at startup,
+# before argument parsing, so `INXT_*`/`INTERNXT_*` env-backed flags can be
+# set there instead of the real environment. Off disables the dep entirely.
+dotenv = ["dep:dotenvy"]
+# In-terminal thumbnail display (`internxt thumbnail display`). Off by default.
+# `viuer` renders via the Kitty / iTerm2 graphics protocols with a Unicode
+# half-block fallback (all pure Rust — no Sixel, so no libsixel C dependency).
+# Needs `image` to decode the downloaded thumbnail bytes. Enable to build with
+# image display.
+termimage = ["dep:viuer", "dep:image"]
+# Web-based (universal-link) SSO login. The flow lives in internxt-core (portable);
+# this adds the native transport — a local axum callback server — plus `open` for
+# the browser launcher. Disable to build a smaller binary with only legacy login.
+sso = ["dep:axum", "dep:open"]
+# WebDAV server mode (`internxt serve webdav`). Plain HTTP by default; enable
+# `webdav-tls` for HTTPS (self-signed / custom cert).
+webdav = ["dep:axum", "dep:tokio-util", "dep:mime_guess"]
+# HTTPS for the WebDAV server. Kept separate because the TLS stack is sizeable.
+webdav-tls = ["webdav", "dep:axum-server", "dep:rustls-pemfile", "dep:rcgen"]
+# FUSE mount mode (`internxt mount`, `internxt serve fuse`). Unix only; `fuser`
+# links libfuse via pkg-config. Declared for `cfg(unix)` only (inert on Windows).
+fuse = ["dep:fuser", "dep:libc", "dep:tokio-util"]
+# SMB/CIFS server mode (`internxt serve smb`). Off by default. The SMB2/3
+# protocol, NTLM auth and signing come from the `smb-server` crate; we implement
+# its `ShareBackend`/`Handle` traits over Drive (like `fuser::Filesystem` for
+# FUSE). All platforms (plain TCP).
+smb = ["dep:smb-server", "dep:async-trait"]
+# NFSv3 server mode (`internxt serve nfs`). Off by default. The NFSv3 wire
+# protocol + mount/portmap come from the `nfsserve` crate; we implement its
+# `NFSFileSystem` (id-based, like `fuser::Filesystem`) over Drive. All platforms.
+nfs = ["dep:nfsserve", "dep:async-trait"]
+# SFTP server mode (`internxt serve sftp`). Off by default. The SSH transport +
+# auth come from `russh`; the SFTP subsystem from `russh-sftp`. We implement its
+# `Handler` over Drive. All platforms.
+sftp = ["dep:russh", "dep:russh-sftp"]
+# `ixr update`: replace the running binary with the latest GitHub release.
+# Pointless (and actively wrong) for package-manager installs, so leave off
+# those builds (AUR, Docker) — only the standalone-binary distribution wants it.
+self-update = ["dep:self_update", "dep:semver"]
+
+[dependencies]
+# Core engine, split into its own repo (github.com/Bebbssos/internxt-core-rust),
+# published to crates.io.
+internxt-core = "0.1.0"
+
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+hex = "0.4"
+base64 = "0.22"
+dirs = "6"
+rand = "0.10"
+dotenvy = { version = "0.15", optional = true }
+rpassword = "7"
+futures-util = "0.3"
+bytes = "1"
+chrono = "0.4"
+indicatif = "0.18"
+filetime = "0.2.29"
+
+# sso: browser launcher + the local axum callback server (the flow logic lives in internxt-core)
+open = { version = "5", optional = true }
+
+# self-update: fetches/downloads GitHub releases and replaces the running binary.
+# `reqwest` picks the reqwest http backend (vs ureq); `rustls` is `reqwest?/rustls`,
+# so reqwest must be enabled explicitly for it to apply. rustls (not native-tls)
+# matches core's reqwest backend — keeps musl cross-builds free of an OpenSSL dep.
+self_update = { version = "0.44", default-features = false, features = [
+  "archive-tar",
+  "archive-zip",
+  "compression-flate2",
+  "compression-zip-deflate",
+  "reqwest",
+  "rustls",
+], optional = true }
+# self-update: semver-correct comparison against the GitHub release tag (a
+# prerelease like 0.1.0-rc.1 must never outrank the 0.1.0 it precedes).
+semver = { version = "1", optional = true }
+
+# webdav: axum server + stream <-> AsyncRead adapters + MIME lookup
+axum = { version = "0.8", optional = true }
+tokio-util = { version = "0.7", features = ["io"], optional = true }
+mime_guess = { version = "2", optional = true }
+
+# webdav-tls: HTTPS listener + cert loading/generation
+axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
+rcgen = { version = "0.14", optional = true }
+
+# smb: pure-Rust SMB2/3 server (protocol + NTLM auth + signing). We supply a
+# Drive-backed `ShareBackend`/`Handle` impl; the crate drives the wire protocol.
+# Fork of `smb-server` 0.4.1 — upstream doesn't re-export its own trait types
+# (and returned a per-open volatile id from QUERY_INFO); the fork fixes both.
+# Track the fork until the patches land upstream, then switch back to crates.io.
+smb-server = { git = "https://github.com/Bebbssos/rust-smb-server.git", default-features = false, optional = true }
+async-trait = { version = "0.1", optional = true }
+
+# nfs: pure-Rust NFSv3 server (wire protocol + mount/portmap). We supply a
+# Drive-backed `NFSFileSystem` (id-based, like `fuser::Filesystem`).
+nfsserve = { version = "0.11", optional = true }
+
+# sftp: SSH transport + auth (russh) hosting the SFTP subsystem (russh-sftp). We
+# supply a Drive-backed `russh_sftp::server::Handler`.
+russh = { version = "0.62", optional = true }
+russh-sftp = { version = "2", optional = true }
+
+# termimage: in-terminal image rendering (Kitty/iTerm2/half-block) + image decode.
+# `viuer` without default features drops Sixel (libsixel C dep); `image` mirrors the
+# lean decoder set used in core.
+viuer = { version = "0.11", default-features = false, optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "tiff"], optional = true }
+
+[target."cfg(unix)".dependencies]
+fuser = { version = "0.17.0", optional = true }
+libc = { version = "0.2.186", optional = true }
 
 [profile.release]
 opt-level = 3

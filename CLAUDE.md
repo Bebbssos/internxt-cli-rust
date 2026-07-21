@@ -28,11 +28,9 @@ Two crates in **two repos**:
   terminal/clap/browser deps, so it works equally under the CLI, WebDAV/FUSE, or a
   future GUI. **Lives in its own repo now**:
   [github.com/Bebbssos/internxt-core-rust](https://github.com/Bebbssos/internxt-core-rust),
-  published to crates.io. This repo depends on it as a library (git dep during the 0.x
-  churn — see `crates/internxt-cli/Cargo.toml` — swapping to a crates.io version dep
-  once the surface settles). To change engine logic you edit the core repo, cut a
-  release, then bump the dep here.
-- **`internxt-cli`** — this repo (a one-crate workspace, binary `ixr`): clap dispatch,
+  published to crates.io. This repo depends on it as a library (see `Cargo.toml`). To
+  change engine logic you edit the core repo, cut a release, then bump the dep here.
+- **`internxt-cli`** — this repo (single crate, binary `ixr`): clap dispatch,
   transfer UX, serve backends.
 
 Core never touches stdio, prompts, or the filesystem for credentials — it exposes
