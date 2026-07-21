@@ -75,16 +75,14 @@ CLI front-end built on top of it.
 cargo build --release
 # binary at target/release/ixr (SSO + WebDAV over HTTP + FUSE enabled by default)
 
-# add HTTPS support to the WebDAV server (pulls in a rustls TLS stack):
-cargo build --release --features webdav-tls
+# stack multiple features on top of the defaults with a comma-separated list —
+# here: HTTPS for WebDAV, plus the SMB and SFTP serve backends (all off by default):
+cargo build --release --features webdav-tls,smb,sftp
 
-# add the SMB / NFS / SFTP backends (all off by default, all experimental):
-cargo build --release --features smb          # SMB2/3 share
-cargo build --release --features nfs          # NFSv3 export
-cargo build --release --features sftp         # SFTP over SSH (pulls in russh)
-
-# smaller binary without SSO login, WebDAV or FUSE (drops axum + open + fuser):
-cargo build --release --no-default-features
+# --no-default-features drops the defaults (sso, webdav, fuse, dotenv,
+# self-update) instead of adding to them — combine with --features to build a
+# minimal binary with only what you want, e.g. WebDAV-only, no SSO/FUSE/update:
+cargo build --release --no-default-features --features webdav
 ```
 
 See [Features](#features) below for what each `--features`/`--no-default-features`
