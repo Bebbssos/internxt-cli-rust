@@ -106,8 +106,6 @@ diff upstream against them to find changes worth pulling in.
   mkdir / rmdir, 41MB multi-shard read + 512KB write round-trip md5-identical).
 
 ### Infrastructure / parity
-- `.env` loading (node uses dotenv). We hardcode public defaults in `src/config.rs`,
-  overridable via env vars. Decide if a `.env` file should be supported.
 - SDK-style request retry layer (node `SdkManager` maxRetries: 3).
 - Local drive cache (node uses better-sqlite3 / typeorm `internxt-cli-drive.db`).
 
