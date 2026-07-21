@@ -36,6 +36,12 @@ use crate::serve::tree::{self, FileItem};
 /// 1601→1970 gap in 100ns ticks (FILETIME epoch offset).
 const FILETIME_OFFSET: u64 = 116_444_736_000_000_000;
 
+/// Forward gaps up to this size are skipped by reading-and-discarding from the
+/// live stream; past it, the stream restarts as a ranged download instead —
+/// see the matching constant in `fuse/fs.rs` for why this matters for MP4
+/// playback (moov-atom-at-end probing jumps).
+const MAX_FORWARD_SKIP: u64 = 8 * 1024 * 1024;
+
 pub(crate) fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -212,8 +218,9 @@ impl Drop for ReadStream {
 }
 
 /// Read-only file body: lazily (re)starts a decrypt stream and serves reads
-/// from it. Forward gaps skip in-stream; a backward read restarts as a ranged
-/// download of only the covering shards.
+/// from it. Forward gaps up to [`MAX_FORWARD_SKIP`] skip in-stream; a backward
+/// read, or a forward gap past the threshold, restarts as a ranged download
+/// of only the covering shards.
 struct ReadState {
     file_id: String,
     bucket: String,
@@ -256,7 +263,7 @@ impl ReadState {
         }
         let mut guard = self.stream.lock().await;
         let restart = match &*guard {
-            Some(s) => offset < s.pos,
+            Some(s) => offset < s.pos || offset - s.pos > MAX_FORWARD_SKIP,
             None => true,
         };
         if restart {
