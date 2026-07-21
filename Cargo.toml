@@ -119,8 +119,10 @@ rcgen = { version = "0.14", optional = true }
 # Drive-backed `ShareBackend`/`Handle` impl; the crate drives the wire protocol.
 # Fork of `smb-server` 0.4.1 — upstream doesn't re-export its own trait types
 # (and returned a per-open volatile id from QUERY_INFO); the fork fixes both.
+# Published to crates.io as `ixr-smb-server` (name `smb-server` is taken
+# upstream); `package =` keeps the in-code `smb_server::` path unchanged.
 # Track the fork until the patches land upstream, then switch back to crates.io.
-smb-server = { git = "https://github.com/Bebbssos/rust-smb-server.git", default-features = false, optional = true }
+smb-server = { package = "ixr-smb-server", version = "0.5.0", default-features = false, optional = true }
 async-trait = { version = "0.1", optional = true }
 
 # nfs: pure-Rust NFSv3 server (wire protocol + mount/portmap). We supply a
