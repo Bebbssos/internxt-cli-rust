@@ -238,6 +238,11 @@ enum Commands {
         /// Print the planned actions without transferring anything.
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+        /// Skip empty (0-byte) files instead of uploading them. Internxt
+        /// rejects empty files on free/legacy plans (HTTP 402); use this to
+        /// avoid those failures instead of seeing them reported.
+        #[arg(long, default_value_t = false)]
+        exclude_empty_files: bool,
         #[command(flatten)]
         limit: upload_limit::UploadLimitArgs,
     },
@@ -578,6 +583,11 @@ struct UploadFolderArgs {
     /// Destination folder path (e.g. `/a/b`), alternative to --destination.
     #[arg(long)]
     dest_path: Option<String>,
+    /// Skip empty (0-byte) files instead of uploading them. Internxt rejects
+    /// empty files on free/legacy plans (HTTP 402); use this to avoid those
+    /// failures instead of seeing them reported.
+    #[arg(long, default_value_t = false)]
+    exclude_empty_files: bool,
     #[command(flatten)]
     limit: upload_limit::UploadLimitArgs,
 }
@@ -926,6 +936,11 @@ enum SyncCmd {
         /// Print the planned actions without transferring anything.
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+        /// Skip empty (0-byte) files instead of uploading them. Internxt
+        /// rejects empty files on free/legacy plans (HTTP 402); use this to
+        /// avoid those failures instead of seeing them reported.
+        #[arg(long, default_value_t = false)]
+        exclude_empty_files: bool,
         #[command(flatten)]
         limit: upload_limit::UploadLimitArgs,
     },
@@ -1137,7 +1152,14 @@ async fn do_upload_folder(args: UploadFolderArgs) -> Result<()> {
         "folder",
         "What is the path to the folder on your computer? ",
     )?;
-    commands::upload_folder(&folder, args.destination.as_deref(), args.dest_path.as_deref(), &args.limit).await
+    commands::upload_folder(
+        &folder,
+        args.destination.as_deref(),
+        args.dest_path.as_deref(),
+        args.exclude_empty_files,
+        &args.limit,
+    )
+    .await
 }
 
 async fn do_download_file(args: DownloadFileArgs) -> Result<()> {
@@ -1370,6 +1392,7 @@ async fn run(cli: Cli) -> Result<()> {
             remote_path,
             delete,
             dry_run,
+            exclude_empty_files,
             limit,
         } => {
             sync::sync_up(
@@ -1378,6 +1401,7 @@ async fn run(cli: Cli) -> Result<()> {
                 remote_path.as_deref(),
                 delete.as_deref(),
                 dry_run,
+                exclude_empty_files,
                 &limit,
             )
             .await?
@@ -1714,6 +1738,7 @@ async fn run(cli: Cli) -> Result<()> {
                 remote_path,
                 delete,
                 dry_run,
+                exclude_empty_files,
                 limit,
             } => {
                 sync::sync_up(
@@ -1722,6 +1747,7 @@ async fn run(cli: Cli) -> Result<()> {
                     remote_path.as_deref(),
                     delete.as_deref(),
                     dry_run,
+                    exclude_empty_files,
                     &limit,
                 )
                 .await?
