@@ -608,10 +608,10 @@ impl SftpSession {
         let parent = self.inner.resolve_dir(parent_comps).await?;
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
-        let folders = tree::list_folders(&api, &creds.token, &parent.uuid, &self.inner.cache)
+        if let Some(f) = tree::find_folder(&api, &creds.token, &parent.uuid, name, &self.inner.cache)
             .await
-            .map_err(to_status)?;
-        if let Some(f) = folders.into_iter().find(|f| &f.plain_name == name) {
+            .map_err(to_status)?
+        {
             return Ok(attrs_dir(&f.updated_at));
         }
         let files = tree::list_files(&api, &creds.token, &parent.uuid)
@@ -781,12 +781,11 @@ impl russh_sftp::server::Handler for SftpSession {
         let dir = self.inner.resolve_dir(&comps).await?;
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
-        let folders = tree::list_folders(&api, &creds.token, &dir.uuid, &self.inner.cache)
-            .await
-            .map_err(to_status)?;
-        let files = tree::list_files(&api, &creds.token, &dir.uuid)
-            .await
-            .map_err(to_status)?;
+        let (folders, files) = tokio::try_join!(
+            tree::list_folders(&api, &creds.token, &dir.uuid, &self.inner.cache),
+            tree::list_files(&api, &creds.token, &dir.uuid),
+        )
+        .map_err(to_status)?;
         let mut list: Vec<File> = Vec::with_capacity(folders.len() + files.len() + 2);
         list.push(File::new(".", attrs_dir(&dir.updated_at)));
         list.push(File::new("..", attrs_dir(&dir.updated_at)));
@@ -964,10 +963,10 @@ impl russh_sftp::server::Handler for SftpSession {
         let parent = self.inner.resolve_dir(parent_comps).await?;
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
-        let folders = tree::list_folders(&api, &creds.token, &parent.uuid, &self.inner.cache)
+        let existing = tree::find_folder(&api, &creds.token, &parent.uuid, name, &self.inner.cache)
             .await
             .map_err(to_status)?;
-        if folders.iter().any(|f| &f.plain_name == name) {
+        if existing.is_some() {
             return Err(StatusCode::Failure);
         }
         api.create_folder(&creds.token, name, &parent.uuid)
@@ -989,12 +988,9 @@ impl russh_sftp::server::Handler for SftpSession {
         let parent = self.inner.resolve_dir(parent_comps).await?;
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
-        let folders = tree::list_folders(&api, &creds.token, &parent.uuid, &self.inner.cache)
+        let f = tree::find_folder(&api, &creds.token, &parent.uuid, name, &self.inner.cache)
             .await
-            .map_err(to_status)?;
-        let f = folders
-            .into_iter()
-            .find(|f| &f.plain_name == name)
+            .map_err(to_status)?
             .ok_or(StatusCode::NoSuchFile)?;
         if self.inner.delete_permanently {
             api.delete_folder(&creds.token, &f.uuid).await.map_err(to_status)?;
@@ -1068,11 +1064,10 @@ impl russh_sftp::server::Handler for SftpSession {
                 let cur = f.display_name();
                 (f.uuid, false, cur)
             } else {
-                let folders =
-                    tree::list_folders(&api, &creds.token, &src_parent.uuid, &self.inner.cache)
-                        .await
-                        .map_err(to_status)?;
-                match folders.into_iter().find(|f| f.plain_name == src_name) {
+                match tree::find_folder(&api, &creds.token, &src_parent.uuid, &src_name, &self.inner.cache)
+                    .await
+                    .map_err(to_status)?
+                {
                     Some(f) => (f.uuid, true, f.plain_name),
                     None => return Err(StatusCode::NoSuchFile),
                 }
@@ -1082,12 +1077,12 @@ impl russh_sftp::server::Handler for SftpSession {
         let dst_files = tree::list_files(&api, &creds.token, &dst_parent.uuid)
             .await
             .map_err(to_status)?;
-        let dst_folders =
-            tree::list_folders(&api, &creds.token, &dst_parent.uuid, &self.inner.cache)
+        let dst_folder_clash =
+            tree::find_folder(&api, &creds.token, &dst_parent.uuid, &dst_name, &self.inner.cache)
                 .await
-                .map_err(to_status)?;
-        let clashes = dst_files.iter().any(|f| f.display_name() == dst_name)
-            || dst_folders.iter().any(|f| f.plain_name == dst_name);
+                .map_err(to_status)?
+                .is_some();
+        let clashes = dst_files.iter().any(|f| f.display_name() == dst_name) || dst_folder_clash;
         if clashes && !(src_parent.uuid == dst_parent.uuid && cur_name == dst_name) {
             return Err(StatusCode::Failure);
         }

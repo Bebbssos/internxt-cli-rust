@@ -12,7 +12,9 @@ use super::cache::FolderCache;
 use internxt_core::api::DriveApi;
 // Re-export the shared tree types/functions so existing `resource::…` references
 // throughout the webdav module keep resolving.
-pub use crate::serve::tree::{list_files, list_folders, resolve_folder, DriveItem, FolderItem};
+pub use crate::serve::tree::{
+    find_folder, list_files, list_folders, resolve_folder, DriveItem, FolderItem,
+};
 
 /// A parsed request URL. `url` is percent-decoded and always starts with `/`.
 pub struct Resource {
@@ -112,10 +114,8 @@ pub async fn resolve_item(
     let last = resource.components.last().unwrap();
 
     if resource.is_dir_hint {
-        let folders = list_folders(api, token, &parent.uuid, cache).await?;
-        return Ok(folders
-            .into_iter()
-            .find(|f| &f.plain_name == last)
+        return Ok(find_folder(api, token, &parent.uuid, last, cache)
+            .await?
             .map(DriveItem::Folder));
     }
 
@@ -125,9 +125,7 @@ pub async fn resolve_item(
         return Ok(Some(DriveItem::File(f)));
     }
     // Then folder.
-    let folders = list_folders(api, token, &parent.uuid, cache).await?;
-    Ok(folders
-        .into_iter()
-        .find(|f| &f.plain_name == last)
+    Ok(find_folder(api, token, &parent.uuid, last, cache)
+        .await?
         .map(DriveItem::Folder))
 }

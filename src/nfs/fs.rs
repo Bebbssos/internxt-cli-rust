@@ -808,11 +808,11 @@ impl NFSFileSystem for DriveNfs {
             let nd = self.inner.node_from_file(dirid, &dir.uuid, f);
             return Ok(self.inner.intern(dirid, nd));
         }
-        let folders = tree::list_folders(&api, &creds.token, &dir.uuid, &self.inner.cache)
+        if let Some(f) = tree::find_folder(&api, &creds.token, &dir.uuid, &name, &self.inner.cache)
             .await
-            .map_err(to_nfs)?;
-        if let Some(f) = folders.iter().find(|f| f.plain_name == name) {
-            let nd = self.inner.node_from_folder(dirid, &dir.uuid, f);
+            .map_err(to_nfs)?
+        {
+            let nd = self.inner.node_from_folder(dirid, &dir.uuid, &f);
             return Ok(self.inner.intern(dirid, nd));
         }
         Err(nfsstat3::NFS3ERR_NOENT)
@@ -984,10 +984,10 @@ impl NFSFileSystem for DriveNfs {
         let dir = self.inner.node(dirid).ok_or(nfsstat3::NFS3ERR_STALE)?;
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
-        let folders = tree::list_folders(&api, &creds.token, &dir.uuid, &self.inner.cache)
+        let existing = tree::find_folder(&api, &creds.token, &dir.uuid, &name, &self.inner.cache)
             .await
             .map_err(to_nfs)?;
-        if folders.iter().any(|f| f.plain_name == name) {
+        if existing.is_some() {
             return Err(nfsstat3::NFS3ERR_EXIST);
         }
         let created = api
@@ -1039,10 +1039,10 @@ impl NFSFileSystem for DriveNfs {
             self.remove_child(dirid, &name);
             return Ok(());
         }
-        let folders = tree::list_folders(&api, &creds.token, &dir.uuid, &self.inner.cache)
+        if let Some(f) = tree::find_folder(&api, &creds.token, &dir.uuid, &name, &self.inner.cache)
             .await
-            .map_err(to_nfs)?;
-        if let Some(f) = folders.into_iter().find(|f| f.plain_name == name) {
+            .map_err(to_nfs)?
+        {
             if self.inner.delete_permanently {
                 api.delete_folder(&creds.token, &f.uuid).await.map_err(to_nfs)?;
             } else {
@@ -1082,11 +1082,10 @@ impl NFSFileSystem for DriveNfs {
                 let cur = f.display_name();
                 (f.uuid, false, cur)
             } else {
-                let folders =
-                    tree::list_folders(&api, &creds.token, &src_dir.uuid, &self.inner.cache)
-                        .await
-                        .map_err(to_nfs)?;
-                match folders.into_iter().find(|f| f.plain_name == src_name) {
+                match tree::find_folder(&api, &creds.token, &src_dir.uuid, &src_name, &self.inner.cache)
+                    .await
+                    .map_err(to_nfs)?
+                {
                     Some(f) => (f.uuid, true, f.plain_name),
                     None => return Err(nfsstat3::NFS3ERR_NOENT),
                 }
@@ -1125,10 +1124,11 @@ impl NFSFileSystem for DriveNfs {
         }
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
-        let folders = tree::list_folders(&api, &creds.token, &dir.uuid, &self.inner.cache)
-            .await
-            .map_err(to_nfs)?;
-        let files = tree::list_files(&api, &creds.token, &dir.uuid).await.map_err(to_nfs)?;
+        let (folders, files) = tokio::try_join!(
+            tree::list_folders(&api, &creds.token, &dir.uuid, &self.inner.cache),
+            tree::list_files(&api, &creds.token, &dir.uuid),
+        )
+        .map_err(to_nfs)?;
 
         // Intern every child to a stable id, then order deterministically by id
         // so `start_after` (a previously returned id) resumes correctly.
