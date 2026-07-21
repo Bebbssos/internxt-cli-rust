@@ -282,14 +282,33 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      # A retagged/rerun release (e.g. to pick up a fix in a later job like
+      # aur) would otherwise fail here with a hard "already uploaded" error —
+      # skip instead, since republishing an existing version is a no-op by
+      # design, not a real failure.
+      - name: Check if already published
+        id: check
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "User-Agent: internxt-cli-rust-release-ci (github.com/Bebbssos/internxt-cli-rust)" \
+            "https://crates.io/api/v1/crates/internxt-cli/${version}")
+          if [[ "$status" == "200" ]]; then
+            echo "internxt-cli ${version} is already on crates.io — skipping publish"
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+          fi
       # internxt-core is published from its own repo (internxt-core-rust); this
       # only publishes the cli crate. Requires internxt-core already on
       # crates.io AND the dependency in Cargo.toml switched
       # from the git dep (used during the 0.x churn) to a crates.io version dep —
       # cargo refuses to publish a crate that has a git dependency.
-      # --no-verify: preflight's `cargo publish --dry-run` already did the
-      # packaged-tarball verify build; redoing it here is pure redundant compile.
-      - run: cargo publish -p internxt-cli --locked --no-verify
+      # --no-verify: preflight's --dry-run already did the packaged-tarball
+      # verify build; redoing it here is pure redundant compile.
+      - if: steps.check.outputs.already_published == 'false'
+        run: cargo publish -p internxt-cli --locked --no-verify
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
