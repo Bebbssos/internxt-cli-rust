@@ -292,7 +292,7 @@ jobs:
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - name: Render PKGBUILD + .SRCINFO
         run: ./pkg/aur/render.sh "${{ steps.v.outputs.version }}"
-      - uses: KSXGitHub/github-actions-deploy-aur@v4
+      - uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
         with:
           pkgname: ixr-bin
           pkgbuild: pkg/aur/PKGBUILD
