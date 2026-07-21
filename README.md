@@ -44,8 +44,24 @@ CLI front-end built on top of it.
 - **AUR** (Arch Linux): `ixr-bin`, e.g. `yay -S ixr-bin`.
 - **Prebuilt binary**: download an archive from the
   [releases page](https://github.com/Bebbssos/internxt-cli-rust/releases) for your
-  platform. `ixr update` self-updates in place afterwards (standalone-binary
-  installs only — the other methods above manage updates themselves).
+  platform, or grab the latest directly:
+
+  | OS | Downloads |
+  |---|---|
+  | Windows | [x86_64](https://github.com/Bebbssos/internxt-cli-rust/releases/latest/download/ixr-x86_64-pc-windows-msvc.zip) · [ARM64](https://github.com/Bebbssos/internxt-cli-rust/releases/latest/download/ixr-aarch64-pc-windows-msvc.zip) |
+  | Linux (glibc) | [x86_64](https://github.com/Bebbssos/internxt-cli-rust/releases/latest/download/ixr-x86_64-unknown-linux-gnu.tar.gz) · [ARM64](https://github.com/Bebbssos/internxt-cli-rust/releases/latest/download/ixr-aarch64-unknown-linux-gnu.tar.gz) |
+  | Linux (musl) | [x86](https://github.com/Bebbssos/internxt-cli-rust/releases/latest/download/ixr-i686-unknown-linux-musl.tar.gz) · [ARMv7](https://github.com/Bebbssos/internxt-cli-rust/releases/latest/download/ixr-armv7-unknown-linux-musleabihf.tar.gz) · [ARMv6](https://github.com/Bebbssos/internxt-cli-rust/releases/latest/download/ixr-arm-unknown-linux-musleabihf.tar.gz) |
+  | macOS | [Apple Silicon](https://github.com/Bebbssos/internxt-cli-rust/releases/latest/download/ixr-aarch64-apple-darwin.tar.gz) · [Intel](https://github.com/Bebbssos/internxt-cli-rust/releases/latest/download/ixr-x86_64-apple-darwin.tar.gz) |
+  | FreeBSD | [x86_64](https://github.com/Bebbssos/internxt-cli-rust/releases/latest/download/ixr-x86_64-unknown-freebsd.tar.gz) |
+
+  These links always resolve to the latest stable release. Every build ships
+  with the full feature set (SSO, WebDAV+TLS, SMB/NFS/SFTP servers, self-update,
+  in-terminal thumbnails, FUSE mount) except: Linux (musl) and macOS drop FUSE
+  (no libfuse cross sysroot / macFUSE needs an unattended kernel-ext install
+  CI can't do), and Windows drops FUSE (Unix-only by design) and in-terminal
+  thumbnails (no Kitty/iTerm2 graphics protocol on Windows). `ixr update`
+  self-updates in place afterwards (standalone-binary installs only — the
+  other methods above manage updates themselves).
 - **From source**: see [Build](#build) below.
 
 ## Build
