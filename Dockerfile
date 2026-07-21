@@ -20,9 +20,9 @@
 #     -t internxt-cli-rust:latest --push .
 
 # Must satisfy the highest rust-version any locked dependency declares, not
-# just our own MSRV (crates/*/Cargo.toml say 1.85, but the smb-server fork
-# (crates/internxt-cli/Cargo.toml) currently declares 1.95 — bump this
-# together with that whenever Cargo.lock's transitive deps move).
+# just our own MSRV: internxt-cli (crates/internxt-cli/Cargo.toml) declares 1.95
+# for the smb-server fork, and the internxt-core dependency declares 1.88. Bump
+# this together with those whenever Cargo.lock's transitive deps move.
 ARG RUST_VERSION=1.96
 ARG ZIG_VERSION=0.13.0
 ARG ALPINE_VERSION=3.21

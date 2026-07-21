@@ -91,13 +91,15 @@ filetime = "0.2.29"
 open = { version = "5", optional = true }
 
 # self-update: fetches/downloads GitHub releases and replaces the running binary.
-# rustls (not native-tls) to match core's reqwest backend — keeps musl cross-builds
-# free of an OpenSSL dependency.
-self_update = { version = "0.41", default-features = false, features = [
+# `reqwest` picks the reqwest http backend (vs ureq); `rustls` is `reqwest?/rustls`,
+# so reqwest must be enabled explicitly for it to apply. rustls (not native-tls)
+# matches core's reqwest backend — keeps musl cross-builds free of an OpenSSL dep.
+self_update = { version = "0.44", default-features = false, features = [
   "archive-tar",
   "archive-zip",
   "compression-flate2",
   "compression-zip-deflate",
+  "reqwest",
   "rustls",
 ], optional = true }
 # self-update: semver-correct comparison against the GitHub release tag (a
