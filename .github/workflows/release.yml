@@ -23,8 +23,21 @@ env:
   ZIG_VERSION: 0.13.0
 
 jobs:
+  preflight:
+    name: Preflight (test + publish dry-run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --all-features
+      # Catches manifest issues cargo publish would reject (e.g. an
+      # unversioned git dependency) in ~1min, before the full build matrix
+      # below spends ~20min finding out the same thing.
+      - run: cargo publish -p internxt-cli --locked --dry-run
+
   build:
     name: build (${{ matrix.name }})
+    needs: preflight
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -79,6 +92,14 @@ jobs:
           - name: x86_64-pc-windows-msvc
             targets: x86_64-pc-windows-msvc
             os: windows-latest
+            features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update
+          # windows-11-arm: native hosted ARM64 runner (public preview) — no
+          # cross-toolchain story for MSVC-ABI Windows (zig's cross linker
+          # only reaches the musl targets above), so this needs a real
+          # arm64 Windows host rather than cross-compiling from x86_64.
+          - name: aarch64-pc-windows-msvc
+            targets: aarch64-pc-windows-msvc
+            os: windows-11-arm
             features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update
     steps:
       - uses: actions/checkout@v7
@@ -148,6 +169,7 @@ jobs:
 
   build-freebsd:
     name: build (x86_64-unknown-freebsd)
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -201,6 +223,7 @@ jobs:
 
   docker:
     name: Docker image
+    needs: gh-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -239,6 +262,7 @@ jobs:
 
   crates-io:
     name: Publish to crates.io
+    needs: gh-release
     runs-on: ubuntu-latest
     # crates.io has no concept of "unlisted" pre-release cargo-side cleanup —
     # a test tag would leave a permanent published version. Only run for
