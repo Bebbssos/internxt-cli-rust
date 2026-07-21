@@ -837,6 +837,13 @@ These flags apply to `upload-file`, `upload-folder`, `sync-up`, and the
 uploads skip the offending file and continue; WebDAV `PUT` returns `413`;
 FUSE/SMB/NFS/SFTP writes fail accordingly).
 
+This is purely a **local, client-side pre-check** for fast failure — Internxt's
+servers independently enforce the same `maxUploadFileSize` on every upload.
+`--no-upload-limit` / `--max-upload-size` / `IXR_MAX_UPLOAD_SIZE` only change
+what `ixr` checks *before* sending; they cannot raise, bypass, or otherwise
+affect the server-side cap your plan actually has. An upload past the real
+server limit still fails server-side even with the local check disabled.
+
 ## Configuration
 
 API endpoints and app constants default to the public Internxt values (defined in the
