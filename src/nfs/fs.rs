@@ -249,6 +249,13 @@ struct WriteBuffer {
     flush_lock: tokio::sync::Mutex<()>,
     dirty: AtomicBool,
     size: AtomicU64,
+    /// Bumped every time `write_at`/`setattr` mutates the temp file, always
+    /// under the `file` lock alongside the mutation it accompanies. A flush
+    /// snapshots this before uploading and compares it after: if it moved, a
+    /// write landed while the (path-based, out-of-band) upload was reading the
+    /// file, so the just-uploaded bytes may be stale or torn and `dirty` must
+    /// NOT be cleared — see `clear_dirty_if_unchanged`.
+    write_gen: AtomicU64,
     last_write: Mutex<Instant>,
     /// Existing Drive entry to replace in place (uuid stays, fileId+size swap).
     /// `None` = a not-yet-created file: the first flush creates the entry (with
@@ -303,11 +310,30 @@ impl WriteBuffer {
             let mut f = self.file.lock().await;
             f.seek(std::io::SeekFrom::Start(offset)).await?;
             f.write_all(data).await?;
+            // Bump size/gen while still holding the file lock so a concurrent
+            // flush that takes this same lock (see `flush_writer`) observes a
+            // consistent (bytes, size, gen) snapshot — never a gen that has
+            // already moved past a size/byte update it hasn't seen yet.
+            self.size.fetch_max(offset + data.len() as u64, Ordering::SeqCst);
+            self.write_gen.fetch_add(1, Ordering::SeqCst);
         }
-        self.size.fetch_max(offset + data.len() as u64, Ordering::SeqCst);
         self.dirty.store(true, Ordering::SeqCst);
         *self.last_write.lock().unwrap() = Instant::now();
         Ok(())
+    }
+
+    /// True if no write has landed since `gen_before` (a snapshot taken by
+    /// `flush_writer` before it started the out-of-band upload read). Only in
+    /// that case is it safe to clear `dirty` — otherwise a write happened
+    /// while the upload was reading the file, the just-uploaded bytes may be
+    /// stale/torn, and `dirty` must stay set so the next sweep re-flushes.
+    fn clear_dirty_if_unchanged(&self, gen_before: u64) -> bool {
+        if self.write_gen.load(Ordering::SeqCst) == gen_before {
+            self.dirty.store(false, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
     }
 
     async fn read_at(&self, offset: u64, len: usize) -> anyhow::Result<Vec<u8>> {
@@ -604,6 +630,7 @@ impl Inner {
             flush_lock: tokio::sync::Mutex::new(()),
             dirty: AtomicBool::new(false),
             size: AtomicU64::new(node.size),
+            write_gen: AtomicU64::new(0),
             last_write: Mutex::new(Instant::now()),
             existing_uuid: Mutex::new(existing_uuid),
             parent_uuid: node.parent_uuid.clone(),
@@ -627,20 +654,25 @@ impl Inner {
         if !wb.dirty.load(Ordering::SeqCst) {
             return;
         }
-        {
+        // Snapshot (gen, size) together, under the same lock `write_at` holds
+        // while it mutates the file, so this pairing is consistent with the
+        // bytes on disk at this instant. The upload below reads the temp file
+        // by path through a separate handle (not this lock) — `gen_before` is
+        // how we detect if a write raced that out-of-band read.
+        let (gen_before, size) = {
             let mut f = wb.file.lock().await;
             if let Err(e) = f.flush().await {
                 crate::serve::log::warn(&format!("[nfs] flush temp failed: {e}"));
                 return;
             }
-        }
-        let size = wb.size.load(Ordering::SeqCst);
+            (wb.write_gen.load(Ordering::SeqCst), wb.size.load(Ordering::SeqCst))
+        };
         let existing = wb.existing_uuid.lock().unwrap().clone();
         // A not-yet-created file with no content: don't call createFileEntry with
         // a 0-byte body (free/legacy plans reject empty files with HTTP 402). Stop
         // retrying; if it's later written, `dirty` flips back on and it uploads.
         if size == 0 && existing.is_none() {
-            wb.dirty.store(false, Ordering::SeqCst);
+            wb.clear_dirty_if_unchanged(gen_before);
             return;
         }
         if let Err(e) = self.upload_limit.check(size) {
@@ -719,13 +751,31 @@ impl Inner {
             size, "nfs",
         )
         .await;
-        wb.dirty.store(false, Ordering::SeqCst);
+        // Bookkeeping (uuid/file_id/size on the Drive-side node) is always kept
+        // in sync with what was actually uploaded, even if a write raced the
+        // upload — the entry really was created/replaced with these values.
+        // But `dirty` is only cleared if nothing wrote to the buffer while the
+        // upload was reading it; otherwise clearing it here would silently
+        // drop the racing write (it set `dirty = true` but this unconditional
+        // clear used to stomp it right back to `false`, and the buffer's
+        // eventual eviction discarded the never-uploaded bytes for good).
+        // Leaving `dirty = true` means the next sweep re-flushes with the
+        // buffer's current (post-race) content.
+        let cleared = wb.clear_dirty_if_unchanged(gen_before);
         self.update_file_node(wb.fileid, file_id, size, wb.bucket.clone());
         self.readers.lock().unwrap().remove(&wb.fileid);
-        crate::serve::log::trace(&format!(
-            "[nfs] [UPLOAD] fileid={} ({size} bytes) done",
-            wb.fileid
-        ));
+        if cleared {
+            crate::serve::log::trace(&format!(
+                "[nfs] [UPLOAD] fileid={} ({size} bytes) done",
+                wb.fileid
+            ));
+        } else {
+            crate::serve::log::trace(&format!(
+                "[nfs] [UPLOAD] fileid={} ({size} bytes) done, but written to \
+                 again during upload; re-flushing on next sweep",
+                wb.fileid
+            ));
+        }
     }
 
     /// One sweep: flush idle-dirty buffers, evict long-quiet clean ones.
@@ -851,8 +901,11 @@ impl NFSFileSystem for DriveNfs {
             {
                 let f = wb.file.lock().await;
                 f.set_len(sz).await.map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                // size + write_gen move together under the file lock, same as
+                // `write_at`, so a concurrent flush's snapshot stays consistent.
+                wb.size.store(sz, Ordering::SeqCst);
+                wb.write_gen.fetch_add(1, Ordering::SeqCst);
             }
-            wb.size.store(sz, Ordering::SeqCst);
             wb.dirty.store(true, Ordering::SeqCst);
             *wb.last_write.lock().unwrap() = Instant::now();
             self.inner.set_node_size(id, sz);
@@ -1203,5 +1256,122 @@ impl DriveNfs {
         if let Some(id) = id {
             self.inner.remove_node(id);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests: write/flush race on `WriteBuffer`
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a `WriteBuffer` backed by a real temp file but with no Drive
+    /// identity (`base_file_id: None`, empty creds), so `write_at` /
+    /// `ensure_materialized` never touch the network — only the local file
+    /// and the atomics under test.
+    async fn test_write_buffer() -> Arc<WriteBuffer> {
+        let temp = temp_path(None);
+        let file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&temp)
+            .await
+            .unwrap();
+        Arc::new(WriteBuffer {
+            fileid: 42,
+            temp_path: temp,
+            file: tokio::sync::Mutex::new(file),
+            materialized: tokio::sync::Mutex::new(false),
+            flush_lock: tokio::sync::Mutex::new(()),
+            dirty: AtomicBool::new(false),
+            size: AtomicU64::new(0),
+            write_gen: AtomicU64::new(0),
+            last_write: Mutex::new(Instant::now()),
+            existing_uuid: Mutex::new(None),
+            parent_uuid: String::new(),
+            plain: "test".to_string(),
+            ftype: String::new(),
+            bucket: String::new(),
+            mnemonic: String::new(),
+            net_user: String::new(),
+            net_pass: String::new(),
+            base_file_id: None,
+            base_bucket: String::new(),
+            base_size: 0,
+        })
+    }
+
+    /// Reproduces the core of the flush/write race: a write that lands
+    /// between a flush's `(gen, size)` snapshot and the point it would
+    /// otherwise unconditionally clear `dirty` must NOT be lost — the old
+    /// code's unconditional `wb.dirty.store(false, ..)` would clobber the
+    /// `true` the racing write just set, and the buffer's content would
+    /// silently never reach Drive. `clear_dirty_if_unchanged` must refuse to
+    /// clear `dirty` when a write raced it, and must clear it cleanly when
+    /// none did.
+    #[tokio::test]
+    async fn flush_does_not_clobber_a_racing_write() {
+        let wb = test_write_buffer().await;
+
+        wb.write_at(0, b"hello").await.unwrap();
+        assert!(wb.dirty.load(Ordering::SeqCst));
+
+        // Mirrors `flush_writer`'s snapshot: taken before the (simulated,
+        // out-of-band) upload starts reading the file.
+        let gen_before = wb.write_gen.load(Ordering::SeqCst);
+
+        // A write lands while the "upload" is in flight — e.g. a background
+        // sweeper's flush is awaiting a network call when another NFS write
+        // RPC comes in on the same file.
+        wb.write_at(5, b" world").await.unwrap();
+        assert_eq!(wb.size.load(Ordering::SeqCst), 11);
+
+        // The flush finishes "uploading" (the stale, pre-race snapshot) and
+        // tries to clear dirty using the gen it captured before the race.
+        let cleared = wb.clear_dirty_if_unchanged(gen_before);
+
+        assert!(!cleared, "must not report a clean clear when a write raced the flush");
+        assert!(
+            wb.dirty.load(Ordering::SeqCst),
+            "a write that raced the flush must leave dirty=true so the next \
+             sweep re-uploads it — losing this would silently drop the write"
+        );
+
+        // Next sweep's flush re-snapshots and, with no further writes, is
+        // able to clear dirty normally.
+        let gen_before_2 = wb.write_gen.load(Ordering::SeqCst);
+        let cleared_2 = wb.clear_dirty_if_unchanged(gen_before_2);
+        assert!(cleared_2);
+        assert!(!wb.dirty.load(Ordering::SeqCst));
+    }
+
+    /// Same race, but with a real concurrent task and a timing gap standing
+    /// in for the network-bound upload, instead of calling the write inline.
+    #[tokio::test]
+    async fn concurrent_write_during_simulated_upload_is_not_lost() {
+        let wb = test_write_buffer().await;
+        wb.write_at(0, b"hello").await.unwrap();
+
+        let gen_before = wb.write_gen.load(Ordering::SeqCst);
+
+        let wb2 = wb.clone();
+        let writer_task = tokio::spawn(async move {
+            // Stands in for a write RPC arriving mid-upload.
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            wb2.write_at(5, b" world").await.unwrap();
+        });
+
+        // Stands in for the network-bound upload read.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        writer_task.await.unwrap();
+
+        let cleared = wb.clear_dirty_if_unchanged(gen_before);
+        assert!(!cleared);
+        assert!(wb.dirty.load(Ordering::SeqCst));
+        assert_eq!(wb.size.load(Ordering::SeqCst), 11);
     }
 }
