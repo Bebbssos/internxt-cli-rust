@@ -183,6 +183,11 @@ jobs:
     name: GitHub release
     needs: [build, build-freebsd]
     runs-on: ubuntu-latest
+    # Default `needs` gating requires every needed job to actually succeed —
+    # a *skipped* build-freebsd (prerelease tags) would otherwise skip this
+    # job too. Only actual failure of the required `build` matrix should
+    # block the release.
+    if: ${{ always() && needs.build.result == 'success' }}
     steps:
       - uses: actions/download-artifact@v8
         with:
