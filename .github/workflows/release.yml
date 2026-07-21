@@ -213,7 +213,15 @@ jobs:
         run: |
           echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
           echo "owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          # Prerelease tags skip the qemu-emulated cross-arch legs — amd64
+          # only, matching the trimmed binary matrix above.
+          if [[ "${{ github.ref_name }}" == *-* ]]; then
+            echo "platforms=linux/amd64" >> "$GITHUB_OUTPUT"
+          else
+            echo "platforms=linux/amd64,linux/386,linux/arm64,linux/arm/v7,linux/arm/v6" >> "$GITHUB_OUTPUT"
+          fi
       - uses: docker/setup-qemu-action@v4
+        if: ${{ contains(github.ref_name, '-') == false }}
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -226,7 +234,7 @@ jobs:
         with:
           context: .
           push: true
-          platforms: linux/amd64,linux/386,linux/arm64,linux/arm/v7,linux/arm/v6
+          platforms: ${{ steps.v.outputs.platforms }}
           build-args: VERSION=${{ steps.v.outputs.version }}
           tags: ghcr.io/${{ steps.v.outputs.owner }}/ixr:${{ steps.v.outputs.version }}
 
