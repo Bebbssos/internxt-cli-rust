@@ -40,7 +40,12 @@ CLI front-end built on top of it.
   once, one-shot upload containers, etc).
 - **Cargo**: `cargo install internxt-cli` (crate name; the installed binary is
   still `ixr`), or `cargo binstall internxt-cli` for a prebuilt binary with no
-  local compile.
+  local compile. Plain `cargo install` only builds the
+  [default feature set](#features) (SSO, WebDAV over HTTP, FUSE, self-update) —
+  the prebuilt binaries above ship with almost every feature on, so to match
+  them pass `--features` explicitly, e.g. `cargo install internxt-cli --features
+  webdav-tls,smb,nfs,sftp,termimage`. See [Features](#features) for the full
+  flag list.
 - **AUR** (Arch Linux): `ixr-bin`, e.g. `yay -S ixr-bin`.
 - **Prebuilt binary**: download an archive from the
   [releases page](https://github.com/Bebbssos/internxt-cli-rust/releases) for your
@@ -92,7 +97,8 @@ examples.
 ## Features
 
 Cargo feature flags gate optional command surface, mainly to keep the default
-binary small and dependency-light. `default = ["sso", "webdav", "fuse", "dotenv"]`.
+binary small and dependency-light. `default = ["sso", "webdav", "fuse",
+"dotenv", "self-update"]`.
 
 | Feature | Default | Enables | Notes |
 |---|---|---|---|
@@ -105,6 +111,7 @@ binary small and dependency-light. `default = ["sso", "webdav", "fuse", "dotenv"
 | `nfs` | off | `serve nfs` — NFSv3 export | Experimental. All platforms. |
 | `sftp` | off | `serve sftp` — SFTP over SSH | Experimental. All platforms. Pulls in `russh` + `russh-sftp`. |
 | `termimage` | off | `thumbnail display` — inline terminal image rendering | Pulls in `viuer` + `image`. Kitty/iTerm2 graphics protocol, with a Unicode half-block fallback. |
+| `self-update` | on | `ixr update` — replace the running binary with the latest GitHub release | Pointless (and wrong) for package-manager installs (AUR, Docker), so those builds leave it off; standalone binaries and plain `cargo install` keep it on. Pulls in `self_update` + `semver`. |
 
 ## Global flags
 
