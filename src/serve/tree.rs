@@ -115,17 +115,9 @@ fn page_items(page: &Value, key: &str) -> Vec<Value> {
         .collect()
 }
 
-/// All EXISTS subfolders of a folder, following pagination. Served from `cache`
-/// when a fresh entry exists; a miss populates it.
-pub async fn list_folders(
-    api: &DriveApi,
-    token: &str,
-    folder_uuid: &str,
-    cache: &FolderCache,
-) -> Result<Vec<FolderItem>> {
-    if let Some(hit) = cache.get(folder_uuid) {
-        return Ok(hit);
-    }
+/// All EXISTS subfolders of a folder, following pagination, live (no cache
+/// read or write).
+async fn fetch_folders(api: &DriveApi, token: &str, folder_uuid: &str) -> Result<Vec<FolderItem>> {
     let mut out = Vec::new();
     let mut offset: u32 = 0;
     loop {
@@ -138,8 +130,52 @@ pub async fn list_folders(
         }
         offset += got;
     }
+    Ok(out)
+}
+
+/// All EXISTS subfolders of a folder, following pagination. Served from `cache`
+/// when a fresh entry exists; a miss populates it.
+pub async fn list_folders(
+    api: &DriveApi,
+    token: &str,
+    folder_uuid: &str,
+    cache: &FolderCache,
+) -> Result<Vec<FolderItem>> {
+    if let Some(hit) = cache.get(folder_uuid) {
+        return Ok(hit);
+    }
+    let out = fetch_folders(api, token, folder_uuid).await?;
     cache.put(folder_uuid, out.clone());
     Ok(out)
+}
+
+/// Find a subfolder of `parent_uuid` by name. Cache-backed like `list_folders`,
+/// but a name miss against a *cached* listing doesn't get trusted blindly: the
+/// entry may predate a folder created by another client (another device,
+/// another `ixr` process, a plain `ixr` upload) since this process cached it,
+/// which would otherwise make that folder — and everything under it — look
+/// like it doesn't exist until the TTL expires. So a miss against a cache hit
+/// forces one live re-fetch before concluding the name really isn't there.
+pub async fn find_folder(
+    api: &DriveApi,
+    token: &str,
+    parent_uuid: &str,
+    name: &str,
+    cache: &FolderCache,
+) -> Result<Option<FolderItem>> {
+    if let Some(cached) = cache.get(parent_uuid) {
+        if let Some(f) = cached.iter().find(|f| f.plain_name == name) {
+            return Ok(Some(f.clone()));
+        }
+        let fresh = fetch_folders(api, token, parent_uuid).await?;
+        let found = fresh.iter().find(|f| f.plain_name == name).cloned();
+        cache.put(parent_uuid, fresh);
+        return Ok(found);
+    }
+    let out = fetch_folders(api, token, parent_uuid).await?;
+    let found = out.iter().find(|f| f.plain_name == name).cloned();
+    cache.put(parent_uuid, out);
+    Ok(found)
 }
 
 /// All EXISTS subfiles of a folder, following pagination.
@@ -175,8 +211,7 @@ pub async fn resolve_folder(
         updated_at: root_updated_at.to_string(),
     };
     for comp in components {
-        let folders = list_folders(api, token, &current.uuid, cache).await?;
-        match folders.into_iter().find(|f| &f.plain_name == comp) {
+        match find_folder(api, token, &current.uuid, comp, cache).await? {
             Some(f) => current = f,
             None => return Ok(None),
         }

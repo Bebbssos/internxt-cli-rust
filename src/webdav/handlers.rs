@@ -157,8 +157,12 @@ async fn folder_children(
         format!("{base_url}/")
     };
 
-    let folders = resource::list_folders(api, token, &folder.uuid, cache).await?;
-    let files = resource::list_files(api, token, &folder.uuid).await?;
+    // Independent calls: run concurrently rather than paying two sequential
+    // network round trips for one directory listing.
+    let (folders, files) = tokio::try_join!(
+        resource::list_folders(api, token, &folder.uuid, cache),
+        resource::list_files(api, token, &folder.uuid),
+    )?;
 
     let mut out = String::new();
     for f in folders {
@@ -548,10 +552,9 @@ pub async fn mkcol(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
 
     // RFC 4918: MKCOL on an existing resource must fail with 405. Some clients
     // (e.g. QNAP HBS) abort the whole backup job on a 2xx here (matches og).
-    let existing = resource::list_folders(&api, token, &parent.uuid, &ctx.cache)
+    let existing = resource::find_folder(&api, token, &parent.uuid, &resource.name, &ctx.cache)
         .await?
-        .into_iter()
-        .any(|f| f.plain_name == resource.name);
+        .is_some();
     if existing {
         return Err(AppError::new(
             StatusCode::METHOD_NOT_ALLOWED,
@@ -812,12 +815,9 @@ async fn get_or_create_child(
 ) -> Result<FolderItem, AppError> {
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 0..FOLDER_CREATE_ATTEMPTS {
-        // On retries, bypass the cache so a concurrently-created folder is seen.
-        if attempt > 0 {
-            ctx.cache.invalidate(parent_uuid);
-        }
-        let folders = resource::list_folders(api, token, parent_uuid, &ctx.cache).await?;
-        if let Some(f) = folders.into_iter().find(|f| f.plain_name == name) {
+        // `find_folder` already bypasses a stale cache hit on a name miss, so a
+        // concurrently-created folder is seen without needing to invalidate here.
+        if let Some(f) = resource::find_folder(api, token, parent_uuid, name, &ctx.cache).await? {
             return Ok(f);
         }
 

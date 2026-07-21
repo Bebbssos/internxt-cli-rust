@@ -30,9 +30,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Result};
 use fuser::{
     BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
-    INodeNo, LockOwner, OpenAccMode, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
-    WriteFlags,
+    INodeNo, InitFlags, KernelConfig, LockOwner, OpenAccMode, OpenFlags, RenameFlags, ReplyAttr,
+    ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen,
+    ReplyStatfs, ReplyWrite, Request, TimeOrNow, WriteFlags,
 };
 use rand::RngExt;
 use serde_json::json;
@@ -105,11 +105,14 @@ struct InodeTable {
     next_ino: u64,
 }
 
-/// One open file handle: either a streaming reader (read-only opens) or a
-/// temp-file-backed writer (write opens and `create`).
+/// One open file handle: either a streaming reader (read-only opens), a
+/// temp-file-backed writer (write opens and `create`), or a directory-listing
+/// snapshot (opendir).
 enum Handle {
     Read(ReadHandle),
     Write(Arc<WriteHandle>),
+    /// (child inode, name, attrs) snapshot for one opendir/readdir(plus)/releasedir session.
+    Dir(Vec<(u64, String, NodeData)>),
 }
 
 /// A sequential download stream positioned at `pos` in the file, feeding a pipe.
@@ -440,6 +443,40 @@ impl Inner {
         }
     }
 
+    /// Build the full entry list for a directory (`.`, `..`, subfolders,
+    /// files), interning each child to a stable inode. Called once per
+    /// `opendir` so the whole enumeration — which the kernel may split across
+    /// several `readdir` calls for a large directory — sees one consistent
+    /// snapshot instead of re-fetching (and possibly re-ordering, since file
+    /// listings are never cached) on every call.
+    async fn build_dir_entries(&self, ino: u64, node: &NodeData) -> Result<Vec<(u64, String, NodeData)>> {
+        let creds = self.creds();
+        let api = DriveApi::for_credentials(&creds);
+        // Independent calls: run concurrently rather than paying two sequential
+        // network round trips for one directory listing.
+        let (folders, files) = tokio::try_join!(
+            tree::list_folders(&api, &creds.token, &node.uuid, &self.cache),
+            tree::list_files(&api, &creds.token, &node.uuid),
+        )?;
+
+        let mut entries: Vec<(u64, String, NodeData)> =
+            Vec::with_capacity(files.len() + folders.len() + 2);
+        entries.push((ino, ".".to_string(), node.clone()));
+        let parent_nd = self.node(node.parent).unwrap_or_else(|| node.clone());
+        entries.push((node.parent, "..".to_string(), parent_nd));
+        for f in &folders {
+            let nd = self.node_from_folder(ino, &node.uuid, f);
+            let child = self.intern(ino, nd.clone());
+            entries.push((child, f.plain_name.clone(), nd));
+        }
+        for f in &files {
+            let nd = self.node_from_file(ino, &node.uuid, f);
+            let child = self.intern(ino, nd.clone());
+            entries.push((child, f.display_name(), nd));
+        }
+        Ok(entries)
+    }
+
     fn attr(&self, ino: u64, nd: &NodeData) -> FileAttr {
         let time = parse_time(&nd.updated_at);
         let (kind, perm, nlink) = match nd.kind {
@@ -600,6 +637,16 @@ impl InxtFs {
 }
 
 impl Filesystem for InxtFs {
+    fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
+        // Always request readdirplus (not just the adaptive AUTO variant): a
+        // plain (non-color) `ls` doesn't stat every entry, but anything that
+        // does — color-aware `ls`, `ls -l`, a file manager — would otherwise
+        // trigger one `lookup` per entry, and lookup's file-listing fetch is
+        // never cached. Folding attrs into readdir itself avoids that.
+        let _ = config.add_capabilities(InitFlags::FUSE_DO_READDIRPLUS);
+        Ok(())
+    }
+
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let inner = self.inner.clone();
         let name = name.to_string_lossy().into_owned();
@@ -627,15 +674,14 @@ impl Filesystem for InxtFs {
                     return;
                 }
             }
-            match tree::list_folders(&api, &creds.token, &pnode.uuid, &inner.cache).await {
-                Ok(folders) => {
-                    if let Some(f) = folders.iter().find(|f| f.plain_name == name) {
-                        let nd = inner.node_from_folder(parent, &pnode.uuid, f);
-                        let ino = inner.intern(parent, nd.clone());
-                        reply.entry(&inner.ttl(), &inner.attr(ino, &nd), Generation(0));
-                        return;
-                    }
+            match tree::find_folder(&api, &creds.token, &pnode.uuid, &name, &inner.cache).await {
+                Ok(Some(f)) => {
+                    let nd = inner.node_from_folder(parent, &pnode.uuid, &f);
+                    let ino = inner.intern(parent, nd.clone());
+                    reply.entry(&inner.ttl(), &inner.attr(ino, &nd), Generation(0));
+                    return;
                 }
+                Ok(None) => {}
                 Err(e) => {
                     reply.error(errno(&e));
                     return;
@@ -722,18 +768,11 @@ impl Filesystem for InxtFs {
         });
     }
 
-    fn readdir(
-        &self,
-        _req: &Request,
-        ino: INodeNo,
-        _fh: FileHandle,
-        offset: u64,
-        mut reply: ReplyDirectory,
-    ) {
+    fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let inner = self.inner.clone();
         self.rt.spawn(async move {
             let ino = ino.0;
-            log(&format!("[READDIR] {} offset={offset}", inner.path_of(ino)));
+            log(&format!("[OPENDIR] {}", inner.path_of(ino)));
             let Some(node) = inner.node(ino) else {
                 reply.error(Errno::ENOENT);
                 return;
@@ -742,40 +781,57 @@ impl Filesystem for InxtFs {
                 reply.error(Errno::ENOTDIR);
                 return;
             }
-            let creds = inner.creds();
-            let api = DriveApi::for_credentials(&creds);
-            let folders = match tree::list_folders(&api, &creds.token, &node.uuid, &inner.cache).await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    reply.error(errno(&e));
-                    return;
+            // Snapshot the listing once for the lifetime of this opendir, so a
+            // large directory that the kernel reads via several `readdir` calls
+            // sees one consistent view instead of re-fetching (and possibly
+            // re-ordering, since file listings are never cached) every call.
+            match inner.build_dir_entries(ino, &node).await {
+                Ok(entries) => {
+                    let fh = inner.new_fh(Handle::Dir(entries));
+                    reply.opened(FileHandle(fh), FopenFlags::empty());
                 }
-            };
-            let files = match tree::list_files(&api, &creds.token, &node.uuid).await {
-                Ok(v) => v,
-                Err(e) => {
-                    reply.error(errno(&e));
-                    return;
+                Err(e) => reply.error(errno(&e)),
+            }
+        });
+    }
+
+    fn readdir(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        fh: FileHandle,
+        offset: u64,
+        mut reply: ReplyDirectory,
+    ) {
+        let inner = self.inner.clone();
+        self.rt.spawn(async move {
+            log(&format!("[READDIR] {} offset={offset}", inner.path_of(ino.0)));
+            // The snapshot taken at `opendir` is the source of truth for this
+            // whole enumeration; only fall back to a fresh live fetch if the
+            // handle is somehow gone (e.g. a client calling readdir without a
+            // matching opendir).
+            let entries = match inner.get_handle(fh.0).as_deref() {
+                Some(Handle::Dir(entries)) => entries.clone(),
+                _ => {
+                    let Some(node) = inner.node(ino.0) else {
+                        reply.error(Errno::ENOENT);
+                        return;
+                    };
+                    match inner.build_dir_entries(ino.0, &node).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            reply.error(errno(&e));
+                            return;
+                        }
+                    }
                 }
             };
 
-            // Assemble the full entry list: ".", "..", folders, files.
-            let mut entries: Vec<(u64, FileType, String)> = Vec::with_capacity(files.len() + 2);
-            entries.push((ino, FileType::Directory, ".".to_string()));
-            entries.push((node.parent, FileType::Directory, "..".to_string()));
-            for f in &folders {
-                let nd = inner.node_from_folder(ino, &node.uuid, f);
-                let child = inner.intern(ino, nd);
-                entries.push((child, FileType::Directory, f.plain_name.clone()));
-            }
-            for f in &files {
-                let nd = inner.node_from_file(ino, &node.uuid, f);
-                let child = inner.intern(ino, nd);
-                entries.push((child, FileType::RegularFile, f.display_name()));
-            }
-
-            for (i, (child, kind, name)) in entries.into_iter().enumerate().skip(offset as usize) {
+            for (i, (child, name, nd)) in entries.into_iter().enumerate().skip(offset as usize) {
+                let kind = match nd.kind {
+                    NodeKind::Dir => FileType::Directory,
+                    NodeKind::File => FileType::RegularFile,
+                };
                 // `offset` is the index of the *next* entry to return.
                 if reply.add(INodeNo(child), (i + 1) as u64, kind, &name) {
                     break;
@@ -783,6 +839,58 @@ impl Filesystem for InxtFs {
             }
             reply.ok();
         });
+    }
+
+    /// Same as `readdir`, but each entry carries its full attrs so the kernel
+    /// doesn't need a separate `lookup` per entry to stat it — which is what a
+    /// color-aware `ls` (or anything doing `stat` on every name) would
+    /// otherwise trigger, turning one directory listing into 1 + N live round
+    /// trips (file listings are never cached, so each of those N `lookup`s was
+    /// re-fetching the same data `readdir` just fetched).
+    fn readdirplus(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        fh: FileHandle,
+        offset: u64,
+        mut reply: ReplyDirectoryPlus,
+    ) {
+        let inner = self.inner.clone();
+        self.rt.spawn(async move {
+            log(&format!("[READDIRPLUS] {} offset={offset}", inner.path_of(ino.0)));
+            let entries = match inner.get_handle(fh.0).as_deref() {
+                Some(Handle::Dir(entries)) => entries.clone(),
+                _ => {
+                    let Some(node) = inner.node(ino.0) else {
+                        reply.error(Errno::ENOENT);
+                        return;
+                    };
+                    match inner.build_dir_entries(ino.0, &node).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            reply.error(errno(&e));
+                            return;
+                        }
+                    }
+                }
+            };
+
+            let ttl = inner.ttl();
+            for (i, (child, name, nd)) in entries.into_iter().enumerate().skip(offset as usize) {
+                let attr = inner.attr(child, &nd);
+                // `offset` is the index of the *next* entry to return.
+                if reply.add(INodeNo(child), (i + 1) as u64, &name, &ttl, &attr, Generation(0)) {
+                    break;
+                }
+            }
+            reply.ok();
+        });
+    }
+
+    fn releasedir(&self, _req: &Request, ino: INodeNo, fh: FileHandle, _flags: OpenFlags, reply: ReplyEmpty) {
+        log(&format!("[RELEASEDIR] {}", self.inner.path_of(ino.0)));
+        self.inner.take_handle(fh.0);
+        reply.ok();
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
@@ -889,6 +997,7 @@ impl Filesystem for InxtFs {
                         Err(e) => reply.error(errno(&e)),
                     }
                 }
+                Handle::Dir(_) => reply.error(Errno::EISDIR),
             }
         });
     }
@@ -1103,13 +1212,12 @@ impl Filesystem for InxtFs {
             let creds = inner.creds();
             let api = DriveApi::for_credentials(&creds);
             // Reject if a folder of that name already exists.
-            match tree::list_folders(&api, &creds.token, &pnode.uuid, &inner.cache).await {
-                Ok(folders) => {
-                    if folders.iter().any(|f| f.plain_name == name) {
-                        reply.error(Errno::EEXIST);
-                        return;
-                    }
+            match tree::find_folder(&api, &creds.token, &pnode.uuid, &name, &inner.cache).await {
+                Ok(Some(_)) => {
+                    reply.error(Errno::EEXIST);
+                    return;
                 }
+                Ok(None) => {}
                 Err(e) => {
                     reply.error(errno(&e));
                     return;
@@ -1214,15 +1322,13 @@ impl Filesystem for InxtFs {
             };
             let creds = inner.creds();
             let api = DriveApi::for_credentials(&creds);
-            let folders = match tree::list_folders(&api, &creds.token, &pnode.uuid, &inner.cache).await
-            {
+            let Some(f) = (match tree::find_folder(&api, &creds.token, &pnode.uuid, &name, &inner.cache).await {
                 Ok(v) => v,
                 Err(e) => {
                     reply.error(errno(&e));
                     return;
                 }
-            };
-            let Some(f) = folders.into_iter().find(|f| f.plain_name == name) else {
+            }) else {
                 reply.error(Errno::ENOENT);
                 return;
             };
@@ -1296,14 +1402,12 @@ impl Filesystem for InxtFs {
                 let cur = f.display_name();
                 (f.uuid, false, cur)
             } else {
-                match tree::list_folders(&api, &creds.token, &pnode.uuid, &inner.cache).await {
-                    Ok(v) => match v.into_iter().find(|f| f.plain_name == name) {
-                        Some(f) => (f.uuid, true, f.plain_name),
-                        None => {
-                            reply.error(Errno::ENOENT);
-                            return;
-                        }
-                    },
+                match tree::find_folder(&api, &creds.token, &pnode.uuid, &name, &inner.cache).await {
+                    Ok(Some(f)) => (f.uuid, true, f.plain_name),
+                    Ok(None) => {
+                        reply.error(Errno::ENOENT);
+                        return;
+                    }
                     Err(e) => {
                         reply.error(errno(&e));
                         return;
