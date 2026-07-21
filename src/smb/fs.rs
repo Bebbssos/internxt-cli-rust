@@ -531,7 +531,12 @@ impl Handle for FileHandle {
             FileBody::Write(ws) => ws,
             FileBody::Read(_) => return Err(SmbError::AccessDenied),
         };
-        let end = offset + data.len() as u64;
+        // checked_add: a client-supplied offset near u64::MAX combined with any
+        // len must not silently wrap to a small value and sail past the size
+        // gate below (release builds wrap on overflow instead of panicking).
+        let end = offset
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| to_smb(anyhow::anyhow!("write offset {offset} + len {} overflows", data.len())))?;
         // Gate by the high-water mark this write would set (final size is only
         // known at close). Over-limit → access denied.
         ws.inner.upload_limit.check(end).map_err(to_smb)?;

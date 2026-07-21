@@ -931,7 +931,12 @@ impl russh_sftp::server::Handler for SftpSession {
             Some(Handle::Write(ws)) => ws.clone(),
             _ => return Err(StatusCode::PermissionDenied),
         };
-        let end = offset + data.len() as u64;
+        // checked_add: a client-supplied offset near u64::MAX combined with any
+        // len must not silently wrap to a small value and sail past the size
+        // gate below (release builds wrap on overflow instead of panicking).
+        let end = offset
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| to_status(anyhow::anyhow!("write offset {offset} + len {} overflows", data.len())))?;
         ws.inner.upload_limit.check(end).map_err(to_status)?;
         ws.ensure_materialized().await?;
         {
