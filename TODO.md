@@ -77,9 +77,6 @@ diff upstream against them to find changes worth pulling in.
 - HTTPS lives behind the `webdav-tls` feature (rustls + rcgen self-signed / custom cert).
 
 ### FUSE mount (`mount`, beyond og — no official equivalent)
-- Random-access reads re-download from the start of the file and skip to the offset
-  (per-handle stream only avoids this for *sequential* reads / small forward gaps). Same
-  CTR-offset seeking fix as the WebDAV/Download range items would make random reads cheap.
 - Writes buffer the whole file to a temp file and upload on `release` (Internxt has no
   partial update). `fsync` does **not** upload — a crash before `release` loses buffered
   writes. Could upload-on-fsync for durability at a re-upload cost.
@@ -91,9 +88,8 @@ diff upstream against them to find changes worth pulling in.
   build the same way but are untested here (developed/verified on Linux + libfuse3).
 
 ### SMB/CIFS (`serve smb`, beyond og — no official equivalent, experimental, feature default-off)
-- Shares the whole-file write + streaming/ranged read model with FUSE, so the same caveats
-  apply (random reads not yet CTR-offset-cheap; RMW of a large file materializes then re-uploads;
-  no partial update).
+- Shares the whole-file write + streaming/ranged read model with FUSE; RMW of a large file
+  materializes then re-uploads; no partial update.
 - Built on `smb-server`, pulled as a **git dependency** on a fork
   (`github.com/Bebbssos/rust-smb-server`) with two fixes: upstream 0.4.1 doesn't re-export the
   `ShareBackend`/`Handle` trait types (can't be implemented downstream unpatched), and QUERY_INFO

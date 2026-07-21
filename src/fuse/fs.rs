@@ -50,6 +50,16 @@ use crate::serve::tree::{self, FileItem, FolderItem};
 /// Root inode, per the FUSE protocol.
 const ROOT_INO: u64 = 1;
 
+/// Forward gaps up to this size are skipped by reading-and-discarding from the
+/// live stream (cheap, no new request). Past it, discarding would pull more
+/// data over the wire than a fresh ranged request costs in round-trip
+/// overhead, so a big forward jump restarts the stream instead — same as a
+/// backward seek. This matters for MP4s with the `moov` atom at the end of
+/// the file (non-"faststart"): a player probing metadata jumps from byte 0
+/// to near EOF, and without this threshold that jump silently downloads (and
+/// discards) the entire file.
+const MAX_FORWARD_SKIP: u64 = 8 * 1024 * 1024;
+
 pub(crate) fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -128,7 +138,9 @@ impl Drop for ReadStream {
 }
 
 /// Read-only handle: lazily (re)starts a sequential decrypt stream and serves
-/// reads from it. Forward gaps are skipped in-stream; a backward seek restarts.
+/// reads from it. Forward gaps up to [`MAX_FORWARD_SKIP`] are skipped in-stream;
+/// a backward seek, or a forward gap past the threshold, restarts as a ranged
+/// download.
 struct ReadHandle {
     file_id: String,
     bucket: String,
@@ -168,9 +180,10 @@ impl ReadHandle {
 
     async fn read_at(&self, rt: &RtHandle, offset: u64, size: usize) -> Result<Vec<u8>> {
         let mut guard = self.stream.lock().await;
-        // (Re)start when there is no stream or the offset is behind the cursor.
+        // (Re)start when there is no stream, the offset is behind the cursor,
+        // or the forward gap is too big to cheaply skip over in-stream.
         let restart = match &*guard {
-            Some(s) => offset < s.pos,
+            Some(s) => offset < s.pos || offset - s.pos > MAX_FORWARD_SKIP,
             None => true,
         };
         if restart {
