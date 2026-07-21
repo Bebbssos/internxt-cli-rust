@@ -39,6 +39,10 @@ jobs:
     name: build (${{ matrix.name }})
     needs: preflight
     runs-on: ${{ matrix.os }}
+    # Prerelease tags (v*-*, e.g. v0.2.0-rc.1) only build the `quick: true`
+    # subset — enough to sanity-check GH release + Docker without waiting on
+    # the full ~12-job matrix (musl cross, both Windows arches, etc).
+    if: ${{ matrix.quick || !contains(github.ref_name, '-') }}
     strategy:
       fail-fast: false
       matrix:
@@ -51,11 +55,13 @@ jobs:
             os: ubuntu-latest
             apt: libfuse3-dev
             features: --all-features
+            quick: true
           - name: aarch64-unknown-linux-gnu
             targets: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             apt: libfuse3-dev
             features: --all-features
+            quick: false
           # 32-bit/legacy-ARM Linux: no GitHub-hosted native runner, so cross via
           # zig (same toolchain as the Dockerfile). No libfuse sysroot for these
           # targets, so `fuse` is dropped; everything else is pure Rust.
@@ -64,16 +70,19 @@ jobs:
             os: ubuntu-latest
             cross: zig
             features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
+            quick: false
           - name: armv7-unknown-linux-musleabihf
             targets: armv7-unknown-linux-musleabihf
             os: ubuntu-latest
             cross: zig
             features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
+            quick: false
           - name: arm-unknown-linux-musleabihf
             targets: arm-unknown-linux-musleabihf
             os: ubuntu-latest
             cross: zig
             features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
+            quick: false
           # macOS: one arm64 runner builds *both* apple targets — Xcode's
           # clang cross-links x86_64 from an Apple Silicon host natively (no
           # separate toolchain needed), so this doesn't need its own
@@ -84,8 +93,13 @@ jobs:
           # work unattended in CI); everything else native.
           - name: macos
             targets: aarch64-apple-darwin,x86_64-apple-darwin
+            # Prerelease builds narrow to x86_64 only (see "Resolve target
+            # list" step below) — cuts the arm64 leg when the only tester
+            # available is a Hackintosh (x86_64).
+            quick_targets: x86_64-apple-darwin
             os: macos-latest
             features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
+            quick: true
           # Windows: `fuse` feature is inert here regardless (fuser is a
           # cfg(unix) dependency), left off explicitly for clarity. termimage
           # dropped too (Kitty/iTerm2 graphics protocols don't apply).
@@ -93,6 +107,7 @@ jobs:
             targets: x86_64-pc-windows-msvc
             os: windows-latest
             features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update
+            quick: true
           # windows-11-arm: native hosted ARM64 runner (public preview) — no
           # cross-toolchain story for MSVC-ABI Windows (zig's cross linker
           # only reaches the musl targets above), so this needs a real
@@ -101,12 +116,24 @@ jobs:
             targets: aarch64-pc-windows-msvc
             os: windows-11-arm
             features: --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update
+            quick: false
     steps:
       - uses: actions/checkout@v7
 
+      - name: Resolve target list
+        id: resolved
+        shell: bash
+        run: |
+          set -eux
+          targets="${{ matrix.targets }}"
+          if [[ "${{ contains(github.ref_name, '-') }}" == "true" && -n "${{ matrix.quick_targets }}" ]]; then
+            targets="${{ matrix.quick_targets }}"
+          fi
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.targets }}
+          targets: ${{ steps.resolved.outputs.targets }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -131,7 +158,7 @@ jobs:
         shell: bash
         run: |
           set -eux
-          IFS=',' read -ra targets <<< "${{ matrix.targets }}"
+          IFS=',' read -ra targets <<< "${{ steps.resolved.outputs.targets }}"
           for t in "${targets[@]}"; do
             cargo build --release --locked -p internxt-cli --target "$t" ${{ matrix.features }}
           done
@@ -148,7 +175,7 @@ jobs:
         run: |
           set -eux
           mkdir -p out
-          IFS=',' read -ra targets <<< "${{ matrix.targets }}"
+          IFS=',' read -ra targets <<< "${{ steps.resolved.outputs.targets }}"
           for t in "${targets[@]}"; do
             rm -rf dist && mkdir -p dist
             if [[ "$t" == *windows* ]]; then
@@ -171,6 +198,8 @@ jobs:
     name: build (x86_64-unknown-freebsd)
     needs: preflight
     runs-on: ubuntu-latest
+    # Skipped on prerelease tags, same reasoning as the `quick` matrix filter above.
+    if: ${{ !contains(github.ref_name, '-') }}
     steps:
       - uses: actions/checkout@v7
       # No usable cross-compile sysroot for FreeBSD (unlike the musl targets,
