@@ -460,10 +460,15 @@ fn parent_key(rel: &Path) -> Option<PathBuf> {
 }
 
 /// Recursively scan a directory (pre-order: parent folder pushed before its children),
-/// skipping symlinks and zero-byte files. Returns total bytes.
+/// skipping symlinks. Empty (0-byte) files are included by default — Internxt's
+/// free/legacy plans reject them server-side (HTTP 402), which now surfaces as a
+/// normal per-file failure rather than silent loss — but `exclude_empty` (the
+/// `--exclude-empty-files` flag) skips them client-side instead, for accounts
+/// where that rejection is expected and not worth reporting. Returns total bytes.
 fn scan_dir(
     current: &Path,
     parent: &Path,
+    exclude_empty: bool,
     folders: &mut Vec<ScanNode>,
     files: &mut Vec<ScanNode>,
 ) -> u64 {
@@ -477,7 +482,7 @@ fn scan_dir(
     let rel = current.strip_prefix(parent).unwrap_or(current).to_path_buf();
 
     if meta.is_file() {
-        if meta.len() == 0 {
+        if exclude_empty && meta.len() == 0 {
             return 0;
         }
         let name = current
@@ -509,7 +514,7 @@ fn scan_dir(
         let mut total = 0;
         if let Ok(entries) = std::fs::read_dir(current) {
             for entry in entries.flatten() {
-                total += scan_dir(&entry.path(), parent, folders, files);
+                total += scan_dir(&entry.path(), parent, exclude_empty, folders, files);
             }
         }
         return total;
@@ -585,6 +590,7 @@ pub async fn upload_folder(
     local_path: &str,
     destination: Option<&str>,
     dest_path: Option<&str>,
+    exclude_empty_files: bool,
     limit_args: &crate::upload_limit::UploadLimitArgs,
 ) -> Result<()> {
     let creds = Arc::new(auth::get_auth_details().await?);
@@ -614,7 +620,7 @@ pub async fn upload_folder(
     let parent = root.parent().unwrap_or_else(|| Path::new(""));
     let mut folders = Vec::new();
     let mut files = Vec::new();
-    let total_bytes = scan_dir(root, parent, &mut folders, &mut files);
+    let total_bytes = scan_dir(root, parent, exclude_empty_files, &mut folders, &mut files);
 
     let timer = Instant::now();
     crate::output::status("Preparing network...");
@@ -657,6 +663,11 @@ pub async fn upload_folder(
     // One shared overall bar across all files (concurrent per-file bars would clash).
     let pb = crate::output::progress_bar(total_bytes, "Uploading");
     let mut handles = Vec::new();
+    // Independent of `pb.println` (which indicatif silently drops when stderr
+    // isn't a terminal — piped/scripted/CI runs): tracked here so a partial
+    // failure is never invisible.
+    let failed: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let total_files = files.len();
 
     for file in files {
         let parent_uuid = match parent_key(&file.rel) {
@@ -680,6 +691,7 @@ pub async fn upload_folder(
         let mnemonic = mnemonic.clone();
         let uploaded = uploaded.clone();
         let pb = pb.clone();
+        let failed = failed.clone();
         handles.push(tokio::spawn(async move {
             let _permit = permit;
             match upload_one_file(
@@ -693,6 +705,7 @@ pub async fn upload_folder(
                 }
                 Err(e) => {
                     pb.println(format!("Failed to upload {}: {e}", file.name));
+                    failed.lock().unwrap().push((file.rel.display().to_string(), format!("{e:#}")));
                 }
             }
         }));
@@ -712,6 +725,21 @@ pub async fn upload_folder(
     let _ = total_bytes;
 
     let folder_url = format!("{}/folder/{}", config::drive_web_url(), root_folder_id);
+    let failed = failed.lock().unwrap().clone();
+    if !failed.is_empty() {
+        let detail = failed
+            .iter()
+            .map(|(rel, err)| format!("{rel}: {err}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(anyhow!(
+            "{} of {total_files} file(s) failed to upload ({} of {} bytes uploaded, folder: {folder_url}): {detail}",
+            failed.len(),
+            total_uploaded,
+            total_bytes,
+        ));
+    }
+
     crate::output::emit(
         &format!(
             "Folder uploaded in {elapsed_ms}ms, view it at {folder_url} ({total_uploaded} bytes)"

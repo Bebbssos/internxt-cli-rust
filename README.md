@@ -401,15 +401,28 @@ Also invocable via the flat alias `upload-folder`. Recursively uploads a
 folder tree (concurrent file uploads).
 
 Flags: `-f/--folder <PATH>` (required), `-i/--destination <FOLDER_ID>`
-(default: root), `--dest-path <PATH>` (alternative to `--destination`), plus
-the [upload-limit flags](#upload-size-limit).
+(default: root), `--dest-path <PATH>` (alternative to `--destination`),
+`--exclude-empty-files` (skip 0-byte files client-side instead of uploading
+them — see below), plus the [upload-limit flags](#upload-size-limit).
 
 ```sh
 ixr upload-folder -f ./my-folder                # -i for a destination folder
 ixr upload-folder -f ./my-folder --dest-path /Backups
+ixr upload-folder -f ./my-folder --exclude-empty-files   # skip 0-byte files
 ```
 
-JSON output: `{ "success": true, "folder": { "uuid": "..." }, "totalBytes": N, "uploadTimeMs": N }`.
+Empty (0-byte) files are included by default and uploaded like any other
+file. Internxt's free/legacy plans reject them server-side (`HTTP 402
+Payment Required`); on Ultimate/paid plans they upload fine. If any file
+fails for any reason — including that 402 — the command exits non-zero and
+reports which file and why, instead of silently omitting it. Pass
+`--exclude-empty-files` to skip 0-byte files up front and avoid that failure
+entirely on plans that don't support them.
+
+JSON output: `{ "success": true, "folder": { "uuid": "..." }, "totalBytes": N, "uploadTimeMs": N }`
+on full success. If one or more files failed to upload, the command instead
+exits with a non-zero status and an error message naming each failed file
+and its reason (`{ "success": false, "message": "..." }` in `--json` mode).
 
 ### `download file`
 
@@ -611,7 +624,8 @@ Flags (`sync-up`): `-l/--local <DIR>` (required), `-r/--remote <FOLDER_ID>`
 (default: root), `--remote-path <PATH>` (alternative to `--remote`),
 `--delete[=trash|permanent]` (opt-in; prunes extra remote files **and**
 folders — deleting the top-most extra folder cascades its subtree), `--dry-run`,
-plus the [upload-limit flags](#upload-size-limit).
+`--exclude-empty-files` (skip 0-byte local files instead of uploading them —
+see below), plus the [upload-limit flags](#upload-size-limit).
 
 Flags (`sync-down`): `-l/--local <DIR>` (required), `-r/--remote <FOLDER_ID>`,
 `--remote-path <PATH>`, `--delete[=remove]` (OS-trash delete mode not yet
@@ -620,8 +634,20 @@ supported), `--dry-run`.
 ```sh
 ixr sync-up   -l ./my-folder -r <folder-uuid> --dry-run   # preview a push
 ixr sync-up   -l ./my-folder -r <folder-uuid> --delete    # push, trashing remote extras
+ixr sync-up   -l ./my-folder -r <folder-uuid> --exclude-empty-files
 ixr sync-down -l ./my-folder --remote-path /Backups       # pull new/changed files
 ```
+
+`sync-up` uploads empty (0-byte) local files by default, same as
+[`upload folder`](#upload-folder). Internxt's free/legacy plans reject them
+server-side (`HTTP 402 Payment Required`), which counts as a normal per-file
+failure (reflected in `failed` below, and a non-zero exit code) rather than
+being silently skipped. Pass `--exclude-empty-files` to skip them client-side
+instead.
+
+If `failed` is non-zero (for any reason, not just empty files), the command
+exits non-zero — check the `actions` list (or the non-JSON status lines) for
+which paths failed and why.
 
 JSON output:
 

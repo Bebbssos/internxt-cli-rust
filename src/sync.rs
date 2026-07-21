@@ -150,10 +150,14 @@ fn value_size(v: &Value) -> u64 {
 /// Recursively walk a local directory tree, keyed by POSIX rel path (relative to
 /// `root`). Skips symlinks. Collects files (with size + mtime) and every
 /// subdirectory rel path.
+/// `exclude_empty` skips zero-byte files instead of including them (only
+/// meaningful for the upload-direction walk in `sync_up` — Internxt's
+/// free/legacy plans reject empty files server-side with HTTP 402).
 fn walk_local(
     root: &Path,
     current: &Path,
     rel: &str,
+    exclude_empty: bool,
     files: &mut HashMap<String, LocalFile>,
     dirs: &mut Vec<String>,
 ) {
@@ -177,8 +181,11 @@ fn walk_local(
         let child_rel = join_rel(rel, &name);
         if meta.is_dir() {
             dirs.push(child_rel.clone());
-            walk_local(root, &path, &child_rel, files, dirs);
+            walk_local(root, &path, &child_rel, exclude_empty, files, dirs);
         } else if meta.is_file() {
+            if exclude_empty && meta.len() == 0 {
+                continue;
+            }
             let mtime = meta.modified().map(systime_secs).unwrap_or(0);
             files.insert(
                 child_rel,
@@ -345,6 +352,7 @@ pub async fn sync_up(
     remote_path: Option<&str>,
     delete: Option<&str>,
     dry_run: bool,
+    exclude_empty_files: bool,
     limit_args: &crate::upload_limit::UploadLimitArgs,
 ) -> Result<()> {
     let mode = parse_delete(delete, true)?;
@@ -372,7 +380,7 @@ pub async fn sync_up(
 
     let mut local_files = HashMap::new();
     let mut local_dirs = Vec::new();
-    walk_local(root, root, "", &mut local_files, &mut local_dirs);
+    walk_local(root, root, "", exclude_empty_files, &mut local_files, &mut local_dirs);
 
     output::status("Scanning remote tree...");
     let api = DriveApi::for_credentials(&creds);
@@ -555,6 +563,12 @@ pub async fn sync_up(
     }
 
     emit_summary(false, skipped, &summary);
+    // emit_summary already reported the failure count (and, in JSON mode, the
+    // full per-item detail) — exit non-zero here rather than returning Err,
+    // which would print a second, conflicting message via main's error path.
+    if summary.failed.load(Ordering::Relaxed) > 0 {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
@@ -647,7 +661,7 @@ pub async fn sync_down(
     let mut local_files = HashMap::new();
     let mut local_dirs = Vec::new();
     if root.is_dir() {
-        walk_local(&root, &root, "", &mut local_files, &mut local_dirs);
+        walk_local(&root, &root, "", false, &mut local_files, &mut local_dirs);
     }
 
     // Classify remote files: new downloads vs. changed re-downloads vs. skips.
@@ -787,6 +801,12 @@ pub async fn sync_down(
     }
 
     emit_summary(false, skipped, &summary);
+    // emit_summary already reported the failure count (and, in JSON mode, the
+    // full per-item detail) — exit non-zero here rather than returning Err,
+    // which would print a second, conflicting message via main's error path.
+    if summary.failed.load(Ordering::Relaxed) > 0 {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
