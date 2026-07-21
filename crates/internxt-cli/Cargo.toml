@@ -65,10 +65,9 @@ sftp = ["dep:russh", "dep:russh-sftp"]
 self-update = ["dep:self_update", "dep:semver"]
 
 [dependencies]
-# Core engine, split into its own repo (github.com/Bebbssos/internxt-core-rust).
-# Tracks the git `main` during the 0.x churn; swap to a crates.io version dep
-# (internxt-core = "0.1") once it's published and the surface settles.
-internxt-core = { git = "https://github.com/Bebbssos/internxt-core-rust.git", branch = "main" }
+# Core engine, split into its own repo (github.com/Bebbssos/internxt-core-rust),
+# published to crates.io.
+internxt-core = "0.1.0"
 
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
