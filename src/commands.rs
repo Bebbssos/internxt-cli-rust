@@ -711,6 +711,17 @@ pub async fn upload_folder(
     let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
     let api = DriveApi::for_credentials(&creds);
 
+    // Independent of `pb.println` (which indicatif silently drops when stderr
+    // isn't a terminal — piped/scripted/CI runs): tracked here so a partial
+    // failure — folder or file — is never invisible. Declared before the folder
+    // loop so both loops share it: a folder-tree problem (a name collision our
+    // own lookup couldn't resolve, a missing parent, an unretryable create error)
+    // no longer aborts the whole upload — it skips just the affected subtree
+    // (its files fall through to "Parent folder not found, skipping" below) and
+    // is reported alongside file failures in the final summary/exit code.
+    let failed: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let total_folders = folders.len();
+
     // 1. Recreate the folder tree (sequential — children need their parent's uuid).
     let mut folder_map: HashMap<PathBuf, String> = HashMap::new();
     for f in &folders {
@@ -719,23 +730,44 @@ pub async fn upload_folder(
             Some(p) => match folder_map.get(&p) {
                 Some(u) => u.clone(),
                 None => {
-                    crate::output::status(&format!(
-                        "Parent folder not found for {}, skipping...",
-                        f.rel.display()
-                    ));
+                    let msg = "parent folder not found (its own creation failed earlier)";
+                    crate::output::status(&format!("{}: {}, skipping...", f.rel.display(), msg));
+                    failed.lock().unwrap().push((f.rel.display().to_string(), msg.to_string()));
                     continue;
                 }
             },
         };
-        if let Some(uuid) =
-            create_folder_with_retry(&api, &creds.token, &f.name, &parent_uuid).await?
-        {
-            crate::output::status(&format!("Created folder {}", f.name));
-            folder_map.insert(f.rel.clone(), uuid);
+        // internxt-core 0.1.2+: on an "already exists" conflict, this looks up
+        // and returns the *existing* folder's uuid instead of giving up, so a
+        // name collision is transparently reused rather than treated as a
+        // failure — `Ok(None)` is now reserved for the rarer case where even
+        // that lookup couldn't find a match (e.g. a race where the folder was
+        // renamed/deleted in between) or non-conflict retries were exhausted.
+        match create_folder_with_retry(&api, &creds.token, &f.name, &parent_uuid).await {
+            Ok(Some(uuid)) => {
+                crate::output::status(&format!("Folder ready: {}", f.name));
+                folder_map.insert(f.rel.clone(), uuid);
+            }
+            Ok(None) => {
+                let msg = "could not create or find this folder at the destination";
+                crate::output::status(&format!(
+                    "Failed to resolve folder \"{}\" ({}): {}, skipping its contents...",
+                    f.name,
+                    f.rel.display(),
+                    msg
+                ));
+                failed.lock().unwrap().push((f.rel.display().to_string(), msg.to_string()));
+            }
+            Err(e) => {
+                let reason = format!("{e:#}");
+                crate::output::status(&format!(
+                    "Failed to create folder \"{}\" ({}): {reason}, skipping its contents...",
+                    f.name,
+                    f.rel.display()
+                ));
+                failed.lock().unwrap().push((f.rel.display().to_string(), reason));
+            }
         }
-    }
-    if folder_map.is_empty() {
-        return Err(anyhow!("Failed to create folders, cannot upload files"));
     }
     // Mitigates upstream PB-1446 (folder not immediately consistent after creation).
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -747,10 +779,6 @@ pub async fn upload_folder(
     // One shared overall bar across all files (concurrent per-file bars would clash).
     let pb = crate::output::progress_bar(total_bytes, "Uploading");
     let mut handles = Vec::new();
-    // Independent of `pb.println` (which indicatif silently drops when stderr
-    // isn't a terminal — piped/scripted/CI runs): tracked here so a partial
-    // failure is never invisible.
-    let failed: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     let total_files = files.len();
 
     for file in files {
@@ -759,10 +787,9 @@ pub async fn upload_folder(
             Some(p) => match folder_map.get(&p) {
                 Some(u) => u.clone(),
                 None => {
-                    crate::output::status(&format!(
-                        "Parent folder not found for {}, skipping...",
-                        file.rel.display()
-                    ));
+                    let msg = "parent folder not found (its creation failed earlier)";
+                    crate::output::status(&format!("{}: {}, skipping...", file.rel.display(), msg));
+                    failed.lock().unwrap().push((file.rel.display().to_string(), msg.to_string()));
                     continue;
                 }
             },
@@ -817,8 +844,9 @@ pub async fn upload_folder(
             .collect::<Vec<_>>()
             .join("; ");
         return Err(anyhow!(
-            "{} of {total_files} file(s) failed to upload ({} of {} bytes uploaded, folder: {folder_url}): {detail}",
+            "{} of {} folder(s)/file(s) failed ({} of {} bytes uploaded, folder: {folder_url}): {detail}",
             failed.len(),
+            total_folders + total_files,
             total_uploaded,
             total_bytes,
         ));
