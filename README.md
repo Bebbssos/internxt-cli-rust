@@ -191,6 +191,7 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | &nbsp;&nbsp;[`thumbnail upload`](#thumbnail) | Upload a custom thumbnail image. | — | |
 | &nbsp;&nbsp;[`thumbnail download`](#thumbnail) | Download the current thumbnail. | — | |
 | &nbsp;&nbsp;[`thumbnail display`](#thumbnail) | Render inline in the terminal. | — | Needs `termimage` (default off). |
+| [`update`](#update) | Update the running binary to the latest GitHub release. | — | New — no official equivalent. Standalone-binary installs only; needs `self-update` (default on). |
 
 ## Command reference
 
@@ -832,6 +833,27 @@ ixr thumbnail display -p /Photos/cat.jpg          # needs --features termimage
 
 Automatic thumbnailing (on `upload-file`, `upload-folder`, and any `serve`
 backend write) can be disabled everywhere with `IXR_THUMBNAILS=0`.
+
+### `update`
+
+New — no official equivalent. Needs the `self-update` feature (default on).
+Replaces the running binary in place with the latest GitHub release. Only
+meaningful for the standalone binary distribution — package-manager installs
+(AUR, Docker, plain `cargo install`) should use that instead, since this will
+fight them for ownership of the file.
+
+Only stable releases are considered by default; prerelease tags (e.g.
+`v0.2.0-rc.1`) are skipped unless `--pre-release` is given.
+
+Flags: `--check` (report whether a newer release exists, without installing
+it), `-y/--yes` (skip the confirmation prompt — required under `--json` or
+`--non-interactive`), `--pre-release` (consider prerelease tags too).
+
+```sh
+ixr update --check
+ixr update -y
+ixr update --pre-release -y
+```
 
 ## Upload size limit
 
