@@ -309,12 +309,32 @@ struct Summary {
 }
 
 impl Summary {
-    fn record(&self, action: &str, path: &str, ok: bool) {
+    /// Record an item's outcome. `reason` should be `Some(..)` whenever `ok` is
+    /// `false` — it's the only place the failure detail survives; every other
+    /// mention of it is a `pb.println`/`output::status` line that indicatif (or
+    /// a non-tty stderr) can silently swallow on a piped/scripted/CI run.
+    fn record(&self, action: &str, path: &str, ok: bool, reason: Option<&str>) {
         self.actions
             .lock()
             .unwrap()
-            .push(json!({ "action": action, "path": path, "ok": ok }));
+            .push(json!({ "action": action, "path": path, "ok": ok, "reason": reason }));
     }
+}
+
+/// Format one line per failed action for the plain-text failure listing, e.g.
+/// `"  upload path/to/file: HTTP 402 Payment Required"`. Pulled out of
+/// `emit_summary` so it's directly unit-testable without capturing stdout.
+fn failed_lines(actions: &[Value]) -> Vec<String> {
+    actions
+        .iter()
+        .filter(|entry| !entry.get("ok").and_then(|v| v.as_bool()).unwrap_or(true))
+        .map(|entry| {
+            let action = entry.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            let path = entry.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("unknown error");
+            format!("  {action} {path}: {reason}")
+        })
+        .collect()
 }
 
 fn emit_summary(dry_run: bool, skipped: u64, s: &Summary) {
@@ -340,6 +360,18 @@ fn emit_summary(dry_run: bool, skipped: u64, s: &Summary) {
         output::status(&format!(
             "{verb}: {transferred} transferred, {deleted} deleted, {skipped} unchanged, {failed} failed."
         ));
+        // Independent of any `pb.println`/`output::status` line already printed
+        // for each failure as it happened: indicatif fully hides a ProgressBar's
+        // println output (not just the animated bar) whenever stderr isn't a real
+        // terminal, so on a piped/redirected/scripted run those per-item lines
+        // never appear. This uses plain `println!` (via `output::status`), so the
+        // reason for every failure is guaranteed visible here at least once.
+        if failed > 0 {
+            output::status("Failed items:");
+            for line in failed_lines(&actions) {
+                output::status(&line);
+            }
+        }
     }
 }
 
@@ -434,13 +466,13 @@ pub async fn sync_up(
         for (rel, _) in &to_upload {
             let kind = if reupload_old.contains_key(rel) { "reupload" } else { "upload" };
             output::status(&format!("{kind}: {rel}"));
-            s.record(kind, rel, true);
+            s.record(kind, rel, true, None);
             s.transferred.fetch_add(1, Ordering::Relaxed);
         }
         for (rel, _, is_folder) in &to_delete {
             let tag = if *is_folder { "delete-remote-folder" } else { "delete-remote" };
             output::status(&format!("{tag}: {rel}"));
-            s.record(tag, rel, true);
+            s.record(tag, rel, true, None);
             s.deleted.fetch_add(1, Ordering::Relaxed);
         }
         emit_summary(true, skipped, &s);
@@ -483,8 +515,9 @@ pub async fn sync_up(
         let parent_uuid = match remote_dirs.get(&parent_rel) {
             Some(u) => u.clone(),
             None => {
+                let reason = "no remote parent folder found";
                 pb.println(format!("No remote parent for {rel}, skipping"));
-                summary.record("upload", &rel, false);
+                summary.record("upload", &rel, false, Some(reason));
                 summary.failed.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
@@ -493,8 +526,9 @@ pub async fn sync_up(
         let abs = lf.abs.clone();
         let size = lf.size;
         if let Err(e) = limit.check(size) {
-            pb.println(format!("Skipping {rel}: {e}"));
-            summary.record("upload", &rel, false);
+            let reason = format!("{e:#}");
+            pb.println(format!("Skipping {rel}: {reason}"));
+            summary.record("upload", &rel, false, Some(&reason));
             summary.failed.fetch_add(1, Ordering::Relaxed);
             continue;
         }
@@ -520,13 +554,14 @@ pub async fn sync_up(
             match res {
                 Ok(()) => {
                     summary.transferred.fetch_add(1, Ordering::Relaxed);
-                    summary.record("upload", &rel, true);
+                    summary.record("upload", &rel, true, None);
                     pb.println(format!("Uploaded {rel}"));
                 }
                 Err(e) => {
+                    let reason = format!("{e:#}");
                     summary.failed.fetch_add(1, Ordering::Relaxed);
-                    summary.record("upload", &rel, false);
-                    pb.println(format!("Failed {rel}: {e}"));
+                    summary.record("upload", &rel, false, Some(&reason));
+                    pb.println(format!("Failed {rel}: {reason}"));
                 }
             }
         }));
@@ -551,13 +586,14 @@ pub async fn sync_up(
         match res {
             Ok(()) => {
                 summary.deleted.fetch_add(1, Ordering::Relaxed);
-                summary.record(tag, &rel, true);
+                summary.record(tag, &rel, true, None);
                 output::status(&format!("Deleted remote {ty} {rel}"));
             }
             Err(e) => {
+                let reason = format!("{e:#}");
                 summary.failed.fetch_add(1, Ordering::Relaxed);
-                summary.record(tag, &rel, false);
-                output::status(&format!("Failed to delete remote {ty} {rel}: {e}"));
+                summary.record(tag, &rel, false, Some(&reason));
+                output::status(&format!("Failed to delete remote {ty} {rel}: {reason}"));
             }
         }
     }
@@ -708,13 +744,13 @@ pub async fn sync_down(
         for rel in &to_download {
             let kind = if local_files.contains_key(rel) { "redownload" } else { "download" };
             output::status(&format!("{kind}: {rel}"));
-            s.record(kind, rel, true);
+            s.record(kind, rel, true, None);
             s.transferred.fetch_add(1, Ordering::Relaxed);
         }
         for (rel, is_folder) in &to_delete {
             let tag = if *is_folder { "delete-local-folder" } else { "delete-local" };
             output::status(&format!("{tag}: {rel}"));
-            s.record(tag, rel, true);
+            s.record(tag, rel, true, None);
             s.deleted.fetch_add(1, Ordering::Relaxed);
         }
         emit_summary(true, skipped, &s);
@@ -757,13 +793,14 @@ pub async fn sync_down(
             match res {
                 Ok(()) => {
                     summary.transferred.fetch_add(1, Ordering::Relaxed);
-                    summary.record("download", &rel, true);
+                    summary.record("download", &rel, true, None);
                     pb.println(format!("Downloaded {rel}"));
                 }
                 Err(e) => {
+                    let reason = format!("{e:#}");
                     summary.failed.fetch_add(1, Ordering::Relaxed);
-                    summary.record("download", &rel, false);
-                    pb.println(format!("Failed {rel}: {e}"));
+                    summary.record("download", &rel, false, Some(&reason));
+                    pb.println(format!("Failed {rel}: {reason}"));
                 }
             }
         }));
@@ -789,13 +826,14 @@ pub async fn sync_down(
         match res {
             Ok(()) => {
                 summary.deleted.fetch_add(1, Ordering::Relaxed);
-                summary.record(tag, &rel, true);
+                summary.record(tag, &rel, true, None);
                 output::status(&format!("Removed local {what} {rel}"));
             }
             Err(e) => {
+                let reason = format!("{e:#}");
                 summary.failed.fetch_add(1, Ordering::Relaxed);
-                summary.record(tag, &rel, false);
-                output::status(&format!("Failed to remove local {what} {rel}: {e}"));
+                summary.record(tag, &rel, false, Some(&reason));
+                output::status(&format!("Failed to remove local {what} {rel}: {reason}"));
             }
         }
     }
@@ -930,4 +968,85 @@ async fn download_one(
 fn set_mtime(path: &Path, secs: i64) {
     let ft = filetime::FileTime::from_unix_time(secs, 0);
     let _ = filetime::set_file_mtime(path, ft);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression coverage for the bug where a failed sync item's reason was
+    // never retained anywhere but a `pb.println`/`output::status` line —
+    // invisible on a piped/scripted/CI run because indicatif hides a
+    // ProgressBar's println output whenever stderr isn't a real terminal, and
+    // because plain status lines are suppressed entirely in `--json` mode.
+    // `Summary` is the single source of truth for both the final text-mode
+    // failure listing and the `--json` `actions` array, so these tests exercise
+    // it directly rather than needing a real network/filesystem sync run.
+
+    #[test]
+    fn record_retains_the_failure_reason() {
+        let s = Summary::default();
+        s.record("upload", "empty.bin", false, Some("HTTP 402 Payment Required"));
+        let actions = s.actions.lock().unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["action"], "upload");
+        assert_eq!(actions[0]["path"], "empty.bin");
+        assert_eq!(actions[0]["ok"], false);
+        assert_eq!(actions[0]["reason"], "HTTP 402 Payment Required");
+    }
+
+    #[test]
+    fn record_leaves_reason_null_on_success() {
+        let s = Summary::default();
+        s.record("upload", "ok.bin", true, None);
+        let actions = s.actions.lock().unwrap();
+        assert_eq!(actions[0]["ok"], true);
+        assert!(actions[0]["reason"].is_null());
+    }
+
+    #[test]
+    fn json_actions_array_carries_reason_per_failed_item() {
+        // Mirrors what `emit_summary` hands to `output::emit` in `--json` mode:
+        // the raw `actions` vec serialized as-is. A consumer parsing `--json`
+        // output must be able to find *why* each failed item failed, not just
+        // that it failed.
+        let s = Summary::default();
+        s.record("upload", "good.bin", true, None);
+        s.record("upload", "empty.bin", false, Some("HTTP 402 Payment Required"));
+        s.failed.fetch_add(1, Ordering::Relaxed);
+        s.transferred.fetch_add(1, Ordering::Relaxed);
+
+        let actions = s.actions.lock().unwrap();
+        let failed_entry = actions.iter().find(|a| a["path"] == "empty.bin").unwrap();
+        assert_eq!(failed_entry["ok"], false);
+        assert_eq!(failed_entry["reason"], "HTTP 402 Payment Required");
+        let ok_entry = actions.iter().find(|a| a["path"] == "good.bin").unwrap();
+        assert!(ok_entry["reason"].is_null());
+    }
+
+    #[test]
+    fn failed_lines_formats_action_path_and_reason() {
+        let s = Summary::default();
+        s.record("upload", "good.bin", true, None);
+        s.record("upload", "empty.bin", false, Some("HTTP 402 Payment Required"));
+        s.record("download", "other.bin", false, Some("connection reset"));
+        let actions = s.actions.lock().unwrap();
+
+        let lines = failed_lines(&actions);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.contains(&"  upload empty.bin: HTTP 402 Payment Required".to_string()));
+        assert!(lines.contains(&"  download other.bin: connection reset".to_string()));
+    }
+
+    #[test]
+    fn failed_lines_falls_back_when_reason_missing() {
+        // Defensive: even if some future call site forgets to pass a reason,
+        // the failure is still listed (never silently dropped) with a
+        // placeholder rather than an empty/blank line.
+        let s = Summary::default();
+        s.record("upload", "mystery.bin", false, None);
+        let actions = s.actions.lock().unwrap();
+        let lines = failed_lines(&actions);
+        assert_eq!(lines, vec!["  upload mystery.bin: unknown error".to_string()]);
+    }
 }
