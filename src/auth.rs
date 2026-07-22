@@ -58,11 +58,24 @@ fn write_accounts_file(file: &AccountsFile) -> Result<()> {
     }
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;
+    // Owner-only on Unix: the "encryption" is a static app secret (obfuscation,
+    // not a real confidentiality boundary), so file/dir permissions are what
+    // actually keeps other local users out of session tokens and mnemonics.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
     let plain = serde_json::to_string(file)?;
     let encrypted = crypto::encrypt_text(&plain);
     let path = credentials_file();
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, encrypted)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
     std::fs::rename(&tmp, &path)?;
     Ok(())
 }
@@ -306,4 +319,47 @@ fn prompt_2fa() -> Result<String> {
     let mut s = String::new();
     std::io::stdin().read_line(&mut s)?;
     Ok(s.trim().to_string())
+}
+
+#[cfg(all(test, unix))]
+mod perm_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn write_accounts_file_sets_owner_only_perms_even_under_permissive_umask() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp_home = std::env::temp_dir().join(format!("ixr-permtest-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp_home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &tmp_home);
+        }
+
+        // Simulate a permissive process umask (022 still leaves group/world
+        // readable-ish; use 000 to prove chmod, not umask, is doing the work).
+        let old_umask = unsafe { libc_umask(0) };
+
+        let creds: Credentials = serde_json::from_str(
+            r#"{"token":"t","user":{"email":"test@example.com","mnemonic":"m","bucket":"b","bridge_user":"u","user_id":"id","root_folder_id":"root"}}"#,
+        )
+        .unwrap();
+        save_credentials(&creds).unwrap();
+
+        unsafe { libc_umask(old_umask) };
+
+        let dir_mode = std::fs::metadata(data_dir()).unwrap().permissions().mode() & 0o777;
+        let file_mode = std::fs::metadata(credentials_file()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "dir perms");
+        assert_eq!(file_mode, 0o600, "file perms");
+
+        std::fs::remove_dir_all(&tmp_home).ok();
+    }
+
+    unsafe extern "C" {
+        #[link_name = "umask"]
+        fn libc_umask(mask: u32) -> u32;
+    }
 }
