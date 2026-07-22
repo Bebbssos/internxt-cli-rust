@@ -1047,7 +1047,14 @@ impl Filesystem for InxtFs {
             // Reject writes that would push the file past the upload cap. The
             // final size is only known at release, so gate each write by the
             // high-water mark it would set (EFBIG = "file too large").
-            if inner.upload_limit.check(offset + len as u64).is_err() {
+            // checked_add: a client-supplied offset near u64::MAX combined with
+            // any len must not silently wrap to a small value and sail past the
+            // size gate (release builds wrap on overflow instead of panicking).
+            let Some(end) = offset.checked_add(len as u64) else {
+                reply.error(Errno::EFBIG);
+                return;
+            };
+            if inner.upload_limit.check(end).is_err() {
                 reply.error(Errno::EFBIG);
                 return;
             }
@@ -1063,7 +1070,7 @@ impl Filesystem for InxtFs {
                 reply.error(errno(&e));
                 return;
             }
-            wh.size.fetch_max(offset + len as u64, Ordering::SeqCst);
+            wh.size.fetch_max(end, Ordering::SeqCst);
             wh.dirty.store(true, Ordering::SeqCst);
             inner.set_node_size(ino.0, wh.size.load(Ordering::SeqCst));
             reply.written(len as u32);

@@ -887,8 +887,12 @@ impl NFSFileSystem for DriveNfs {
         if node.kind != NodeKind::File {
             return Err(nfsstat3::NFS3ERR_ISDIR);
         }
-        // Gate by the high-water mark this write would set.
-        if self.inner.upload_limit.check(offset + data.len() as u64).is_err() {
+        // Gate by the high-water mark this write would set. checked_add: a
+        // client-supplied offset near u64::MAX combined with any len must not
+        // silently wrap to a small value and sail past the size gate (release
+        // builds wrap on overflow instead of panicking).
+        let end = offset.checked_add(data.len() as u64).ok_or(nfsstat3::NFS3ERR_FBIG)?;
+        if self.inner.upload_limit.check(end).is_err() {
             return Err(nfsstat3::NFS3ERR_FBIG);
         }
         let wb = self.inner.writer_for(id, &node).await?;
