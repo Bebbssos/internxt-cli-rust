@@ -23,7 +23,7 @@ pkg-fmt = "tgz"
 pkg-fmt = "zip"
 
 [features]
-default = ["sso", "webdav", "fuse", "dotenv", "self-update"]
+default = ["sso", "webdav", "fuse", "dotenv"]
 # Load a `.env` file from the current directory (if present) at startup,
 # before argument parsing, so `INXT_*`/`INTERNXT_*` env-backed flags can be
 # set there instead of the real environment. Off disables the dep entirely.
@@ -60,8 +60,10 @@ nfs = ["dep:nfsserve", "dep:async-trait"]
 # `Handler` over Drive. All platforms.
 sftp = ["dep:russh", "dep:russh-sftp"]
 # `ixr update`: replace the running binary with the latest GitHub release.
-# Pointless (and actively wrong) for package-manager installs, so leave off
-# those builds (AUR, Docker) — only the standalone-binary distribution wants it.
+# Off by default: pointless (and actively wrong) for package-manager installs
+# (AUR, Docker) and for a self-built binary, which should be updated by
+# rebuilding, not overwritten by a prebuilt release asset. The GitHub release
+# workflow enables it explicitly for every standalone-binary target.
 self-update = ["dep:self_update", "dep:semver"]
 
 [dependencies]

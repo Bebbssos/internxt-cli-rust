@@ -41,11 +41,12 @@ CLI front-end built on top of it.
 - **Cargo**: `cargo install internxt-cli` (crate name; the installed binary is
   still `ixr`), or `cargo binstall internxt-cli` for a prebuilt binary with no
   local compile. Plain `cargo install` only builds the
-  [default feature set](#features) (SSO, WebDAV over HTTP, FUSE, self-update) —
+  [default feature set](#features) (SSO, WebDAV over HTTP, FUSE) —
   the prebuilt binaries above ship with almost every feature on, so to match
   them pass `--features` explicitly, e.g. `cargo install internxt-cli --features
-  webdav-tls,smb,nfs,sftp,termimage`. See [Features](#features) for the full
-  flag list.
+  webdav-tls,smb,nfs,sftp,termimage,self-update`. See [Features](#features) for
+  the full flag list. `self-update` is deliberately never a default — see its
+  entry in [Features](#features) for why.
 - **AUR** (Arch Linux): `ixr-bin`, e.g. `yay -S ixr-bin`.
 - **Prebuilt binary**: download an archive from the
   [releases page](https://github.com/Bebbssos/internxt-cli-rust/releases) for your
@@ -79,9 +80,9 @@ cargo build --release
 # here: HTTPS for WebDAV, plus the SMB and SFTP serve backends (all off by default):
 cargo build --release --features webdav-tls,smb,sftp
 
-# --no-default-features drops the defaults (sso, webdav, fuse, dotenv,
-# self-update) instead of adding to them — combine with --features to build a
-# minimal binary with only what you want, e.g. WebDAV-only, no SSO/FUSE/update:
+# --no-default-features drops the defaults (sso, webdav, fuse, dotenv)
+# instead of adding to them — combine with --features to build a minimal
+# binary with only what you want, e.g. WebDAV-only, no SSO/FUSE:
 cargo build --release --no-default-features --features webdav
 ```
 
@@ -96,7 +97,7 @@ examples.
 
 Cargo feature flags gate optional command surface, mainly to keep the default
 binary small and dependency-light. `default = ["sso", "webdav", "fuse",
-"dotenv", "self-update"]`.
+"dotenv"]`.
 
 | Feature | Default | Enables | Notes |
 |---|---|---|---|
@@ -109,7 +110,7 @@ binary small and dependency-light. `default = ["sso", "webdav", "fuse",
 | `nfs` | off | `serve nfs` — NFSv3 export | Experimental. All platforms. |
 | `sftp` | off | `serve sftp` — SFTP over SSH | Experimental. All platforms. Pulls in `russh` + `russh-sftp`. |
 | `termimage` | off | `thumbnail display` — inline terminal image rendering | Pulls in `viuer` + `image`. Kitty/iTerm2 graphics protocol, with a Unicode half-block fallback. |
-| `self-update` | on | `ixr update` — replace the running binary with the latest GitHub release | Pointless (and wrong) for package-manager installs (AUR, Docker), so those builds leave it off; standalone binaries and plain `cargo install` keep it on. Pulls in `self_update` + `semver`. |
+| `self-update` | off | `ixr update` — replace the running binary with the latest GitHub release | Pointless (and wrong) for package-manager installs (AUR, Docker) and for a self-built binary (rebuild instead), so it's off by default everywhere; only the GitHub release workflow turns it on, for every standalone-binary target. Pulls in `self_update` + `semver`. |
 
 ## Global flags
 
@@ -191,7 +192,7 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | &nbsp;&nbsp;[`thumbnail upload`](#thumbnail) | Upload a custom thumbnail image. | — | |
 | &nbsp;&nbsp;[`thumbnail download`](#thumbnail) | Download the current thumbnail. | — | |
 | &nbsp;&nbsp;[`thumbnail display`](#thumbnail) | Render inline in the terminal. | — | Needs `termimage` (default off). |
-| [`update`](#update) | Update the running binary to the latest GitHub release. | — | New — no official equivalent. Standalone-binary installs only; needs `self-update` (default on). |
+| [`update`](#update) | Update the running binary to the latest GitHub release. | — | New — no official equivalent. Standalone-binary installs only; needs `self-update` (off by default, on in the prebuilt release binaries). |
 
 ## Command reference
 
@@ -836,10 +837,12 @@ backend write) can be disabled everywhere with `IXR_THUMBNAILS=0`.
 
 ### `update`
 
-New — no official equivalent. Needs the `self-update` feature (default on).
-Replaces the running binary in place with the latest GitHub release. Only
-meaningful for the standalone binary distribution — package-manager installs
-(AUR, Docker, plain `cargo install`) should use that instead, since this will
+New — no official equivalent. Needs the `self-update` feature (off by
+default; the GitHub release workflow enables it for every standalone-binary
+target). Replaces the running binary in place with the latest GitHub release.
+Only meaningful for the standalone binary distribution — package-manager
+installs (AUR, Docker) and self-built binaries (plain `cargo install`/`cargo
+build`) should update by reinstalling/rebuilding instead, since this would
 fight them for ownership of the file.
 
 Only stable releases are considered by default; prerelease tags (e.g.
