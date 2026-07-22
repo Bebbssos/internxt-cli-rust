@@ -442,12 +442,24 @@ a file, streaming to disk (or stdout).
 Flags: `-i/--id <FILE_ID>`, `-p/--path <PATH>` (alternative to `--id`),
 `-d/--directory <DIR>` (default: current dir), `-o/--overwrite`, `--stdout`
 (write decrypted bytes to stdout instead of a file; status goes to stderr so
-it never mixes into piped data).
+it never mixes into piped data), `--legacy-write` (see below).
+
+By default (when writing to disk, i.e. not `--stdout`), the download streams
+into a temp sibling file (`.<name>.inxt-<random>.part`, next to the
+destination) and is renamed into place only once it completes successfully;
+if anything fails partway (network drop, a bad chunk, Ctrl-C), the temp file
+is removed instead of being left behind. This means the destination path
+either doesn't exist or holds a complete file — never a silent truncated
+one. Pass `--legacy-write` to restore the old behavior (also the official
+CLI's behavior): write directly to the destination path with no cleanup on
+error, so an interrupted download can leave a partial file exactly at the
+filename you expected the complete download at.
 
 ```sh
 ixr download-file -i <file-uuid> -d ./out --overwrite
 ixr download-file -p /Documents/report.pdf -d ./out
 ixr download-file -i <file-uuid> --stdout > file.bin
+ixr download-file -i <file-uuid> -d ./out --legacy-write
 ```
 
 JSON output: `{ "success": true, "path": "<local path>" }` when written to

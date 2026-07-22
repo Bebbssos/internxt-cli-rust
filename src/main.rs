@@ -623,6 +623,11 @@ struct DownloadFileArgs {
     /// Write the decrypted bytes to stdout instead of a file (status goes to stderr).
     #[arg(long, default_value_t = false)]
     stdout: bool,
+    /// Write directly to the destination path instead of a temp file + rename.
+    /// Restores the old behavior: faster/simpler, but an interrupted download
+    /// (network drop, Ctrl-C) can leave a truncated file at the destination path.
+    #[arg(long, default_value_t = false)]
+    legacy_write: bool,
 }
 
 #[derive(clap::Args)]
@@ -1177,6 +1182,7 @@ async fn do_download_file(args: DownloadFileArgs) -> Result<()> {
         args.directory.as_deref(),
         args.overwrite,
         args.stdout,
+        args.legacy_write,
     )
     .await
 }
