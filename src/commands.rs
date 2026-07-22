@@ -675,6 +675,18 @@ pub async fn upload_folder(
 
     // 1. Recreate the folder tree (sequential — children need their parent's uuid).
     let mut folder_map: HashMap<PathBuf, String> = HashMap::new();
+    // Folders skipped because the destination already has one with the same name.
+    // internxt-core's create_folder_with_retry (as of 0.1.1) can't yet tell us the
+    // existing folder's uuid on that conflict — it only reports "no uuid available"
+    // (see https://github.com/Bebbssos/internxt-core-rust/pull/4, unreleased at the
+    // time of writing) — so a colliding folder, and everything nested under it, has
+    // to be skipped here rather than merged into the existing one. Once that fix is
+    // released and this crate's internxt-core dependency is bumped past 0.1.1,
+    // `create_folder_with_retry` will return the existing folder's uuid instead of
+    // `None` here, and the `folder_map.is_empty()` bailout below can likely be
+    // relaxed to skip only the affected subtree (mirroring `failed`'s per-file
+    // partial-failure reporting further down) instead of aborting the whole upload.
+    let mut name_collisions: Vec<PathBuf> = Vec::new();
     for f in &folders {
         let parent_uuid = match parent_key(&f.rel) {
             None => dest.clone(),
@@ -689,15 +701,40 @@ pub async fn upload_folder(
                 }
             },
         };
-        if let Some(uuid) =
-            create_folder_with_retry(&api, &creds.token, &f.name, &parent_uuid).await?
-        {
-            crate::output::status(&format!("Created folder {}", f.name));
-            folder_map.insert(f.rel.clone(), uuid);
+        match create_folder_with_retry(&api, &creds.token, &f.name, &parent_uuid).await {
+            Ok(Some(uuid)) => {
+                crate::output::status(&format!("Created folder {}", f.name));
+                folder_map.insert(f.rel.clone(), uuid);
+            }
+            Ok(None) => {
+                crate::output::status(&format!(
+                    "A folder named \"{}\" already exists at this destination, skipping {} and its contents...",
+                    f.name,
+                    f.rel.display()
+                ));
+                name_collisions.push(f.rel.clone());
+            }
+            Err(e) => {
+                return Err(e.context(format!(
+                    "Failed to create folder \"{}\" ({})",
+                    f.name,
+                    f.rel.display()
+                )));
+            }
         }
     }
     if folder_map.is_empty() {
-        return Err(anyhow!("Failed to create folders, cannot upload files"));
+        return Err(anyhow!(
+            "Cannot upload: {} folder(s) already exist at the destination and can't yet be \
+             reused ({}). Rename the local folder(s), choose a different destination, or delete \
+             the existing remote folder(s) first, then retry.",
+            name_collisions.len(),
+            name_collisions
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     // Mitigates upstream PB-1446 (folder not immediately consistent after creation).
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
