@@ -26,6 +26,7 @@ pub fn bar_sink(pb: &ProgressBar) -> Arc<dyn internxt_core::ProgressSink> {
 
 static JSON: AtomicBool = AtomicBool::new(false);
 static NON_INTERACTIVE: AtomicBool = AtomicBool::new(false);
+static NO_TIMEOUT: AtomicBool = AtomicBool::new(false);
 
 pub fn set_json(v: bool) {
     JSON.store(v, Ordering::Relaxed);
@@ -43,6 +44,19 @@ pub fn set_non_interactive(v: bool) {
 
 pub fn is_non_interactive() -> bool {
     NON_INTERACTIVE.load(Ordering::Relaxed)
+}
+
+/// `--no-timeout`/`IXR_NO_TIMEOUTS`: disable the idle-read timeout on network
+/// transfers, so a slow `--stdin` producer or `--stdout` consumer can't trip
+/// a false timeout on an otherwise-healthy upload/download. Read by
+/// `crate::net_client::network_api`, which every transfer call site goes
+/// through instead of `NetworkApi::new` directly.
+pub fn set_no_timeout(v: bool) {
+    NO_TIMEOUT.store(v, Ordering::Relaxed);
+}
+
+pub fn no_timeout() -> bool {
+    NO_TIMEOUT.load(Ordering::Relaxed)
 }
 
 /// Terminal success output: the JSON object in JSON mode, else the human line.

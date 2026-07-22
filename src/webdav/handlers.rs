@@ -20,7 +20,6 @@ use super::resource::{self, DriveItem, FolderItem, Resource};
 use super::xml;
 use super::{log, now_rfc3339, status_response, AppError, Ctx};
 use internxt_core::api::DriveApi;
-use internxt_core::network::NetworkApi;
 
 /// Split a filename into (stem, extension-without-dot).
 fn split_name(name: &str) -> (String, String) {
@@ -254,7 +253,7 @@ pub async fn get(ctx: &Ctx, req: Request, head_only: bool) -> Result<Response, A
         file.bucket.clone()
     };
     let mnemonic = creds.mnemonic().to_string();
-    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+    let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
 
     // Producer task decrypts into one half of a duplex pipe; the other half is
     // streamed to the client as the response body. Bounded buffer => bounded RAM.
@@ -399,7 +398,7 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
     let (plain, ftype) = split_name(&resource.name);
     let bucket = creds.bucket().to_string();
     let mnemonic = creds.mnemonic();
-    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+    let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
 
     // Gate on the upload-concurrency limit (if any). Held across the whole
     // transfer so `--max-concurrent-uploads 1` serializes uploads: a burst of

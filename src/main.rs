@@ -4,6 +4,7 @@ mod commands;
 mod drive_ops;
 #[cfg(all(unix, feature = "fuse"))]
 mod fuse;
+mod net_client;
 #[cfg(feature = "nfs")]
 mod nfs;
 mod output;
@@ -46,6 +47,13 @@ struct Cli {
         default_value_t = false
     )]
     non_interactive: bool,
+    /// Disable the idle-read timeout on network transfers (uploads/downloads).
+    /// Use this if a slow `--stdin` producer or `--stdout` consumer trips a
+    /// false timeout on an otherwise-healthy transfer over a slow link.
+    /// Connect timeout stays on regardless: a hung connection attempt is
+    /// unrelated to transfer speed and should still fail fast.
+    #[arg(long, global = true, env = "IXR_NO_TIMEOUTS", default_value_t = false)]
+    no_timeout: bool,
 }
 
 #[derive(Subcommand)]
@@ -1300,6 +1308,7 @@ async fn main() {
     let cli = Cli::parse();
     output::set_json(cli.json);
     output::set_non_interactive(cli.non_interactive);
+    output::set_no_timeout(cli.no_timeout);
     if let Err(e) = run(cli).await {
         if output::is_json() {
             output::emit_error(&format!("{e:#}"));

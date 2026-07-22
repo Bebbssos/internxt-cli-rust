@@ -473,7 +473,7 @@ pub async fn sync_up(
 
     let total_bytes: u64 = to_upload.iter().map(|(_, s)| *s).sum();
     let pb = output::progress_bar(total_bytes, "Uploading");
-    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+    let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
     let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TRANSFERS));
     let summary = Arc::new(Summary::default());
     let mut handles = Vec::new();
@@ -734,7 +734,7 @@ pub async fn sync_down(
         .filter_map(|rel| remote_files.get(rel).map(|rf| rf.size))
         .sum();
     let pb = output::progress_bar(total_bytes, "Downloading");
-    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+    let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
     let remote_files = Arc::new(remote_files);
     let root = Arc::new(root);
     let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TRANSFERS));
