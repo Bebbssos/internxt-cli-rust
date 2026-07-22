@@ -457,8 +457,8 @@ pub async fn move_file(
     let file_id = paths::resolve_opt(&api, &creds.token, root, id, path, Expect::File)
         .await?
         .ok_or_else(|| anyhow!("Provide the file id (--id) or path (--path)"))?;
-    let dest =
-        paths::resolve_opt(&api, &creds.token, root, destination, dest_path, Expect::Folder).await?;
+    let dest = paths::resolve_destination_opt(&api, &creds.token, root, destination, dest_path, Expect::Folder)
+        .await?;
     let dest = fallback_root(dest.as_deref(), root);
     let file = api.move_file(&creds.token, &file_id, &dest).await?;
     output::emit(
@@ -480,8 +480,8 @@ pub async fn move_folder(
     let folder_id = paths::resolve_opt(&api, &creds.token, root, id, path, Expect::Folder)
         .await?
         .ok_or_else(|| anyhow!("Provide the folder id (--id) or path (--path)"))?;
-    let dest =
-        paths::resolve_opt(&api, &creds.token, root, destination, dest_path, Expect::Folder).await?;
+    let dest = paths::resolve_destination_opt(&api, &creds.token, root, destination, dest_path, Expect::Folder)
+        .await?;
     let dest = fallback_root(dest.as_deref(), root);
     let folder = api.move_folder(&creds.token, &folder_id, &dest).await?;
     output::emit(
@@ -628,9 +628,15 @@ pub async fn trash_restore_file(
 ) -> Result<()> {
     let creds = auth::get_auth_details().await?;
     let api = DriveApi::for_credentials(&creds);
-    let dest =
-        paths::resolve_opt(&api, &creds.token, creds.root_folder(), destination, dest_path, Expect::Folder)
-            .await?;
+    let dest = paths::resolve_destination_opt(
+        &api,
+        &creds.token,
+        creds.root_folder(),
+        destination,
+        dest_path,
+        Expect::Folder,
+    )
+    .await?;
     let dest = fallback_root(dest.as_deref(), creds.root_folder());
     let file = api.move_file(&creds.token, file_id, &dest).await?;
     output::emit(
@@ -647,9 +653,15 @@ pub async fn trash_restore_folder(
 ) -> Result<()> {
     let creds = auth::get_auth_details().await?;
     let api = DriveApi::for_credentials(&creds);
-    let dest =
-        paths::resolve_opt(&api, &creds.token, creds.root_folder(), destination, dest_path, Expect::Folder)
-            .await?;
+    let dest = paths::resolve_destination_opt(
+        &api,
+        &creds.token,
+        creds.root_folder(),
+        destination,
+        dest_path,
+        Expect::Folder,
+    )
+    .await?;
     let dest = fallback_root(dest.as_deref(), creds.root_folder());
     let folder = api.move_folder(&creds.token, folder_id, &dest).await?;
     output::emit(
