@@ -93,11 +93,11 @@ pub async fn logout(all: bool) -> Result<()> {
     if all {
         let creds_list = auth::all_credentials()?;
         if creds_list.is_empty() {
-            output::emit(
-                "No user is currently logged in.",
-                json!({ "success": false, "message": "No user is currently logged in." }),
-            );
-            return Ok(());
+            // Not logged in anywhere: a real failure, not just an empty result —
+            // return Err so main()'s generic error path sets a non-zero exit code
+            // (it also happens to produce the same JSON shape as our old custom
+            // `output::emit`, via `output::emit_error`).
+            return Err(anyhow!("No user is currently logged in."));
         }
         // Best effort: invalidate every session server-side, then clear all local accounts.
         for creds in &creds_list {
@@ -113,13 +113,7 @@ pub async fn logout(all: bool) -> Result<()> {
     }
     let creds = match auth::read_credentials() {
         Ok(c) => c,
-        Err(_) => {
-            output::emit(
-                "No user is currently logged in.",
-                json!({ "success": false, "message": "No user is currently logged in." }),
-            );
-            return Ok(());
-        }
+        Err(_) => return Err(anyhow!("No user is currently logged in.")),
     };
     // Best effort: invalidate server-side, then always clear the local account.
     let _ = DriveApi::for_credentials(&creds).logout(&creds.token).await;
@@ -134,13 +128,9 @@ pub async fn logout(all: bool) -> Result<()> {
 pub async fn whoami() -> Result<()> {
     let creds = match auth::read_credentials() {
         Ok(c) => c,
-        Err(_) => {
-            output::emit(
-                "You are not logged in.",
-                json!({ "success": false, "message": "You are not logged in." }),
-            );
-            return Ok(());
-        }
+        // Not logged in is a real failure here (whoami has nothing to report):
+        // return Err so main()'s generic error path sets a non-zero exit code.
+        Err(_) => return Err(anyhow!("You are not logged in.")),
     };
     let email = creds.user.email.clone();
     match internxt_core::auth::refresh_credentials(creds, |m| {
@@ -157,16 +147,18 @@ pub async fn whoami() -> Result<()> {
                 &format!("✓ {message}"),
                 json!({ "success": true, "message": message, "login": creds }),
             );
+            Ok(())
         }
         Err(_) => {
             // Session is expired or otherwise invalid: clear it, matching og's
-            // whoami behaviour of logging the user out on a dead session.
+            // whoami behaviour of logging the user out on a dead session, then
+            // report failure (non-zero exit) via the same generic error path.
             let _ = auth::remove_account(&email);
-            let message = "Your session has expired. You have been logged out. Please log in again.";
-            output::emit(message, json!({ "success": false, "message": message }));
+            Err(anyhow!(
+                "Your session has expired. You have been logged out. Please log in again."
+            ))
         }
     }
-    Ok(())
 }
 
 /// og `UsageService.INFINITE_LIMIT` — space limits at/above this mean "unlimited".
@@ -694,4 +686,63 @@ pub async fn delete_permanently_folder(folder_id: &str) -> Result<()> {
         json!({ "success": true, "message": "Folder permanently deleted successfully" }),
     );
     Ok(())
+}
+
+/// Regression tests for the exit-code bug: `whoami`/`logout` used to report
+/// "not logged in" via a custom `output::emit` call and then return `Ok(())`,
+/// so the process exited 0 even though it had just printed a failure. They
+/// must now return `Err` (routed through `main()`'s generic error path, which
+/// sets a non-zero exit) instead.
+///
+/// Sandboxes `HOME` to a fresh, empty temp dir so `auth::read_credentials()`/
+/// `auth::all_credentials()` see "no accounts" without touching any real
+/// `~/.ixr` state — no filesystem mocking needed since these failure paths
+/// never reach the network. Shares `auth::ENV_LOCK` with `auth::perm_tests`
+/// so the two suites don't race over the same process-global `HOME` var.
+#[cfg(all(test, unix))]
+mod exit_code_tests {
+    use super::*;
+
+    fn sandbox_empty_home(tag: &str) -> std::path::PathBuf {
+        let tmp_home =
+            std::env::temp_dir().join(format!("ixr-exitcodetest-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp_home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &tmp_home);
+        }
+        tmp_home
+    }
+
+    #[tokio::test]
+    async fn whoami_errs_when_not_logged_in() {
+        let _guard = crate::auth::ENV_LOCK.lock().await;
+        let tmp_home = sandbox_empty_home("whoami");
+
+        let err = whoami().await.expect_err("expected Err on empty credentials store");
+        assert_eq!(err.to_string(), "You are not logged in.");
+
+        std::fs::remove_dir_all(&tmp_home).ok();
+    }
+
+    #[tokio::test]
+    async fn logout_errs_when_not_logged_in() {
+        let _guard = crate::auth::ENV_LOCK.lock().await;
+        let tmp_home = sandbox_empty_home("logout");
+
+        let err = logout(false).await.expect_err("expected Err on empty credentials store");
+        assert_eq!(err.to_string(), "No user is currently logged in.");
+
+        std::fs::remove_dir_all(&tmp_home).ok();
+    }
+
+    #[tokio::test]
+    async fn logout_all_errs_when_not_logged_in() {
+        let _guard = crate::auth::ENV_LOCK.lock().await;
+        let tmp_home = sandbox_empty_home("logout-all");
+
+        let err = logout(true).await.expect_err("expected Err on empty credentials store");
+        assert_eq!(err.to_string(), "No user is currently logged in.");
+
+        std::fs::remove_dir_all(&tmp_home).ok();
+    }
 }

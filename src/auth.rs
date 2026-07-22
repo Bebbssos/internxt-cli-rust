@@ -321,17 +321,23 @@ fn prompt_2fa() -> Result<String> {
     Ok(s.trim().to_string())
 }
 
+/// Guards tests (here and in `drive_ops`'s test module) that mutate the
+/// process-global `HOME` env var to sandbox `data_dir()`/`credentials_file()`
+/// — without this, two such tests running on separate threads (cargo runs
+/// unit tests in parallel by default) could stomp each other's `HOME`.
+/// Tokio's `Mutex` rather than `std`'s: `drive_ops`'s tests are async and hold
+/// this across `.await` points, which clippy (rightly) flags for a std guard.
+#[cfg(all(test, unix))]
+pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(all(test, unix))]
 mod perm_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn write_accounts_file_sets_owner_only_perms_even_under_permissive_umask() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.blocking_lock();
         let tmp_home = std::env::temp_dir().join(format!("ixr-permtest-{}", std::process::id()));
         std::fs::create_dir_all(&tmp_home).unwrap();
         unsafe {
