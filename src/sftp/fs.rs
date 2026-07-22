@@ -437,6 +437,9 @@ impl WriteState {
             &self.temp_path, size, "sftp",
         )
         .await;
+        // New/updated file must show up immediately for this process's own
+        // subsequent listing/lookup, same as folder mutations already do.
+        self.inner.cache.invalidate(&self.parent_uuid);
         Ok(())
     }
 }
@@ -620,10 +623,10 @@ impl SftpSession {
         {
             return Ok(attrs_dir(&f.updated_at));
         }
-        let files = tree::list_files(&api, &creds.token, &parent.uuid)
+        if let Some(f) = tree::find_file(&api, &creds.token, &parent.uuid, name, &self.inner.cache)
             .await
-            .map_err(to_status)?;
-        if let Some(f) = files.into_iter().find(|f| &f.display_name() == name) {
+            .map_err(to_status)?
+        {
             return Ok(attrs_file(f.size, &f.updated_at));
         }
         Err(StatusCode::NoSuchFile)
@@ -789,7 +792,7 @@ impl russh_sftp::server::Handler for SftpSession {
         let api = DriveApi::for_credentials(&creds);
         let (folders, files) = tokio::try_join!(
             tree::list_folders(&api, &creds.token, &dir.uuid, &self.inner.cache),
-            tree::list_files(&api, &creds.token, &dir.uuid),
+            tree::list_files_cached(&api, &creds.token, &dir.uuid, &self.inner.cache),
         )
         .map_err(to_status)?;
         let mut list: Vec<File> = Vec::with_capacity(folders.len() + files.len() + 2);
@@ -842,10 +845,9 @@ impl russh_sftp::server::Handler for SftpSession {
         let parent = self.inner.resolve_dir(parent_comps).await?;
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
-        let files = tree::list_files(&api, &creds.token, &parent.uuid)
+        let existing = tree::find_file(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
             .await
             .map_err(to_status)?;
-        let existing = files.into_iter().find(|f| f.display_name() == name);
 
         let want_write = pflags.contains(OpenFlags::WRITE)
             || pflags.contains(OpenFlags::CREATE)
@@ -1027,12 +1029,9 @@ impl russh_sftp::server::Handler for SftpSession {
         let parent = self.inner.resolve_dir(parent_comps).await?;
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
-        let files = tree::list_files(&api, &creds.token, &parent.uuid)
+        let f = tree::find_file(&api, &creds.token, &parent.uuid, name, &self.inner.cache)
             .await
-            .map_err(to_status)?;
-        let f = files
-            .into_iter()
-            .find(|f| &f.display_name() == name)
+            .map_err(to_status)?
             .ok_or(StatusCode::NoSuchFile)?;
         if self.inner.delete_permanently {
             api.delete_file(&creds.token, &f.uuid).await.map_err(to_status)?;
@@ -1041,6 +1040,7 @@ impl russh_sftp::server::Handler for SftpSession {
                 .await
                 .map_err(to_status)?;
         }
+        self.inner.cache.invalidate(&parent.uuid);
         Ok(ok_status(id))
     }
 
@@ -1067,33 +1067,34 @@ impl russh_sftp::server::Handler for SftpSession {
         let api = DriveApi::for_credentials(&creds);
 
         // Resolve the source (file first, then folder).
-        let files = tree::list_files(&api, &creds.token, &src_parent.uuid)
+        let src_file = tree::find_file(&api, &creds.token, &src_parent.uuid, &src_name, &self.inner.cache)
             .await
             .map_err(to_status)?;
-        let (uuid, is_folder, cur_name) =
-            if let Some(f) = files.into_iter().find(|f| f.display_name() == src_name) {
-                let cur = f.display_name();
-                (f.uuid, false, cur)
-            } else {
-                match tree::find_folder(&api, &creds.token, &src_parent.uuid, &src_name, &self.inner.cache)
-                    .await
-                    .map_err(to_status)?
-                {
-                    Some(f) => (f.uuid, true, f.plain_name),
-                    None => return Err(StatusCode::NoSuchFile),
-                }
-            };
+        let (uuid, is_folder, cur_name) = if let Some(f) = src_file {
+            let cur = f.display_name();
+            (f.uuid, false, cur)
+        } else {
+            match tree::find_folder(&api, &creds.token, &src_parent.uuid, &src_name, &self.inner.cache)
+                .await
+                .map_err(to_status)?
+            {
+                Some(f) => (f.uuid, true, f.plain_name),
+                None => return Err(StatusCode::NoSuchFile),
+            }
+        };
 
         // Reject if the destination name already exists.
-        let dst_files = tree::list_files(&api, &creds.token, &dst_parent.uuid)
-            .await
-            .map_err(to_status)?;
+        let dst_file_clash =
+            tree::find_file(&api, &creds.token, &dst_parent.uuid, &dst_name, &self.inner.cache)
+                .await
+                .map_err(to_status)?
+                .is_some();
         let dst_folder_clash =
             tree::find_folder(&api, &creds.token, &dst_parent.uuid, &dst_name, &self.inner.cache)
                 .await
                 .map_err(to_status)?
                 .is_some();
-        let clashes = dst_files.iter().any(|f| f.display_name() == dst_name) || dst_folder_clash;
+        let clashes = dst_file_clash || dst_folder_clash;
         if clashes && !(src_parent.uuid == dst_parent.uuid && cur_name == dst_name) {
             return Err(StatusCode::Failure);
         }

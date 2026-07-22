@@ -160,7 +160,7 @@ async fn folder_children(
     // network round trips for one directory listing.
     let (folders, files) = tokio::try_join!(
         resource::list_folders(api, token, &folder.uuid, cache),
-        resource::list_files(api, token, &folder.uuid),
+        resource::list_files_cached(api, token, &folder.uuid, cache),
     )?;
 
     let mut out = String::new();
@@ -491,6 +491,11 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         .await;
     }
 
+    // New/replaced file must show up immediately for this process's own
+    // subsequent PROPFIND/GET, same as a folder create already invalidates
+    // (see `get_or_create_child`).
+    ctx.cache.invalidate(&parent.uuid);
+
     let status = if is_replacement {
         StatusCode::NO_CONTENT
     } else {
@@ -599,13 +604,11 @@ pub async fn delete(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         ))
     })?;
 
-    let was_folder = item.is_folder();
     delete_or_trash(ctx, &api, token, &item).await?;
-    // A removed folder changes its parent's listing; parent uuid isn't known
-    // here, so clear the whole cache (deletes are far rarer than reads).
-    if was_folder {
-        ctx.cache.clear();
-    }
+    // The removed item's parent listing (folder or file) changed and its
+    // uuid isn't known here, so clear the whole cache (deletes are far rarer
+    // than reads).
+    ctx.cache.clear();
     Ok(status_response(StatusCode::NO_CONTENT))
 }
 
@@ -702,11 +705,10 @@ pub async fn mv(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         }
     }
 
-    // Moving/renaming a folder changes the source and destination parent
-    // listings; the affected parent uuids aren't all known here, so clear.
-    if item.is_folder() {
-        ctx.cache.clear();
-    }
+    // Moving/renaming changes the source and destination parent listings
+    // (folder or file); the affected parent uuids aren't all known here, so
+    // clear the whole cache.
+    ctx.cache.clear();
     Ok(status_response(StatusCode::NO_CONTENT))
 }
 

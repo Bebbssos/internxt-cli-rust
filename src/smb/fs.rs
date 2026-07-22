@@ -435,6 +435,9 @@ impl WriteState {
             &self.temp_path, size, "smb",
         )
         .await;
+        // New/updated file must show up immediately for this process's own
+        // subsequent list_dir/open, same as folder mutations already do.
+        self.inner.cache.invalidate(&self.parent_uuid);
         Ok(())
     }
 }
@@ -635,7 +638,7 @@ impl Handle for DirHandle {
         let api = DriveApi::for_credentials(&creds);
         let (folders, files) = tokio::try_join!(
             tree::list_folders(&api, &creds.token, &self.uuid, &self.inner.cache),
-            tree::list_files(&api, &creds.token, &self.uuid),
+            tree::list_files_cached(&api, &creds.token, &self.uuid, &self.inner.cache),
         )
         .map_err(to_smb)?;
         let matches = |name: &str| pattern.map(|p| glob_match(p, name)).unwrap_or(true);
@@ -819,8 +822,9 @@ impl ShareBackend for DriveBackend {
         let found_folder = tree::find_folder(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
             .await
             .map_err(to_smb)?;
-        let files = tree::list_files(&api, &creds.token, &parent.uuid).await.map_err(to_smb)?;
-        let found_file = files.into_iter().find(|f| f.display_name() == name);
+        let found_file = tree::find_file(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
+            .await
+            .map_err(to_smb)?;
 
         // Directory CREATE (FILE_DIRECTORY_FILE set).
         if opts.directory {
@@ -942,8 +946,10 @@ impl ShareBackend for DriveBackend {
         .map_err(to_smb)?
         .ok_or(SmbError::PathNotFound)?;
 
-        let files = tree::list_files(&api, &creds.token, &parent.uuid).await.map_err(to_smb)?;
-        if let Some(f) = files.into_iter().find(|f| f.display_name() == name) {
+        if let Some(f) = tree::find_file(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
+            .await
+            .map_err(to_smb)?
+        {
             if self.inner.delete_permanently {
                 api.delete_file(&creds.token, &f.uuid).await.map_err(to_smb)?;
             } else {
@@ -951,6 +957,7 @@ impl ShareBackend for DriveBackend {
                     .await
                     .map_err(to_smb)?;
             }
+            self.inner.cache.invalidate(&parent.uuid);
             return Ok(());
         }
         if let Some(f) = tree::find_folder(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
@@ -1014,29 +1021,34 @@ impl ShareBackend for DriveBackend {
         .ok_or(SmbError::PathNotFound)?;
 
         // Resolve the source item (file first, then folder).
-        let files = tree::list_files(&api, &creds.token, &src_parent.uuid).await.map_err(to_smb)?;
-        let (uuid, is_folder, cur_name) =
-            if let Some(f) = files.into_iter().find(|f| f.display_name() == src_name) {
-                let cur = f.display_name();
-                (f.uuid, false, cur)
-            } else {
-                match tree::find_folder(&api, &creds.token, &src_parent.uuid, &src_name, &self.inner.cache)
-                    .await
-                    .map_err(to_smb)?
-                {
-                    Some(f) => (f.uuid, true, f.plain_name),
-                    None => return Err(SmbError::NotFound),
-                }
-            };
+        let src_file = tree::find_file(&api, &creds.token, &src_parent.uuid, &src_name, &self.inner.cache)
+            .await
+            .map_err(to_smb)?;
+        let (uuid, is_folder, cur_name) = if let Some(f) = src_file {
+            let cur = f.display_name();
+            (f.uuid, false, cur)
+        } else {
+            match tree::find_folder(&api, &creds.token, &src_parent.uuid, &src_name, &self.inner.cache)
+                .await
+                .map_err(to_smb)?
+            {
+                Some(f) => (f.uuid, true, f.plain_name),
+                None => return Err(SmbError::NotFound),
+            }
+        };
 
         // Reject if the destination name already exists in the target folder.
-        let dst_files = tree::list_files(&api, &creds.token, &dst_parent.uuid).await.map_err(to_smb)?;
+        let dst_file_clash =
+            tree::find_file(&api, &creds.token, &dst_parent.uuid, &dst_name, &self.inner.cache)
+                .await
+                .map_err(to_smb)?
+                .is_some();
         let dst_folder_clash =
             tree::find_folder(&api, &creds.token, &dst_parent.uuid, &dst_name, &self.inner.cache)
                 .await
                 .map_err(to_smb)?
                 .is_some();
-        let clashes = dst_files.iter().any(|f| f.display_name() == dst_name) || dst_folder_clash;
+        let clashes = dst_file_clash || dst_folder_clash;
         // A no-op rename to the same path is fine; anything else that clashes is not.
         if clashes && !(src_parent.uuid == dst_parent.uuid && cur_name == dst_name) {
             return Err(SmbError::Exists);

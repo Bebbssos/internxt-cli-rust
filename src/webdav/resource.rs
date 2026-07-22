@@ -13,7 +13,7 @@ use internxt_core::api::DriveApi;
 // Re-export the shared tree types/functions so existing `resource::…` references
 // throughout the webdav module keep resolving.
 pub use crate::serve::tree::{
-    find_folder, list_files, list_folders, resolve_folder, DriveItem, FolderItem,
+    find_file, find_folder, list_files_cached, list_folders, resolve_folder, DriveItem, FolderItem,
 };
 
 /// A parsed request URL. `url` is percent-decoded and always starts with `/`.
@@ -120,8 +120,7 @@ pub async fn resolve_item(
     }
 
     // Try file first.
-    let files = list_files(api, token, &parent.uuid).await?;
-    if let Some(f) = files.into_iter().find(|f| &f.display_name() == last) {
+    if let Some(f) = find_file(api, token, &parent.uuid, last, cache).await? {
         return Ok(Some(DriveItem::File(f)));
     }
     // Then folder.
