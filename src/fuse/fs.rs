@@ -19,6 +19,13 @@
 //! skipped when the open is immediately truncated), writes patch the temp file,
 //! and on the final `release` the temp file is uploaded in full and a new Drive
 //! file entry replaces the old one.
+//!
+//! `release` is fire-and-forget from the kernel's point of view — it lets the
+//! writer's `close()` return before our reply (and thus the upload it awaits)
+//! completes — so a failed upload has nowhere to report to by the time it's
+//! known. `NodeData::failed_upload` + `Inner::take_failed_upload` give a later
+//! read-only `open()` a one-shot chance to surface it as `EIO` instead of the
+//! failure being visible only in the server's own log.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -105,6 +112,27 @@ struct NodeData {
     file_type: String,
     plain_name: String,
     updated_at: String,
+    /// Set when the most recent `finalize_write` for this inode (Drive
+    /// upload + `replace_file`/`create_file_entry`, run from `release()`
+    /// after the writer's `close()` has already returned success — see
+    /// `pending_uploads` above) failed for any reason: quota, a transient
+    /// network/server error, auth, a concurrent-create 409, anything. That
+    /// failure is otherwise only ever visible in the server's own log
+    /// (`release`'s `crate::serve::log::warn`); the writer already got a
+    /// successful `close()`, and `getattr`/`ls` keep showing the size the
+    /// (failed) write set locally via `set_node_size`. This can't make the
+    /// original `close()` fail — that ship has sailed by the time
+    /// `finalize_write` even runs — but a later read-only `open()` checks
+    /// this (via `Inner::take_failed_upload`) and returns a one-shot `EIO`
+    /// instead of silently serving content that may not match, or may never
+    /// have reached, Drive at all. One-shot: cleared the moment it's
+    /// surfaced, and also cleared by the next *successful* `finalize_write`
+    /// (see `Inner::record_finalize_result`), so a file doesn't stay wedged
+    /// after the underlying problem is fixed and the file is rewritten.
+    /// Deliberately excluded from `intern`'s metadata refresh (a routine
+    /// `lookup`/`readdir` must not clear it before `open()` gets a chance to
+    /// surface it).
+    failed_upload: Option<String>,
 }
 
 #[derive(Default)]
@@ -328,6 +356,7 @@ impl Inner {
                 file_type: String::new(),
                 plain_name: String::new(),
                 updated_at: root_updated_at,
+                failed_upload: None,
             },
         );
         Inner {
@@ -445,6 +474,7 @@ impl Inner {
             file_type: String::new(),
             plain_name: f.plain_name.clone(),
             updated_at: f.updated_at.clone(),
+            failed_upload: None,
         }
     }
 
@@ -461,6 +491,7 @@ impl Inner {
             file_type: f.file_type.clone(),
             plain_name: f.plain_name.clone(),
             updated_at: f.updated_at.clone(),
+            failed_upload: None,
         }
     }
 
@@ -580,6 +611,29 @@ impl Inner {
         self.pending_uploads.lock().unwrap().get(&ino).cloned()
     }
 
+    /// Record the outcome of a `finalize_write` for `ino` on its `NodeData`:
+    /// `Err` sets `failed_upload` (message included, for whatever future
+    /// diagnostic use), `Ok` clears it. Split out from `finalize_write` so
+    /// this bookkeeping is unit-testable without a network round trip.
+    fn record_finalize_result(&self, ino: u64, result: &Result<()>) {
+        if let Some(nd) = self.inodes.lock().unwrap().map.get_mut(&ino) {
+            nd.failed_upload = result.as_ref().err().map(|e| format!("{e:#}"));
+        }
+    }
+
+    /// Take (clear) and report whether `ino` has a recorded upload failure.
+    /// One-shot by design: `open()`'s read-only path calls this once per
+    /// open, so the failure is surfaced exactly once and doesn't wedge the
+    /// file shut forever (see `NodeData::failed_upload`).
+    fn take_failed_upload(&self, ino: u64) -> bool {
+        self.inodes
+            .lock()
+            .unwrap()
+            .map
+            .get_mut(&ino)
+            .is_some_and(|nd| nd.failed_upload.take().is_some())
+    }
+
     async fn acquire_upload(&self) -> Result<Option<tokio::sync::OwnedSemaphorePermit>> {
         match &self.upload_sem {
             Some(s) => Ok(Some(s.clone().acquire_owned().await?)),
@@ -588,11 +642,19 @@ impl Inner {
     }
 
     /// Finalize a write handle: upload the temp file whole and swap the Drive
-    /// entry. No-op when nothing was written.
+    /// entry. No-op when nothing was written. Records the success/failure on
+    /// the node either way (see `record_finalize_result`); the caller
+    /// (`release`) still logs the error itself, unchanged.
     async fn finalize_write(&self, wh: Arc<WriteHandle>) -> Result<()> {
         if !wh.dirty.load(Ordering::SeqCst) {
             return Ok(());
         }
+        let result = self.finalize_write_inner(&wh).await;
+        self.record_finalize_result(wh.ino, &result);
+        result
+    }
+
+    async fn finalize_write_inner(&self, wh: &WriteHandle) -> Result<()> {
         {
             let mut f = wh.file.lock().await;
             f.flush().await?;
@@ -976,6 +1038,20 @@ impl Filesystem for InxtFs {
                         return;
                     }
                 };
+                // The write that just finished (if any) may have failed to
+                // ever reach Drive — quota, a transient network/server
+                // error, a concurrent-create 409, anything (see
+                // `NodeData::failed_upload`). The writer's `close()` already
+                // returned success and can't be un-told; surface it here
+                // instead, once, so this read-only open doesn't silently
+                // serve content that may not match (or may not exist on)
+                // Drive at all. The flag clears as it's taken, so this is a
+                // one-time speed bump, not a permanent lockout: a retry (or
+                // a fresh, successful write) behaves normally again.
+                if inner.take_failed_upload(ino.0) {
+                    reply.error(Errno::EIO);
+                    return;
+                }
                 let creds = inner.creds();
                 let bucket = if nd.bucket.is_empty() {
                     creds.bucket().to_string()
@@ -1259,6 +1335,7 @@ impl Filesystem for InxtFs {
                 file_type: ftype,
                 plain_name: plain,
                 updated_at: now_rfc3339(),
+                failed_upload: None,
             };
             let ino = inner.intern(parent.0, nd.clone());
             let mut wh = wh;
@@ -1334,6 +1411,7 @@ impl Filesystem for InxtFs {
                 file_type: String::new(),
                 plain_name: name,
                 updated_at: now_rfc3339(),
+                failed_upload: None,
             };
             let ino = inner.intern(parent.0, nd.clone());
             reply.entry(&inner.ttl(), &inner.attr(ino, &nd), Generation(0));
@@ -1727,5 +1805,97 @@ mod tests {
 
         inner.end_pending_upload(ino, &second);
         assert!(inner.pending_upload(ino).is_none());
+    }
+
+    /// A minimal file `NodeData`, for tests exercising `failed_upload`
+    /// bookkeeping without going through a real `create()`/`finalize_write`
+    /// (which need a temp file and network).
+    fn file_node(parent: u64, name: &str) -> NodeData {
+        NodeData {
+            uuid: "uuid-1".to_string(),
+            parent,
+            parent_uuid: String::new(),
+            name: name.to_string(),
+            kind: NodeKind::File,
+            size: 0,
+            bucket: String::new(),
+            file_id: Some("file-1".to_string()),
+            file_type: String::new(),
+            plain_name: name.to_string(),
+            updated_at: now_rfc3339(),
+            failed_upload: None,
+        }
+    }
+
+    /// Regression test for the silent-write-failure bug: `release()`'s
+    /// `finalize_write` runs after the writer's `close()` has already
+    /// returned success (see the module doc comment and `pending_uploads`),
+    /// so a failure — quota, a transient network/server error, a
+    /// concurrent-create 409, anything — was previously visible only in the
+    /// server's own log. `record_finalize_result` (called from
+    /// `finalize_write` around every real upload attempt) must record that
+    /// failure on the node, `take_failed_upload` must surface it exactly
+    /// once (mirroring what `open()`'s read-only path does), and a
+    /// subsequent successful `finalize_write` must clear it so a fixed/
+    /// rewritten file doesn't stay poisoned.
+    #[tokio::test]
+    async fn record_finalize_result_marks_failure_and_clears_on_next_success() {
+        let inner = test_inner().await;
+        let ino = inner.intern(ROOT_INO, file_node(ROOT_INO, "quota_test.bin"));
+
+        let err: Result<()> = Err(anyhow!(
+            "startUpload failed: HTTP 420 Bad Request \"Max space used\""
+        ));
+        inner.record_finalize_result(ino, &err);
+        assert!(
+            inner.node(ino).unwrap().failed_upload.is_some(),
+            "a failed finalize_write must be recorded on the node"
+        );
+
+        // What open()'s read-only path does before serving/refusing a read.
+        assert!(
+            inner.take_failed_upload(ino),
+            "the failure must be surfaced on the next read-only open()"
+        );
+        assert!(
+            !inner.take_failed_upload(ino),
+            "the surfaced failure is one-shot: a second open() must not see it again"
+        );
+
+        // Re-mark it, then simulate the user fixing the problem and
+        // rewriting the file successfully.
+        inner.record_finalize_result(ino, &err);
+        assert!(inner.node(ino).unwrap().failed_upload.is_some());
+        inner.record_finalize_result(ino, &Ok(()));
+        assert!(
+            inner.node(ino).unwrap().failed_upload.is_none(),
+            "a subsequent successful finalize_write must clear the failure flag"
+        );
+    }
+
+    /// `intern()` is called on every routine `lookup`/`readdir` to refresh a
+    /// child's metadata from a live Drive listing — which has no notion of
+    /// `failed_upload` and always supplies `None` for it. If that refresh
+    /// clobbered the flag, practically any `ls` racing in between a failed
+    /// upload and the next `open()` would erase the signal before it could
+    /// ever be surfaced. It must not.
+    #[tokio::test]
+    async fn failed_upload_flag_survives_a_directory_listing_refresh() {
+        let inner = test_inner().await;
+        let name = "quota_test.bin";
+        let ino = inner.intern(ROOT_INO, file_node(ROOT_INO, name));
+
+        inner.record_finalize_result(ino, &Err(anyhow!("boom")));
+        assert!(inner.node(ino).unwrap().failed_upload.is_some());
+
+        let refreshed = inner.intern(ROOT_INO, file_node(ROOT_INO, name));
+        assert_eq!(
+            refreshed, ino,
+            "the same (parent, name) must resolve to the same inode"
+        );
+        assert!(
+            inner.node(ino).unwrap().failed_upload.is_some(),
+            "intern()'s metadata refresh must not clear a pending failed_upload flag"
+        );
     }
 }
