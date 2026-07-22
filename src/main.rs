@@ -44,7 +44,8 @@ struct Cli {
         long = "non-interactive",
         global = true,
         env = "IXR_NONINTERACTIVE",
-        default_value_t = false
+        default_value_t = false,
+        value_parser = clap::builder::BoolishValueParser::new()
     )]
     non_interactive: bool,
     /// Disable the idle-read timeout on network transfers (uploads/downloads).
@@ -52,7 +53,13 @@ struct Cli {
     /// false timeout on an otherwise-healthy transfer over a slow link.
     /// Connect timeout stays on regardless: a hung connection attempt is
     /// unrelated to transfer speed and should still fail fast.
-    #[arg(long, global = true, env = "IXR_NO_TIMEOUTS", default_value_t = false)]
+    #[arg(
+        long,
+        global = true,
+        env = "IXR_NO_TIMEOUTS",
+        default_value_t = false,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     no_timeout: bool,
 }
 
