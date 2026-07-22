@@ -281,8 +281,12 @@ enum Commands {
         #[arg(short = 'i', long)]
         folder_uuid: Option<String>,
         /// Cache folder listings for this many seconds (also the FUSE kernel
-        /// attr/entry TTL). Shared by all backends.
-        #[arg(long, default_value_t = 5)]
+        /// attr/entry TTL). Shared by all backends. Matches rclone's own
+        /// `--dir-cache-time` default (300s/5min): a short TTL can expire
+        /// mid-traversal on a deep path or a folder with hundreds of
+        /// entries (each level/page is a network round trip), forcing a
+        /// redundant re-fetch of ancestors that were only just resolved.
+        #[arg(long, default_value_t = 300)]
         cache_ttl: u64,
         /// Disable caching (same as --cache-ttl 0).
         #[arg(long, default_value_t = false)]
@@ -439,7 +443,12 @@ enum Commands {
         #[arg(short = 'i', long)]
         folder_uuid: Option<String>,
         /// Cache folder listings + kernel attributes for this many seconds.
-        #[arg(long, default_value_t = 5)]
+        /// Matches rclone's own `--dir-cache-time` default (300s/5min): a
+        /// short TTL can expire mid-traversal on a deep path or a folder
+        /// with hundreds of entries (each level/page is a network round
+        /// trip), forcing a redundant re-fetch of ancestors that were only
+        /// just resolved.
+        #[arg(long, default_value_t = 300)]
         cache_ttl: u64,
         /// Disable caching (same as --cache-ttl 0; always live, slower).
         #[arg(long, default_value_t = false)]
