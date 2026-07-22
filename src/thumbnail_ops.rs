@@ -10,7 +10,6 @@ use std::path::Path;
 
 use internxt_core::api::DriveApi;
 use internxt_core::models::{Credentials, ThumbnailMeta};
-use internxt_core::network::NetworkApi;
 
 use crate::auth;
 
@@ -118,7 +117,7 @@ pub async fn generate(id: Option<&str>, path: Option<&str>) -> Result<()> {
         .ok_or_else(|| anyhow!("file has no network fileId"))?;
     let bucket = file_bucket(&creds, &meta.bucket);
 
-    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+    let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
     crate::output::status("Downloading image...");
     let mut buf: Vec<u8> = Vec::new();
     internxt_core::transfer::download_file_to_writer(
@@ -171,7 +170,7 @@ pub async fn upload(id: Option<&str>, path: Option<&str>, file: &str, raw: bool)
 
     let meta = api.get_file_meta(&creds.token, &uuid).await?;
     let bucket = file_bucket(&creds, &meta.bucket);
-    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+    let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
 
     let thumb = if raw {
         // Upload the provided bytes unchanged, recording the source extension +
@@ -263,7 +262,7 @@ pub async fn display(
     }
     let bucket = file_bucket(&creds, &thumb.bucket_id);
 
-    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+    let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
     // Chatter to stderr so the rendered image (stdout) stays clean.
     crate::output::status_err("Downloading thumbnail...");
     let mut buf: Vec<u8> = Vec::new();
@@ -333,7 +332,7 @@ pub async fn download(
         ));
     }
 
-    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+    let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
     crate::output::status("Downloading thumbnail...");
     let mut f = tokio::fs::File::create(&out).await?;
     internxt_core::transfer::download_file_to_writer(

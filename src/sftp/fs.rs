@@ -33,7 +33,6 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, DuplexStream};
 
 use internxt_core::api::DriveApi;
 use internxt_core::models::Credentials;
-use internxt_core::network::NetworkApi;
 use crate::serve::cache::FolderCache;
 use crate::serve::creds::SharedCreds;
 use crate::serve::tree::{self, FileItem, FolderItem};
@@ -242,7 +241,7 @@ struct ReadState {
 impl ReadState {
     fn start_stream(&self, start: u64) -> ReadStream {
         let (mut writer, reader) = tokio::io::duplex(256 * 1024);
-        let net = NetworkApi::new(&self.net_user, &self.net_pass);
+        let net = crate::net_client::network_api(&self.net_user, &self.net_pass);
         let mnemonic = self.mnemonic.clone();
         let bucket = self.bucket.clone();
         let file_id = self.file_id.clone();
@@ -351,7 +350,7 @@ impl WriteState {
         }
         if let Some(fid) = &self.base_file_id {
             if self.base_size > 0 {
-                let net = NetworkApi::new(&self.net_user, &self.net_pass);
+                let net = crate::net_client::network_api(&self.net_user, &self.net_pass);
                 let mut f = self.file.lock().await;
                 f.seek(std::io::SeekFrom::Start(0))
                     .await
@@ -391,7 +390,7 @@ impl WriteState {
         let creds = self.inner.creds();
         let token = &creds.token;
         let api = DriveApi::for_credentials(&creds);
-        let net = NetworkApi::new(&self.net_user, &self.net_pass);
+        let net = crate::net_client::network_api(&self.net_user, &self.net_pass);
 
         let _permit = self.inner.acquire_upload().await;
         let file_id = if size == 0 {

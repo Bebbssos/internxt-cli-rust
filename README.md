@@ -119,6 +119,11 @@ Every command accepts:
   output. See each command's "JSON output" below for its shape.
 - `-x, --non-interactive` (env `IXR_NONINTERACTIVE`) — never prompt for
   input; error out instead when a required value is missing.
+- `--no-timeout` (env `IXR_NO_TIMEOUTS`) — disable the idle-read timeout on
+  network transfers (uploads/downloads). Use if a slow `--stdin` producer or
+  `--stdout` consumer trips a false timeout on an otherwise-healthy transfer
+  over a slow link. Connect timeout stays on regardless — a hung connection
+  attempt is unrelated to transfer speed and should still fail fast.
 
 IDs are Drive UUIDs. Most commands that take an id also accept a `--path`
 (or `--dest-path` / `--remote-path`) alternative — give one or the other, not

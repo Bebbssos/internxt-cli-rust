@@ -86,7 +86,7 @@ pub async fn upload_file(
     let mut file_id = String::new();
 
     if size > 0 {
-        let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+        let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
         crate::output::status("Preparing network...");
         let pb = crate::output::progress_bar(size, "Uploading");
         file_id = upload_file_to_network(
@@ -136,7 +136,7 @@ async fn try_upload_thumbnail(
     {
         return;
     }
-    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+    let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
     let api = DriveApi::for_credentials(creds);
     match internxt_core::thumbnail::try_upload_thumbnail_from_path(
         &net,
@@ -179,7 +179,7 @@ async fn upload_from_stdin(
         .unwrap_or("")
         .to_string();
 
-    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+    let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
 
     let (file_id, size) = match size_hint {
         Some(0) => (String::new(), 0),
@@ -395,7 +395,7 @@ pub async fn download_file(
     };
 
     note("Preparing network...");
-    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+    let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
     let links = net.get_download_links(&bucket, &file_id).await?;
     if matches!(links.version, None | Some(1)) {
         return Err(anyhow!("File version 1 not supported"));
@@ -624,7 +624,7 @@ pub async fn upload_folder(
 
     let timer = Instant::now();
     crate::output::status("Preparing network...");
-    let net = NetworkApi::new(creds.net_user(), creds.net_pass());
+    let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
     let api = DriveApi::for_credentials(&creds);
 
     // 1. Recreate the folder tree (sequential — children need their parent's uuid).
