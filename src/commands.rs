@@ -46,7 +46,7 @@ pub async fn upload_file(
 
     let folder_uuid = {
         let api = DriveApi::for_credentials(&creds);
-        crate::paths::resolve_opt(
+        crate::paths::resolve_destination_opt(
             &api,
             &creds.token,
             creds.root_folder(),
@@ -649,7 +649,7 @@ pub async fn upload_folder(
     }
     let dest = {
         let api = DriveApi::for_credentials(&creds);
-        crate::paths::resolve_opt(
+        crate::paths::resolve_destination_opt(
             &api,
             &creds.token,
             creds.root_folder(),

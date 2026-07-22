@@ -210,6 +210,15 @@ pub async fn path_from_id(
 
 /// Resolve the mutually-exclusive `--id` / `--path` options to a uuid. `None`
 /// only when both are absent (the caller decides: root default, or required).
+///
+/// Note: a `Some("")` or `Some("   ")` value is treated the same as `None` here
+/// (both fall through to "absent"). That's the right behavior for *source*
+/// selection (e.g. `list`, `download`, `create-folder`'s parent) where "not
+/// provided" legitimately means "use the default root" and an accidentally
+/// blank string is harmless. It is the *wrong* behavior for a *destination*
+/// pair on a mutating command, where silently defaulting to the Drive root
+/// is surprising and potentially destructive — use `resolve_destination_opt`
+/// for those call sites instead.
 pub async fn resolve_opt(
     api: &DriveApi,
     token: &str,
@@ -226,6 +235,40 @@ pub async fn resolve_opt(
         (Some(_), Some(_)) => Err(anyhow!("Provide either an id or a path, not both")),
         (None, None) => Ok(None),
     }
+}
+
+/// `true` if the flag was explicitly passed (`Some`) but its value is empty or
+/// whitespace-only after trimming. `None` (flag never passed at all) is not
+/// blank — clap gives `None` only when the argument was omitted entirely, so
+/// this is exactly the distinction erased by `resolve_opt`'s `.filter()`.
+fn is_blank_but_provided(v: Option<&str>) -> bool {
+    matches!(v, Some(s) if s.trim().is_empty())
+}
+
+/// Like [`resolve_opt`], but for a *destination* `--id`/`--path` pair on a
+/// mutating command (move/upload/trash-restore): an explicitly-provided but
+/// empty or whitespace-only value is a hard error rather than being silently
+/// treated as "not provided". Without this guard, `--dest-path ""` (e.g. from
+/// an unset shell variable interpolated into the flag) is indistinguishable
+/// from omitting the flag entirely, and callers then default to the Drive
+/// account root — moving/uploading into root with no warning, which is
+/// exactly the kind of silent, surprising, destructive behavior a destination
+/// argument must never have.
+pub async fn resolve_destination_opt(
+    api: &DriveApi,
+    token: &str,
+    root: &str,
+    id: Option<&str>,
+    path: Option<&str>,
+    expect: Expect,
+) -> Result<Option<String>> {
+    if is_blank_but_provided(id) {
+        return Err(anyhow!("--destination was provided but is empty"));
+    }
+    if is_blank_but_provided(path) {
+        return Err(anyhow!("--dest-path was provided but is empty"));
+    }
+    resolve_opt(api, token, root, id, path, expect).await
 }
 
 // ---- commands ----
@@ -254,4 +297,24 @@ pub async fn cmd_path_from_id(id: &str) -> Result<()> {
         json!({ "success": true, "path": path, "isFolder": is_folder, "type": kind }),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_blank_but_provided_true_for_empty_and_whitespace() {
+        assert!(is_blank_but_provided(Some("")));
+        assert!(is_blank_but_provided(Some("   ")));
+        assert!(is_blank_but_provided(Some("\t\n ")));
+    }
+
+    #[test]
+    fn is_blank_but_provided_false_for_none_and_real_values() {
+        assert!(!is_blank_but_provided(None));
+        assert!(!is_blank_but_provided(Some("abc")));
+        assert!(!is_blank_but_provided(Some("  x  ")));
+        assert!(!is_blank_but_provided(Some("/a/b")));
+    }
 }
