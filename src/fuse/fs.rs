@@ -289,6 +289,14 @@ pub struct Inner {
     next_fh: AtomicU64,
     upload_sem: Option<Arc<tokio::sync::Semaphore>>,
     upload_limit: crate::upload_limit::UploadLimit,
+    /// Inodes with a `finalize_write` currently in flight. FUSE `release` is
+    /// fire-and-forget from the caller's point of view — the kernel lets the
+    /// client's `close()` return before our reply (and thus the upload it
+    /// awaits) completes. A read-open racing in during that window would
+    /// otherwise build a `ReadHandle` from a stale/empty `file_id` and fail
+    /// with a raw server error ("File id is malformed"). `open()` waits on
+    /// the per-inode lock here before proceeding, instead of racing ahead.
+    pending_uploads: Mutex<HashMap<u64, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Inner {
@@ -333,6 +341,7 @@ impl Inner {
             next_fh: AtomicU64::new(1),
             upload_sem,
             upload_limit,
+            pending_uploads: Mutex::new(HashMap::new()),
         }
     }
 
@@ -541,6 +550,34 @@ impl Inner {
 
     fn take_handle(&self, fh: u64) -> Option<Arc<Handle>> {
         self.handles.lock().unwrap().remove(&fh)
+    }
+
+    /// Mark `ino` as having a `finalize_write` in flight, returning the lock
+    /// to hold for its duration. Reuses an existing entry if one is already
+    /// registered (e.g. overlapping writes to the same inode), so waiters
+    /// queue behind whichever upload is currently running.
+    fn begin_pending_upload(&self, ino: u64) -> Arc<tokio::sync::Mutex<()>> {
+        self.pending_uploads
+            .lock()
+            .unwrap()
+            .entry(ino)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// Clear the pending-upload marker for `ino`, but only if it's still the
+    /// same lock we registered (a later writer may have already replaced it).
+    fn end_pending_upload(&self, ino: u64, lock: &Arc<tokio::sync::Mutex<()>>) {
+        let mut m = self.pending_uploads.lock().unwrap();
+        if m.get(&ino).is_some_and(|cur| Arc::ptr_eq(cur, lock)) {
+            m.remove(&ino);
+        }
+    }
+
+    /// The in-flight upload lock for `ino`, if any. `open()` waits on this
+    /// before building a read handle so it doesn't race a finalize in progress.
+    fn pending_upload(&self, ino: u64) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        self.pending_uploads.lock().unwrap().get(&ino).cloned()
     }
 
     async fn acquire_upload(&self) -> Result<Option<tokio::sync::OwnedSemaphorePermit>> {
@@ -924,6 +961,21 @@ impl Filesystem for InxtFs {
             }
             let write = !matches!(flags.acc_mode(), OpenAccMode::O_RDONLY);
             if !write {
+                // A write to this same inode may have just `release()`d — FUSE
+                // release doesn't block the writer's `close()`, so its
+                // `finalize_write` upload can still be running here. Wait for
+                // it instead of racing ahead with a stale/empty file_id (see
+                // `pending_uploads` doc comment on `Inner`).
+                if let Some(lock) = inner.pending_upload(ino.0) {
+                    drop(lock.lock().await);
+                }
+                let nd = match inner.node(ino.0) {
+                    Some(nd) => nd,
+                    None => {
+                        reply.error(Errno::ENOENT);
+                        return;
+                    }
+                };
                 let creds = inner.creds();
                 let bucket = if nd.bucket.is_empty() {
                     creds.bucket().to_string()
@@ -1108,7 +1160,22 @@ impl Filesystem for InxtFs {
                     if dirty {
                         log(&format!("[UPLOAD] {path} ({size} bytes)"));
                     }
-                    match inner.finalize_write(wh.clone()).await {
+                    // Register (and hold) the pending-upload lock for the
+                    // duration of finalize_write, so a read-open racing in on
+                    // this inode (possible because the kernel lets this
+                    // release's caller's close() return before we finish
+                    // here) blocks on it instead of reading a stale file_id.
+                    let pending = dirty.then(|| inner.begin_pending_upload(ino.0));
+                    let _guard = match &pending {
+                        Some(lock) => Some(lock.lock().await),
+                        None => None,
+                    };
+                    let result = inner.finalize_write(wh.clone()).await;
+                    drop(_guard);
+                    if let Some(lock) = &pending {
+                        inner.end_pending_upload(ino.0, lock);
+                    }
+                    match result {
                         Ok(_) if dirty => log(&format!("[UPLOAD] {path} done")),
                         Ok(_) => {}
                         Err(e) => {
@@ -1531,5 +1598,134 @@ async fn make_write_handle(inner: &Inner, ino: u64, nd: &NodeData) -> Result<Wri
 impl Drop for WriteHandle {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.temp_path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use internxt_core::models::{Credentials, UserInfo};
+    use std::time::Instant;
+
+    /// A minimal `Inner` — dummy credentials, no cache TTL, unlimited uploads —
+    /// good enough to exercise the `pending_uploads` bookkeeping without
+    /// touching the network (nothing here awaits anything network-bound).
+    async fn test_inner() -> Arc<Inner> {
+        let creds = Credentials {
+            token: String::new(),
+            user: UserInfo {
+                email: String::new(),
+                mnemonic: String::new(),
+                bucket: String::new(),
+                bridge_user: String::new(),
+                user_id: String::new(),
+                root_folder_id: String::new(),
+                ecc_private_key: None,
+                kyber_private_key: None,
+            },
+            workspace: None,
+        };
+        // `no_upload_limit: true` short-circuits before any network call.
+        let upload_limit = crate::upload_limit::resolve(
+            &crate::upload_limit::UploadLimitArgs {
+                no_upload_limit: true,
+                max_upload_size: None,
+            },
+            &creds,
+        )
+        .await
+        .unwrap();
+        Arc::new(Inner::new(
+            Arc::new(SharedCreds::new(creds)),
+            Arc::new(FolderCache::new(0)),
+            String::new(),
+            now_rfc3339(),
+            None,
+            upload_limit,
+            MountConfig {
+                mountpoint: PathBuf::new(),
+                cache_ttl: 0,
+                delete_permanently: false,
+                spool_dir: None,
+                read_only: false,
+                allow_other: false,
+            },
+        ))
+    }
+
+    /// Regression test for the FUSE read-after-write race: `release()` fires
+    /// `finalize_write` in a spawned task, but the kernel lets the writer's
+    /// `close()` return before that task (and thus our reply) finishes — so a
+    /// second `open()` for read can land while the upload is still in flight.
+    /// Before this fix, `open()` built a `ReadHandle` straight from `nd.file_id`
+    /// (still `None`/empty mid-upload), which failed reads with a raw server
+    /// error ("File id is malformed"). This mirrors `release()`'s locking
+    /// (register + hold the per-inode lock for the "upload") against what
+    /// `open()`'s read path now does (wait on it before proceeding), with a
+    /// sleep standing in for the network-bound upload — same style as
+    /// `nfs::fs::tests::concurrent_write_during_simulated_upload_is_not_lost`.
+    #[tokio::test]
+    async fn read_open_waits_for_in_flight_finalize_before_racing_ahead() {
+        let inner = test_inner().await;
+        let ino = 42u64;
+
+        let lock = inner.begin_pending_upload(ino);
+        let lock_bg = lock.clone();
+        let inner_bg = inner.clone();
+        let finalize_task = tokio::spawn(async move {
+            let _guard = lock_bg.lock().await;
+            // Stands in for the network-bound upload `finalize_write` awaits.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            drop(_guard);
+            inner_bg.end_pending_upload(ino, &lock_bg);
+        });
+
+        // Let the "release" task grab the lock first, mirroring the real
+        // race where finalize_write is already running by the time a second
+        // open() lands.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // What `open()`'s read path now does before building a `ReadHandle`.
+        let start = Instant::now();
+        if let Some(l) = inner.pending_upload(ino) {
+            drop(l.lock().await);
+        }
+        let waited = start.elapsed();
+
+        finalize_task.await.unwrap();
+
+        assert!(
+            waited >= std::time::Duration::from_millis(30),
+            "a read-open racing an in-flight finalize_write must block until \
+             it completes, not race ahead and read a stale/empty file_id"
+        );
+        assert!(
+            inner.pending_upload(ino).is_none(),
+            "the pending-upload marker must be cleared once finalize_write completes"
+        );
+    }
+
+    /// `end_pending_upload` only clears the map entry it matches (`Arc::ptr_eq`),
+    /// so a late/stale call from one finalize can't clobber a second write's
+    /// still-active registration for the same inode (e.g. rapid overwrite).
+    #[tokio::test]
+    async fn end_pending_upload_does_not_clobber_a_newer_registration() {
+        let inner = test_inner().await;
+        let ino = 7u64;
+
+        let first = inner.begin_pending_upload(ino);
+        inner.end_pending_upload(ino, &first);
+        assert!(inner.pending_upload(ino).is_none());
+
+        let second = inner.begin_pending_upload(ino);
+        // Stale call using the first (already-cleared) registration's Arc.
+        inner.end_pending_upload(ino, &first);
+        assert!(
+            inner.pending_upload(ino).is_some(),
+            "a stale end_pending_upload call must not remove a newer registration"
+        );
+
+        inner.end_pending_upload(ino, &second);
+        assert!(inner.pending_upload(ino).is_none());
     }
 }
