@@ -2495,9 +2495,9 @@ dependencies = [
 
 [[package]]
 name = "internxt-core"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e00640f28e5a4cb77a27883e408fe2647d23dffc30186d7a5223ff36f39cb2f"
+checksum = "c0407d4afabfbc0cddfcd114941a67831dfbe7a46c790e9f7dd455e64f6d5532"
 dependencies = [
  "aes 0.9.1",
  "aes-gcm 0.11.0",
@@ -2567,9 +2567,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "ixr-smb-server"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0975eb427a73d4f5382cf10eb081f93ab4e309d67008ec8a2c1599c023f2ebc2"
+checksum = "13aa892a26c5a58feea9c4145a379f6f57bb796125d20ab9fdcf8035bd3ac50c"
 dependencies = [
  "aes 0.8.4",
  "async-trait",
