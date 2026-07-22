@@ -489,6 +489,7 @@ pub async fn rename_file(id: Option<&str>, path: Option<&str>, new_name: &str) -
     let file_id = paths::resolve_opt(&api, &creds.token, creds.root_folder(), id, path, Expect::File)
         .await?
         .ok_or_else(|| anyhow!("Provide the file id (--id) or path (--path)"))?;
+    paths::validate_name(new_name)?;
     // Split into name + extension like node's path.parse.
     let p = std::path::Path::new(new_name);
     let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or(new_name);
