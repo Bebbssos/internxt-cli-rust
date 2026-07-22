@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -50,6 +50,35 @@ const FLUSH_IDLE: std::time::Duration = std::time::Duration::from_secs(2);
 /// A clean (already-flushed) write buffer is dropped after this much quiet,
 /// releasing its temp file; later reads fall back to the streaming reader.
 const EVICT_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Delay before the *first* retry after a flush failure. Doubles per
+/// additional consecutive failure (see [`retry_backoff`]), so a persistently
+/// failing upload (quota exceeded, a file that's too large, a revoked
+/// credential, anything non-transient) backs off instead of hammering the
+/// Drive API every [`SWEEP_INTERVAL`](super::SWEEP_INTERVAL) tick forever.
+const RETRY_BASE: std::time::Duration = std::time::Duration::from_secs(2);
+/// Cap on the backoff delay: a long-failing buffer still gets retried at a
+/// bounded cadence (never longer than this apart) — it must still eventually
+/// succeed once whatever was wrong is fixed (e.g. the user frees up quota),
+/// just without the unbounded retry storm.
+const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Delay before retrying a buffer that has failed to flush `fail_count`
+/// consecutive times in a row: `0` (no prior failure since the last success)
+/// retries as soon as [`FLUSH_IDLE`] allows; otherwise
+/// `RETRY_BASE * 2^(fail_count - 1)`, capped at [`RETRY_MAX`]. This only
+/// paces *when* the next attempt happens — a dirty buffer is always retried
+/// eventually, never given up on.
+fn retry_backoff(fail_count: u32) -> std::time::Duration {
+    if fail_count == 0 {
+        return std::time::Duration::ZERO;
+    }
+    let shift = fail_count.saturating_sub(1).min(31);
+    RETRY_BASE
+        .checked_mul(1u32 << shift)
+        .map(|d| d.min(RETRY_MAX))
+        .unwrap_or(RETRY_MAX)
+}
 
 pub(crate) fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -256,6 +285,15 @@ struct WriteBuffer {
     /// NOT be cleared — see `clear_dirty_if_unchanged`.
     write_gen: AtomicU64,
     last_write: Mutex<Instant>,
+    /// Consecutive flush failures since the last success (or since creation).
+    /// Reset to 0 on a successful flush; drives [`retry_backoff`] so a
+    /// persistently-failing buffer is retried with growing gaps instead of
+    /// every sweep tick — see `sweep`'s dirty branch.
+    fail_count: AtomicU32,
+    /// When the most recent flush *attempt* (successful or not) started.
+    /// Compared against `retry_backoff(fail_count)` in `sweep` to decide
+    /// whether enough time has passed to retry.
+    last_attempt: Mutex<Instant>,
     /// Existing Drive entry to replace in place (uuid stays, fileId+size swap).
     /// `None` = a not-yet-created file: the first flush creates the entry (with
     /// content) and stores its uuid here, so later flushes replace. Deferring the
@@ -333,6 +371,38 @@ impl WriteBuffer {
         } else {
             false
         }
+    }
+
+    /// Record a failed flush attempt: bumps the consecutive-failure count and
+    /// stamps the attempt time, so `sweep` backs off before retrying (see
+    /// [`retry_backoff`]). Called on every `flush_writer` error path that
+    /// leaves `dirty` set.
+    fn record_flush_failure(&self) {
+        self.fail_count.fetch_add(1, Ordering::SeqCst);
+        *self.last_attempt.lock().unwrap() = Instant::now();
+    }
+
+    /// Record a successful flush: clears the failure count so a later failure
+    /// (e.g. after the buffer is written to again) starts backing off from
+    /// scratch rather than compounding on old failures.
+    fn record_flush_success(&self) {
+        self.fail_count.store(0, Ordering::SeqCst);
+        *self.last_attempt.lock().unwrap() = Instant::now();
+    }
+
+    /// Record a failed flush attempt and log it, including the running
+    /// failure count and the backoff before the next retry — so an operator
+    /// watching the logs can see the retry pacing (e.g. "next retry in 32s")
+    /// instead of a wall of identical one-second-apart lines.
+    fn log_flush_failure(&self, msg: &str) {
+        self.record_flush_failure();
+        let fail_count = self.fail_count.load(Ordering::SeqCst);
+        let backoff = retry_backoff(fail_count);
+        crate::serve::log::warn(&format!(
+            "{msg} (fileid={}, consecutive failures={fail_count}, next retry in {}s)",
+            self.fileid,
+            backoff.as_secs()
+        ));
     }
 
     async fn read_at(&self, offset: u64, len: usize) -> anyhow::Result<Vec<u8>> {
@@ -631,6 +701,8 @@ impl Inner {
             size: AtomicU64::new(node.size),
             write_gen: AtomicU64::new(0),
             last_write: Mutex::new(Instant::now()),
+            fail_count: AtomicU32::new(0),
+            last_attempt: Mutex::new(Instant::now()),
             existing_uuid: Mutex::new(existing_uuid),
             parent_uuid: node.parent_uuid.clone(),
             plain: node.plain_name.clone(),
@@ -661,7 +733,7 @@ impl Inner {
         let (gen_before, size) = {
             let mut f = wb.file.lock().await;
             if let Err(e) = f.flush().await {
-                crate::serve::log::warn(&format!("[nfs] flush temp failed: {e}"));
+                wb.log_flush_failure(&format!("[nfs] flush temp failed: {e}"));
                 return;
             }
             (wb.write_gen.load(Ordering::SeqCst), wb.size.load(Ordering::SeqCst))
@@ -670,14 +742,20 @@ impl Inner {
         // A not-yet-created file with no content: don't call createFileEntry with
         // a 0-byte body (free/legacy plans reject empty files with HTTP 402). Stop
         // retrying; if it's later written, `dirty` flips back on and it uploads.
+        // Not a failure (nothing was attempted), so clear any stale backoff too.
         if size == 0 && existing.is_none() {
             wb.clear_dirty_if_unchanged(gen_before);
+            wb.fail_count.store(0, Ordering::SeqCst);
             return;
         }
         if let Err(e) = self.upload_limit.check(size) {
             crate::serve::log::warn(&format!("[nfs] upload rejected: {e:#}"));
             // Too big to ever upload; drop the dirty flag so we stop retrying.
+            // Not a transient failure, so clear the backoff state too — a
+            // later write that shrinks the file back under the limit should
+            // get an immediate first attempt, not an inherited backoff.
             wb.dirty.store(false, Ordering::SeqCst);
+            wb.fail_count.store(0, Ordering::SeqCst);
             return;
         }
         let creds = self.creds();
@@ -701,7 +779,7 @@ impl Inner {
             {
                 Ok(v) => v,
                 Err(e) => {
-                    crate::serve::log::warn(&format!("[nfs] upload failed: {e:#}"));
+                    wb.log_flush_failure(&format!("[nfs] upload failed: {e:#}"));
                     return;
                 }
             }
@@ -711,7 +789,7 @@ impl Inner {
             // Replace an existing Drive entry in place (keeps uuid/name/folder).
             Some(uuid) => {
                 if let Err(e) = api.replace_file(token, &uuid, &file_id, size).await {
-                    crate::serve::log::warn(&format!("[nfs] replace_file failed: {e:#}"));
+                    wb.log_flush_failure(&format!("[nfs] replace_file failed: {e:#}"));
                     return;
                 }
                 uuid
@@ -739,7 +817,7 @@ impl Inner {
                     created.uuid
                 }
                 Err(e) => {
-                    crate::serve::log::warn(&format!("[nfs] createFileEntry failed: {e:#}"));
+                    wb.log_flush_failure(&format!("[nfs] createFileEntry failed: {e:#}"));
                     return;
                 }
             },
@@ -761,6 +839,10 @@ impl Inner {
         // Leaving `dirty = true` means the next sweep re-flushes with the
         // buffer's current (post-race) content.
         let cleared = wb.clear_dirty_if_unchanged(gen_before);
+        // The upload itself succeeded (bytes landed on Drive) regardless of
+        // whether a race left `dirty` set again — reset the failure streak so
+        // a future failure starts backing off from scratch.
+        wb.record_flush_success();
         self.update_file_node(wb.fileid, file_id, size, wb.bucket.clone());
         self.readers.lock().unwrap().remove(&wb.fileid);
         if cleared {
@@ -790,9 +872,24 @@ impl Inner {
         for (id, wb) in snapshot {
             let idle = now.duration_since(*wb.last_write.lock().unwrap());
             if wb.dirty.load(Ordering::SeqCst) {
-                if idle >= FLUSH_IDLE {
-                    self.flush_writer(wb).await;
+                if idle < FLUSH_IDLE {
+                    continue;
                 }
+                // Beyond the idle threshold, a buffer with no failure history
+                // is flushed on this tick as before. One that has been
+                // failing repeatedly (quota exceeded, revoked credential,
+                // ...) is only retried once its backoff has elapsed, so a
+                // permanently-failing upload backs off instead of hitting the
+                // Drive API (and the log) every SWEEP_INTERVAL tick forever —
+                // it is still retried, just less often the longer it fails.
+                let fail_count = wb.fail_count.load(Ordering::SeqCst);
+                if fail_count > 0 {
+                    let since_attempt = now.duration_since(*wb.last_attempt.lock().unwrap());
+                    if since_attempt < retry_backoff(fail_count) {
+                        continue;
+                    }
+                }
+                self.flush_writer(wb).await;
             } else if idle >= EVICT_IDLE {
                 self.writers.lock().unwrap().remove(&id);
             }
@@ -1294,6 +1391,8 @@ mod tests {
             size: AtomicU64::new(0),
             write_gen: AtomicU64::new(0),
             last_write: Mutex::new(Instant::now()),
+            fail_count: AtomicU32::new(0),
+            last_attempt: Mutex::new(Instant::now()),
             existing_uuid: Mutex::new(None),
             parent_uuid: String::new(),
             plain: "test".to_string(),
@@ -1376,5 +1475,61 @@ mod tests {
         assert!(!cleared);
         assert!(wb.dirty.load(Ordering::SeqCst));
         assert_eq!(wb.size.load(Ordering::SeqCst), 11);
+    }
+
+    /// `retry_backoff` must grow with the failure count and cap at
+    /// `RETRY_MAX`, never overflow/panic, and never be negative/decreasing.
+    #[test]
+    fn retry_backoff_grows_and_then_caps() {
+        assert_eq!(retry_backoff(0), std::time::Duration::ZERO, "no failure yet ⇒ no backoff");
+        assert_eq!(retry_backoff(1), RETRY_BASE);
+        assert_eq!(retry_backoff(2), RETRY_BASE * 2);
+        assert_eq!(retry_backoff(3), RETRY_BASE * 4);
+
+        let mut prev = std::time::Duration::ZERO;
+        for n in 1..10 {
+            let d = retry_backoff(n);
+            assert!(d <= RETRY_MAX, "backoff must never exceed the cap");
+            assert!(d >= prev, "backoff must never shrink as failures accumulate");
+            prev = d;
+        }
+        assert_eq!(retry_backoff(10), RETRY_MAX, "large counts settle at the cap");
+        // A pathologically large failure count must not overflow or panic.
+        assert_eq!(retry_backoff(u32::MAX), RETRY_MAX);
+    }
+
+    /// The core of this fix: a buffer that fails every flush attempt must
+    /// never be given up on (it must stay dirty forever, so the data is
+    /// never discarded), but the failure bookkeeping that `sweep` consults
+    /// before calling `flush_writer` again must show a growing, capped
+    /// backoff — not "retry unconditionally every tick" (the old bug, which
+    /// hammered the Drive API and the log once a second forever on a
+    /// permanently-failing upload).
+    #[tokio::test]
+    async fn permanently_failing_buffer_backs_off_but_never_gives_up() {
+        let wb = test_write_buffer().await;
+        wb.write_at(0, b"hello").await.unwrap();
+        assert!(wb.dirty.load(Ordering::SeqCst));
+
+        let mut last_backoff = std::time::Duration::ZERO;
+        for expected_count in 1..=6u32 {
+            // Mirrors what `flush_writer` does on each of its failure paths.
+            wb.log_flush_failure("simulated permanent failure");
+            assert_eq!(wb.fail_count.load(Ordering::SeqCst), expected_count);
+            // Never given up on: still dirty, so the next sweep still retries.
+            assert!(wb.dirty.load(Ordering::SeqCst), "a failing upload must never lose its data");
+
+            let backoff = retry_backoff(wb.fail_count.load(Ordering::SeqCst));
+            assert!(backoff >= last_backoff, "backoff must grow (or hold at the cap)");
+            assert!(backoff <= RETRY_MAX);
+            last_backoff = backoff;
+        }
+
+        // A later success (e.g. the user freed up quota) resets the streak so
+        // a fresh failure afterwards backs off from scratch instead of
+        // compounding on the old one.
+        wb.record_flush_success();
+        assert_eq!(wb.fail_count.load(Ordering::SeqCst), 0);
+        assert_eq!(retry_backoff(wb.fail_count.load(Ordering::SeqCst)), std::time::Duration::ZERO);
     }
 }
