@@ -66,6 +66,12 @@ const ROOT_INO: u64 = 1;
 /// discards) the entire file.
 const MAX_FORWARD_SKIP: u64 = 8 * 1024 * 1024;
 
+/// How much recently-streamed data [`RecentWindow`] keeps around per open
+/// file. Covers small backward/forward re-reads (container-index parsing:
+/// MP4 `moov`, MKV cues, …) without a network round trip; large enough for
+/// that, small enough that many open files stay cheap.
+const BACKWARD_WINDOW: u64 = 4 * 1024 * 1024;
+
 pub(crate) fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -146,7 +152,7 @@ struct InodeTable {
 /// temp-file-backed writer (write opens and `create`), or a directory-listing
 /// snapshot (opendir).
 enum Handle {
-    Read(ReadHandle),
+    Read(Box<ReadHandle>),
     Write(Arc<WriteHandle>),
     /// (child inode, name, attrs) snapshot for one opendir/readdir(plus)/releasedir session.
     Dir(Vec<(u64, String, NodeData)>),
@@ -164,10 +170,64 @@ impl Drop for ReadStream {
     }
 }
 
+/// A trailing window of the most recently streamed bytes (whether served to
+/// the caller or discarded while skipping a forward gap), independent of any
+/// particular `ReadStream` — it survives a restart. Small backward re-reads
+/// and re-visits of a just-skipped forward gap are extremely common while a
+/// media player parses a container's index (e.g. an MP4 `moov` atom: lots of
+/// short hops re-reading a box header then its payload), and each one would
+/// otherwise force a full stream restart — a fresh `getDownloadLinks` round
+/// trip plus a new ranged GET. Serving those from memory instead is the
+/// difference between "instant" and "a network round trip per hop".
+struct RecentWindow {
+    /// Bytes `[start, start + data.len())` of the file, most recent last.
+    data: std::collections::VecDeque<u8>,
+    start: u64,
+}
+
+impl RecentWindow {
+    fn new() -> Self {
+        RecentWindow { data: std::collections::VecDeque::new(), start: 0 }
+    }
+
+    /// Record `chunk` as having been read from `chunk_start`. A discontinuity
+    /// (the stream restarted elsewhere) resets the window to just this chunk
+    /// rather than keeping a stale, disjoint range around.
+    fn push(&mut self, chunk: &[u8], chunk_start: u64) {
+        if chunk.is_empty() {
+            return;
+        }
+        if self.data.is_empty() || chunk_start != self.start + self.data.len() as u64 {
+            self.data.clear();
+            self.start = chunk_start;
+        }
+        self.data.extend(chunk.iter().copied());
+        while self.data.len() as u64 > BACKWARD_WINDOW {
+            self.data.pop_front();
+            self.start += 1;
+        }
+    }
+
+    /// `size` bytes at `offset`, only if fully covered by the window.
+    fn read_full(&self, offset: u64, size: usize) -> Option<Vec<u8>> {
+        if size == 0 {
+            return Some(Vec::new());
+        }
+        if offset < self.start {
+            return None;
+        }
+        let rel = usize::try_from(offset - self.start).ok()?;
+        if rel.checked_add(size)? > self.data.len() {
+            return None;
+        }
+        Some(self.data.iter().skip(rel).take(size).copied().collect())
+    }
+}
+
 /// Read-only handle: lazily (re)starts a sequential decrypt stream and serves
 /// reads from it. Forward gaps up to [`MAX_FORWARD_SKIP`] are skipped in-stream;
 /// a backward seek, or a forward gap past the threshold, restarts as a ranged
-/// download.
+/// download — unless [`RecentWindow`] already has the bytes.
 struct ReadHandle {
     file_id: String,
     bucket: String,
@@ -176,6 +236,7 @@ struct ReadHandle {
     net_pass: String,
     size: u64,
     stream: tokio::sync::Mutex<Option<ReadStream>>,
+    recent: tokio::sync::Mutex<RecentWindow>,
 }
 
 impl ReadHandle {
@@ -206,6 +267,13 @@ impl ReadHandle {
     }
 
     async fn read_at(&self, rt: &RtHandle, offset: u64, size: usize) -> Result<Vec<u8>> {
+        // Fast path: fully served from recently-streamed bytes, whether or
+        // not the live stream has since moved on — no network touched, no
+        // stream restart, regardless of which way `offset` moved.
+        if let Some(buf) = self.recent.lock().await.read_full(offset, size) {
+            return Ok(buf);
+        }
+
         let mut guard = self.stream.lock().await;
         // (Re)start when there is no stream, the offset is behind the cursor,
         // or the forward gap is too big to cheaply skip over in-stream.
@@ -218,7 +286,10 @@ impl ReadHandle {
         }
         let stream = guard.as_mut().unwrap();
 
-        // Forward gap: discard bytes already downloaded to reach `offset`.
+        // Forward gap: discard bytes already downloaded to reach `offset`,
+        // but still remember them — a re-read of this exact gap a moment
+        // later (common while parsing a container index) then hits the fast
+        // path above instead of forcing yet another restart.
         if offset > stream.pos {
             let mut to_skip = offset - stream.pos;
             let mut scratch = [0u8; 64 * 1024];
@@ -228,6 +299,7 @@ impl ReadHandle {
                 if n == 0 {
                     break;
                 }
+                self.recent.lock().await.push(&scratch[..n], stream.pos);
                 to_skip -= n as u64;
                 stream.pos += n as u64;
             }
@@ -243,6 +315,7 @@ impl ReadHandle {
             filled += n;
         }
         buf.truncate(filled);
+        self.recent.lock().await.push(&buf, offset);
         stream.pos += filled as u64;
         Ok(buf)
     }
@@ -1071,8 +1144,9 @@ impl Filesystem for InxtFs {
                     net_pass: creds.net_pass().to_string(),
                     size: nd.size,
                     stream: tokio::sync::Mutex::new(None),
+                    recent: tokio::sync::Mutex::new(RecentWindow::new()),
                 };
-                let fh = inner.new_fh(Handle::Read(rh));
+                let fh = inner.new_fh(Handle::Read(Box::new(rh)));
                 reply.opened(FileHandle(fh), FopenFlags::empty());
                 return;
             }
