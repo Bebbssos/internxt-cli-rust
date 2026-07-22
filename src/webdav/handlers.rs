@@ -380,20 +380,21 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         &ctx.cache,
     )
     .await?;
-    let mut is_replacement = false;
-    if let Some(item) = existing {
-        match item {
-            DriveItem::Folder(_) => {
-                return Err(AppError::conflict(
-                    "A folder exists on the cloud with the same name",
-                ));
-            }
-            DriveItem::File(f) => {
-                is_replacement = true;
-                let _ = delete_or_trash(ctx, &api, token, &DriveItem::File(f)).await;
-            }
+    // For a same-named existing file, replace its content in place (PUT
+    // /files/{uuid}) once the upload succeeds, instead of trashing the old
+    // entry up front — see the atomic-replace comment in fuse/fs.rs
+    // (finalize_write) for why: delete-then-create leaves a window where a
+    // failed upload or create_file_entry call loses the file permanently.
+    let replace_uuid: Option<String> = match existing {
+        Some(DriveItem::Folder(_)) => {
+            return Err(AppError::conflict(
+                "A folder exists on the cloud with the same name",
+            ));
         }
-    }
+        Some(DriveItem::File(f)) => Some(f.uuid),
+        None => None,
+    };
+    let is_replacement = replace_uuid.is_some();
 
     let (plain, ftype) = split_name(&resource.name);
     let bucket = creds.bucket().to_string();
@@ -464,23 +465,28 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
     };
 
     let now = now_rfc3339();
-    let created = api
-        .create_file_entry(
-            token,
-            &plain,
-            &ftype,
-            size,
-            &parent.uuid,
-            &file_id,
-            &bucket,
-            &now,
-            &now,
-        )
-        .await?;
+    let result_uuid = match &replace_uuid {
+        Some(old_uuid) => api.replace_file(token, old_uuid, &file_id, size).await?.uuid,
+        None => {
+            api.create_file_entry(
+                token,
+                &plain,
+                &ftype,
+                size,
+                &parent.uuid,
+                &file_id,
+                &bucket,
+                &now,
+                &now,
+            )
+            .await?
+            .uuid
+        }
+    };
 
     if let Some(tmp) = &retained_tmp {
         crate::serve::thumbnail::upload_thumbnail_best_effort(
-            &net, &api, token, &bucket, mnemonic, &created.uuid, &ftype, &tmp.path, size, "webdav",
+            &net, &api, token, &bucket, mnemonic, &result_uuid, &ftype, &tmp.path, size, "webdav",
         )
         .await;
     }
