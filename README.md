@@ -110,7 +110,7 @@ binary small and dependency-light. `default = ["sso", "webdav", "fuse",
 | `nfs` | off | `serve nfs` — NFSv3 export | Experimental. All platforms. |
 | `sftp` | off | `serve sftp` — SFTP over SSH | Experimental. All platforms. Pulls in `russh` + `russh-sftp`. |
 | `termimage` | off | `thumbnail display` — inline terminal image rendering | Pulls in `viuer` + `image`. Kitty/iTerm2 graphics protocol, with a Unicode half-block fallback. |
-| `self-update` | off | `ixr update` — replace the running binary with the latest GitHub release | Pointless (and wrong) for package-manager installs (AUR, Docker) and for a self-built binary (rebuild instead), so it's off by default everywhere; only the GitHub release workflow turns it on, for every standalone-binary target. Pulls in `self_update` + `semver`. |
+| `self-update` | off | `ixr update` — replace the running binary with the latest GitHub release | Off by default — a self-built binary should update by rebuilding. The GitHub release workflow turns it on for every standalone-binary target; AUR's `ixr-bin` reuses that binary so it has it too, while Docker builds its own binary without it. Pulls in `self_update` + `semver`. |
 
 ## Global flags
 
@@ -839,11 +839,13 @@ backend write) can be disabled everywhere with `IXR_THUMBNAILS=0`.
 
 New — no official equivalent. Needs the `self-update` feature (off by
 default; the GitHub release workflow enables it for every standalone-binary
-target). Replaces the running binary in place with the latest GitHub release.
-Only meaningful for the standalone binary distribution — package-manager
-installs (AUR, Docker) and self-built binaries (plain `cargo install`/`cargo
-build`) should update by reinstalling/rebuilding instead, since this would
-fight them for ownership of the file.
+target, and AUR's `ixr-bin` reuses that same binary). Replaces the running
+binary in place with the latest GitHub release. Meant for the standalone
+binary distribution — a package-manager install (AUR) or a self-built binary
+(plain `cargo install`/`cargo build`) should still update via the package
+manager or a rebuild instead, since this would fight them for ownership of
+the file. Docker isn't affected either way — its image is built without the
+feature.
 
 Only stable releases are considered by default; prerelease tags (e.g.
 `v0.2.0-rc.1`) are skipped unless `--pre-release` is given.

@@ -60,10 +60,10 @@ nfs = ["dep:nfsserve", "dep:async-trait"]
 # `Handler` over Drive. All platforms.
 sftp = ["dep:russh", "dep:russh-sftp"]
 # `ixr update`: replace the running binary with the latest GitHub release.
-# Off by default: pointless (and actively wrong) for package-manager installs
-# (AUR, Docker) and for a self-built binary, which should be updated by
-# rebuilding, not overwritten by a prebuilt release asset. The GitHub release
-# workflow enables it explicitly for every standalone-binary target.
+# Off by default: a self-built binary should update by rebuilding, not by
+# overwriting itself. The GitHub release workflow enables it explicitly for
+# every standalone-binary target; AUR's ixr-bin reuses that same binary, so
+# it has it too. Docker builds its own binary and leaves it off.
 self-update = ["dep:self_update", "dep:semver"]
 
 [dependencies]
