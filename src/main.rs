@@ -558,6 +558,10 @@ enum Commands {
         /// Install without prompting for confirmation.
         #[arg(short = 'y', long, default_value_t = false)]
         yes: bool,
+        /// Consider pre-releases too. By default only stable releases are
+        /// considered.
+        #[arg(long, default_value_t = false)]
+        pre_release: bool,
     },
 }
 
@@ -1787,7 +1791,7 @@ async fn run(cli: Cli) -> Result<()> {
         },
         Commands::HelpAll => print_help_all(),
         #[cfg(feature = "self-update")]
-        Commands::Update { check, yes } => self_update_cmd::run(check, yes).await?,
+        Commands::Update { check, yes, pre_release } => self_update_cmd::run(check, yes, pre_release).await?,
     }
     Ok(())
 }

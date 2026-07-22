@@ -20,13 +20,13 @@ fn owner_and_repo() -> Result<(&'static str, &'static str)> {
     owner.zip(repo).context("could not parse owner/repo from CARGO_PKG_REPOSITORY")
 }
 
-pub async fn run(check: bool, yes: bool) -> Result<()> {
-    tokio::task::spawn_blocking(move || run_blocking(check, yes))
+pub async fn run(check: bool, yes: bool, pre_release: bool) -> Result<()> {
+    tokio::task::spawn_blocking(move || run_blocking(check, yes, pre_release))
         .await
         .context("update task panicked")?
 }
 
-fn run_blocking(check: bool, yes: bool) -> Result<()> {
+fn run_blocking(check: bool, yes: bool, pre_release: bool) -> Result<()> {
     let (owner, repo) = owner_and_repo()?;
     let current = env!("CARGO_PKG_VERSION");
 
@@ -35,8 +35,17 @@ fn run_blocking(check: bool, yes: bool) -> Result<()> {
         .repo_name(repo)
         .build()?
         .fetch()?;
+    // GitHub lists releases newest-created-first, prereleases included; skip
+    // any release whose tag parses as a semver prerelease (e.g. v0.2.0-rc.1)
+    // unless the caller opted in with --pre-release.
     let latest = releases
-        .first()
+        .iter()
+        .find(|r| {
+            pre_release
+                || semver::Version::parse(r.version.trim_start_matches('v'))
+                    .map(|v| v.pre.is_empty())
+                    .unwrap_or(true)
+        })
         .ok_or_else(|| anyhow!("no releases found for {owner}/{repo}"))?;
     let latest_version = latest.version.trim_start_matches('v').to_string();
 
