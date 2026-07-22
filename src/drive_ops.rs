@@ -289,6 +289,26 @@ pub async fn list(id: Option<&str>, path: Option<&str>, extended: bool) -> Resul
         paths::resolve_opt(&api, &creds.token, creds.root_folder(), id, path, Expect::Folder).await?;
     let folder_uuid = fallback_root(resolved.as_deref(), creds.root_folder());
 
+    // `paths::resolve_opt`'s `Expect::Folder` check only runs when resolving from
+    // `--path` (via `resolve_path`); its `--id` branch passes the uuid through
+    // unchecked (by design — see its doc comment). The folder-content listing
+    // endpoints below don't 404 for a file's uuid, they just return an empty page,
+    // so without this check `list --id <a-file-uuid>` would report a fake "success,
+    // empty folder" instead of erroring. Only needed when the uuid actually came
+    // from `--id`: `resolve_opt` already rejects id+path together, and the root
+    // fallback is trusted, so id being non-empty here means the id-branch ran.
+    if id.map(|s| !s.trim().is_empty()).unwrap_or(false)
+        && api.get_folder_meta(&creds.token, &folder_uuid).await.is_err()
+    {
+        return Err(
+            if api.get_file_meta_value(&creds.token, &folder_uuid).await.is_ok() {
+                anyhow!("'{folder_uuid}' is a file, not a folder")
+            } else {
+                anyhow!("No such folder with id: {folder_uuid}")
+            },
+        );
+    }
+
     let folders = collect_all(&api, &creds.token, &folder_uuid, true).await?;
     let files = collect_all(&api, &creds.token, &folder_uuid, false).await?;
 
