@@ -67,7 +67,7 @@ self-update = ["dep:self_update", "dep:semver"]
 [dependencies]
 # Core engine, split into its own repo (github.com/Bebbssos/internxt-core-rust),
 # published to crates.io.
-internxt-core = "0.1.1"
+internxt-core = "0.1.2"
 
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
