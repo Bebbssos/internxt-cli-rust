@@ -208,6 +208,23 @@ pub async fn path_from_id(
     Ok((full, false))
 }
 
+/// Validate a value that is meant to be an opaque Drive item *name* (as opposed to
+/// a `/a/b` Drive *path*, which is what `resolve_path`/`components` above parse).
+/// Names must not contain `/`: Drive paths use it as the component separator (see
+/// `components`), so a name containing `/` is ambiguous with path syntax. It's also
+/// the character `std::path::Path::file_stem`/`.extension()` split on — callers that
+/// derive a stored name from user input via those (filesystem-path) parsers must
+/// call this first, or a name like `"a/b"` silently gets truncated down to `"b"`
+/// while still reporting success as if the exact requested name was stored.
+pub fn validate_name(name: &str) -> Result<()> {
+    if name.contains('/') {
+        return Err(anyhow!(
+            "Name '{name}' must not contain '/' (that's a path separator, not a valid Drive name)"
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve the mutually-exclusive `--id` / `--path` options to a uuid. `None`
 /// only when both are absent (the caller decides: root default, or required).
 ///
@@ -316,5 +333,28 @@ mod tests {
         assert!(!is_blank_but_provided(Some("abc")));
         assert!(!is_blank_but_provided(Some("  x  ")));
         assert!(!is_blank_but_provided(Some("/a/b")));
+    }
+
+    #[test]
+    fn validate_name_rejects_a_slash() {
+        let err = validate_name("a/b").unwrap_err();
+        assert!(err.to_string().contains('/'));
+    }
+
+    #[test]
+    fn validate_name_rejects_a_slash_anywhere_in_the_string() {
+        assert!(validate_name("/leading").is_err());
+        assert!(validate_name("trailing/").is_err());
+        assert!(validate_name("mid/dle").is_err());
+    }
+
+    #[test]
+    fn validate_name_accepts_ordinary_names() {
+        assert!(validate_name("report.pdf").is_ok());
+        assert!(validate_name("a b (1).txt").is_ok());
+        // Not a path separator on this (Linux-first) codebase's path model — see
+        // `components`, which only splits on `/` — so a backslash is left as an
+        // ordinary, legal character in an opaque Drive name.
+        assert!(validate_name("weird\\name").is_ok());
     }
 }

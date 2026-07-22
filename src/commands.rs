@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::auth;
 use internxt_core::api::DriveApi;
@@ -28,6 +28,32 @@ fn to_rfc3339(t: SystemTime) -> String {
     dt.to_rfc3339()
 }
 
+/// Derive the `(stem, extension)` a file/stdin upload will be stored under.
+///
+/// `explicit_name`, when set, is a user-supplied opaque Drive name (e.g. `--name`),
+/// not a filesystem path — it's validated to reject a `/` before being split, so a
+/// name like `"a/b"` errors instead of silently splitting to just `"b"`.
+/// `fallback_path` is only used when `explicit_name` is absent, and is always a
+/// genuine filesystem path (e.g. `--file`'s path), so splitting it with
+/// `file_stem`/`extension` is fine as-is.
+fn derive_name_parts(explicit_name: Option<&str>, fallback_path: &Path) -> Result<(String, String)> {
+    if let Some(n) = explicit_name {
+        crate::paths::validate_name(n)?;
+    }
+    let name_path = explicit_name.map(Path::new).unwrap_or(fallback_path);
+    let stem = name_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file")
+        .to_string();
+    let file_type = name_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    Ok((stem, file_type))
+}
+
 /// Upload a local file to Internxt Drive (streaming; single-part or multipart).
 /// With `use_stdin`, the body is read from stdin instead of `file_path`; `name`
 /// supplies the Drive name (required) and `size_hint` the byte length (optional).
@@ -41,6 +67,10 @@ pub async fn upload_file(
     size_hint: Option<u64>,
     limit_args: &crate::upload_limit::UploadLimitArgs,
 ) -> Result<()> {
+    if use_stdin && file_path.is_some() {
+        return Err(anyhow!("Provide either --file or --stdin, not both"));
+    }
+
     let creds = auth::get_auth_details().await?;
     let limit = crate::upload_limit::resolve(limit_args, &creds).await?;
 
@@ -71,17 +101,7 @@ pub async fn upload_file(
     let size = meta.len();
     limit.check(size)?;
 
-    let name_path = name.map(Path::new).unwrap_or(path);
-    let stem = name_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file")
-        .to_string();
-    let file_type = name_path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string();
+    let (stem, file_type) = derive_name_parts(name, path)?;
 
     let mut file_id = String::new();
 
@@ -167,36 +187,35 @@ async fn upload_from_stdin(
     limit: crate::upload_limit::UploadLimit,
 ) -> Result<()> {
     let name = name.ok_or_else(|| anyhow!("--name <NAME> is required with --stdin"))?;
-    let np = Path::new(name);
-    let stem = np
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file")
-        .to_string();
-    let file_type = np
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string();
+    let (stem, file_type) = derive_name_parts(Some(name), Path::new(name))?;
 
     let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
 
     let (file_id, size) = match size_hint {
-        Some(0) => (String::new(), 0),
         Some(sz) => {
             limit.check(sz)?;
-            crate::output::status(&format!("Uploading {sz} bytes from stdin..."));
-            let pb = crate::output::progress_bar(sz, "Uploading");
-            let id = upload_stream_to_network(
-                &net,
-                creds.bucket(),
-                creds.mnemonic(),
-                tokio::io::stdin(),
-                sz,
-                Some(crate::output::bar_sink(&pb)),
-            )
-            .await?;
-            pb.finish_and_clear();
+            let id = if sz == 0 {
+                String::new()
+            } else {
+                crate::output::status(&format!("Uploading {sz} bytes from stdin..."));
+                let pb = crate::output::progress_bar(sz, "Uploading");
+                // `.take(sz)` caps the reader at exactly the declared length, so an
+                // oversized stdin input can't overrun the declared Content-Length —
+                // it just leaves the excess sitting unread on stdin, which the
+                // check right below catches.
+                let id = upload_stream_to_network(
+                    &net,
+                    creds.bucket(),
+                    creds.mnemonic(),
+                    tokio::io::stdin().take(sz),
+                    sz,
+                    Some(crate::output::bar_sink(&pb)),
+                )
+                .await?;
+                pb.finish_and_clear();
+                id
+            };
+            reject_if_more_data(tokio::io::stdin(), sz).await?;
             (id, sz)
         }
         None => {
@@ -259,6 +278,25 @@ async fn finish_file_entry(
         )
         .await?;
     Ok(drive_file)
+}
+
+/// After streaming exactly `declared` bytes out of `probe_reader` (per a declared
+/// `--size`), check whether it still has more data waiting. If so, `declared`
+/// under-stated the actual input and the upload just completed would otherwise be
+/// silently truncated with no indication anything was wrong. Reading a single probe
+/// byte is enough to detect this without buffering the remainder of the stream.
+async fn reject_if_more_data<R: tokio::io::AsyncRead + Unpin>(
+    mut probe_reader: R,
+    declared: u64,
+) -> Result<()> {
+    let mut probe = [0u8; 1];
+    if probe_reader.read(&mut probe).await? > 0 {
+        return Err(anyhow!(
+            "--size {declared} is smaller than the actual input: more data remained after \
+             {declared} bytes were read; refusing to upload a truncated file"
+        ));
+    }
+    Ok(())
 }
 
 /// Emit the "File uploaded successfully" line (human + JSON).
@@ -798,4 +836,89 @@ pub async fn upload_folder(
         }),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Bug A: under-declared `--size` on `--stdin` must error, not truncate ---
+
+    #[tokio::test]
+    async fn reject_if_more_data_errors_when_extra_data_remains() {
+        // Simulates: `--size 3` declared, but the piped input had a 4th byte left
+        // over after the first 3 were consumed by the (capped) upload stream.
+        let leftover = std::io::Cursor::new(vec![b'x']);
+        let err = reject_if_more_data(leftover, 3).await.unwrap_err();
+        assert!(
+            err.to_string().contains("smaller than the actual input"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reject_if_more_data_ok_when_input_matches_declared_size() {
+        // Simulates: `--size` matched reality exactly — stdin is at EOF right after
+        // the declared number of bytes, so nothing should be flagged.
+        let exhausted = std::io::Cursor::new(Vec::<u8>::new());
+        reject_if_more_data(exhausted, 3).await.unwrap();
+    }
+
+    // --- Bug B: `--file` + `--stdin` together must error, not silently pick stdin ---
+
+    #[tokio::test]
+    async fn upload_file_rejects_file_and_stdin_together() {
+        let limit_args = crate::upload_limit::UploadLimitArgs::default();
+        let err = upload_file(
+            Some("/some/file.txt"),
+            None,
+            None,
+            true, // use_stdin
+            Some("name.txt"),
+            None,
+            &limit_args,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("Provide either --file or --stdin, not both"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    // --- Bug C: a Drive name containing `/` must error, not get silently
+    // truncated to its last path component (at both call sites, via the shared
+    // `derive_name_parts` helper / `paths::validate_name`). ---
+
+    #[test]
+    fn derive_name_parts_rejects_a_slash_in_an_explicit_name() {
+        let err = derive_name_parts(Some("a/b"), Path::new("/tmp/fallback.txt")).unwrap_err();
+        assert!(err.to_string().contains('/'), "unexpected error message: {err}");
+    }
+
+    #[test]
+    fn derive_name_parts_accepts_a_plain_explicit_name() {
+        let (stem, ext) = derive_name_parts(Some("report.pdf"), Path::new("/tmp/x")).unwrap();
+        assert_eq!(stem, "report");
+        assert_eq!(ext, "pdf");
+    }
+
+    #[test]
+    fn derive_name_parts_falls_back_to_the_filesystem_path_when_no_name_given() {
+        // `fallback_path` is a genuine filesystem path (e.g. --file's path), so
+        // splitting it with file_stem/extension is fine even though it contains `/`.
+        let (stem, ext) = derive_name_parts(None, Path::new("/tmp/dir/photo.png")).unwrap();
+        assert_eq!(stem, "photo");
+        assert_eq!(ext, "png");
+    }
+
+    #[tokio::test]
+    async fn upload_from_stdin_name_arg_is_wired_through_derive_name_parts() {
+        // `upload_from_stdin` builds its (stem, extension) via
+        // `derive_name_parts(Some(name), Path::new(name))` — this is exactly that
+        // call, confirming a slash in `--stdin`'s `--name` is rejected the same way
+        // as `upload_file`'s `--name`, at the same call site the real function uses.
+        let err = derive_name_parts(Some("a/b"), Path::new("a/b")).unwrap_err();
+        assert!(err.to_string().contains('/'), "unexpected error message: {err}");
+    }
 }
