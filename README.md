@@ -24,6 +24,7 @@ CLI front-end built on top of it.
 ## Contents
 
 - [Install](#install) · [Build](#build) · [Features](#features)
+- [FUSE/WinFSP mount support](#fusewinfsp-mount-support)
 - [Global flags](#global-flags)
 - [Commands](#commands) — the full command table
 - [Command reference](#command-reference) — per-command flags and JSON output
@@ -62,12 +63,13 @@ CLI front-end built on top of it.
 
   These links always resolve to the latest stable release. Every build ships
   with the full feature set (SSO, WebDAV+TLS, SMB/NFS/SFTP servers, self-update,
-  in-terminal thumbnails, FUSE mount) except: Linux (musl) and macOS drop FUSE
-  (no libfuse cross sysroot / macFUSE needs an unattended kernel-ext install
-  CI can't do), and Windows drops FUSE (Unix-only by design) and in-terminal
-  thumbnails (no Kitty/iTerm2 graphics protocol on Windows). `ixr update`
-  self-updates in place afterwards (standalone-binary installs only — the
-  other methods above manage updates themselves).
+  in-terminal thumbnails, FUSE/WinFSP mount) except: macOS drops FUSE (needs
+  macFUSE headers to build; no verified unattended way to get those onto a CI
+  runner yet), and Windows drops in-terminal thumbnails (no Kitty/iTerm2
+  graphics protocol on Windows). See [FUSE/mount support](#fusewinfsp-mount-support)
+  for the full build/runtime matrix. `ixr update` self-updates in place
+  afterwards (standalone-binary installs only — the other methods above manage
+  updates themselves).
 - **From source**: see [Build](#build) below.
 
 ## Build
@@ -105,12 +107,33 @@ binary small and dependency-light. `default = ["sso", "webdav", "fuse",
 | `sso` | on | Web-based SSO flow for `login`/`login-sso` (local callback server + browser launch) | Without it, `login` falls back to the legacy flow and `login-sso` errors. Pulls in `axum` + `open`. |
 | `webdav` | on | `serve webdav` over plain HTTP | Pulls in `axum` + `tokio-util` + `mime_guess`. |
 | `webdav-tls` | off | HTTPS for `serve webdav` (`--webdav-https`) | Requires `webdav`. Pulls in `axum-server` + `rustls-pemfile` + `rcgen` (self-signed or your own cert/key). |
-| `fuse` | on (Unix only) | `mount`, `serve fuse` | Needs `libfuse3-dev` + `pkg-config` at build time and a FUSE driver at runtime (fuse3/macFUSE/`fusefs-libs3`). Inert on Windows — default builds still compile there, just without these commands. |
+| `fuse` | on | `mount`, `serve fuse` | One feature, all platforms — picks `fuser` (Unix) or `winfsp_wrs`/WinFSP (Windows) per target_os. Build/runtime requirements differ sharply by OS; see [FUSE/WinFSP mount support](#fusewinfsp-mount-support). |
 | `smb` | off | `serve smb` — SMB2/3 share | Experimental. All platforms. Built on a fork of the `smb-server` crate. |
 | `nfs` | off | `serve nfs` — NFSv3 export | Experimental. All platforms. |
 | `sftp` | off | `serve sftp` — SFTP over SSH | Experimental. All platforms. Pulls in `russh` + `russh-sftp`. |
 | `termimage` | off | `thumbnail display` — inline terminal image rendering | Pulls in `viuer` + `image`. Kitty/iTerm2 graphics protocol, with a Unicode half-block fallback. |
 | `self-update` | off | `ixr update` — replace the running binary with the latest GitHub release | Off by default — a self-built binary should update by rebuilding. The GitHub release workflow turns it on for every standalone-binary target; AUR's `ixr-bin` reuses that binary so it has it too, while Docker builds its own binary without it. Pulls in `self_update` + `semver`. |
+
+## FUSE/WinFSP mount support
+
+`mount`/`serve fuse` is one Cargo feature (`fuse`) everywhere, but the library
+backing it — and what it needs to build and run — differs sharply by OS. None
+of these are things `ixr` can bundle into the binary: they're kernel-level
+filesystem drivers, so the OS driver package has to be installed on the
+machine regardless of how `ixr` itself was built or installed (same
+constraint every FUSE-based tool has — rclone, sshfs, etc.).
+
+| OS | To build | To run | Notes |
+|---|---|---|---|
+| Linux (glibc & musl) | Nothing extra — `fuser`'s pure-rust mount path talks to `/dev/fuse` directly, no libfuse headers needed. | [`fuse3`](https://github.com/libfuse/libfuse) package (provides `/dev/fuse` + the `fusermount3` helper); most distros ship it, install via your package manager (e.g. `apt install fuse3`, `dnf install fuse3`, `pacman -S fuse3`). | CI-verified on Linux x86_64/ARM64 (glibc) and the three musl cross targets. |
+| macOS | [macFUSE](https://osxfuse.github.io/) headers (provides the `fuse.pc` pkg-config file `fuser`'s build.rs probes for). | macFUSE, plus approving its kernel extension once in System Settings → Privacy & Security (a GUI step — can't be scripted). | Not currently in the official release binaries — no unattended, non-hanging way to get macFUSE's headers onto a `macos-latest` CI runner has been verified yet. Builds fine from source once macFUSE is installed locally: `brew install --cask macfuse && cargo build --release --features fuse`. |
+| FreeBSD | Nothing extra — same pure-rust path as Linux. | [`fusefs-libs3`](https://cgit.freebsd.org/ports/tree/sysutils/fusefs-libs3) (`pkg install fusefs-libs3`) + `kldload fusefs` if the module isn't auto-loaded. | Official release binaries build with `fuse` enabled. |
+| Windows | [WinFsp](https://winfsp.dev/) installed (its build.rs reads the `WinFsp\InstallDir` registry key) — build must run natively on Windows, this cannot be cross-compiled from another OS. | [WinFsp](https://winfsp.dev/) installed (the driver + `winfsp-x64.dll`, delay-loaded so `ixr` finds it via the registry rather than needing it next to the exe). | Uses [`winfsp_wrs`](https://github.com/Scille/winfsp_wrs) (MIT), not SnowflakePowered's `winfsp`/`winfsp-sys` crates (GPL-3.0 — wrong license for this project). Mount target can be a drive letter (`X:`) or an empty directory. |
+
+If the driver is missing at runtime, `mount`/`serve fuse` doesn't crash — it
+prints a normal `✕ Error: failed to mount at <path>: ...` and exits 1, with a
+hint pointing back to this table when the underlying error looks like a
+missing-driver situation (as opposed to e.g. a bad mountpoint path).
 
 ## Global flags
 
@@ -184,7 +207,7 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | &nbsp;&nbsp;[`sync up`](#sync-up--sync-down) | Push: local → remote. | `sync-up` | |
 | &nbsp;&nbsp;[`sync down`](#sync-up--sync-down) | Pull: remote → local. | `sync-down` | |
 | [`serve`](#serve) | Serve Drive over WebDAV/FUSE/SMB/NFS/SFTP (foreground). | — | Needs ≥1 of `webdav`,`fuse`,`smb`,`nfs`,`sftp`. WebDAV mirrors official; rest new. |
-| [`mount`](#mount) | Mount Drive as a local FS via FUSE (Unix). | — | New; needs `fuse` (default on). |
+| [`mount`](#mount) | Mount Drive as a local FS via FUSE/WinFSP. | — | New; needs `fuse` (default on). |
 | [`id-from-path`](#id-from-path) | Print the uuid at a Drive path. | `get-id` | New — no official equivalent. |
 | [`path-from-id`](#path-from-id) | Print the Drive path of a uuid. | `get-path` | New — no official equivalent. |
 | **[`thumbnail`](#thumbnail)** | Manage a file's thumbnail | `thumbnails` | New — official auto-generates only. |
@@ -690,7 +713,7 @@ JSON output:
 ### `serve`
 
 Runs one or more Drive backends in the **foreground** until Ctrl-C. Pass a
-comma-separated protocol list: `webdav`, `fuse` (Unix), `smb`, `nfs`, `sftp`.
+comma-separated protocol list: `webdav`, `fuse`, `smb`, `nfs`, `sftp`.
 Running several at once shares one set of credentials, one folder-listing
 cache and one global upload limit.
 
@@ -722,7 +745,8 @@ Protocol-specific flags are prefixed:
   (auto-create missing parent folders on `PUT`/`MKCOL`), `--webdav-custom-auth`
   + `--webdav-username`/`--webdav-password` (require HTTP Basic auth).
 - **FUSE** (`--fuse-*`): `--fuse-mountpoint <DIR>` (required when `fuse` is
-  served), `--fuse-allow-other`.
+  served — a directory on Unix, a drive letter like `X:` or a directory on
+  Windows), `--fuse-allow-other` (Unix only — no WinFSP equivalent).
 - **SMB** (`--smb-*`): `--smb-host` (default `127.0.0.1`), `--smb-port`
   (default `4445` — port 445 needs root/admin), `--smb-share` (default
   `internxt`), `--smb-username` (default `internxt`), `--smb-password` (omit
@@ -768,26 +792,25 @@ stderr.
 ### `mount`
 
 New — no official equivalent (the official CLI has no filesystem-mount mode).
-Unix only. A thin wrapper over `serve fuse` where the shared flags use their
-bare names (no `fuse-` prefix).
+A thin wrapper over `serve fuse` where the shared flags use their bare names
+(no `fuse-` prefix).
 
 Flags: `-i/--folder-uuid <UUID>`, `--read-only`, `-d/--delete-permanently`,
 `--spool-dir <DIR>`, `--max-concurrent-uploads <N>`, `--cache-ttl <SECS>` /
 `--no-cache`, `--recent-window <BYTES>` (see [`serve`](#serve) above),
-`--allow-other`, `-v/--verbose`, plus the
+`--allow-other` (Unix only — no WinFSP equivalent), `-v/--verbose`, plus the
 [upload-limit flags](#upload-size-limit).
 
 ```sh
-mkdir -p ~/drive && ixr mount ~/drive              # Ctrl-C to unmount
-ixr mount ~/drive --read-only                      # browse/read only
+mkdir -p ~/drive && ixr mount ~/drive              # Ctrl-C to unmount (Unix)
+ixr mount X: --read-only                           # drive letter (Windows)
 ixr mount ~/drive -i <folder-uuid>                 # mount a subfolder as root
 ```
 
-Needs `libfuse3-dev` + `pkg-config` at build time and a FUSE driver at runtime
-(fuse3 on Linux, macFUSE on macOS, `fusefs-libs3` on FreeBSD). Reads stream
-and decrypt lazily; writes buffer to a temp file and upload in full when the
-file is closed (Internxt has no partial-update API), replacing the old Drive
-entry.
+See [FUSE/WinFSP mount support](#fusewinfsp-mount-support) for what each
+platform needs to build and run this. Reads stream and decrypt lazily; writes
+buffer to a temp file and upload in full when the file is closed (Internxt has
+no partial-update API), replacing the old Drive entry.
 
 ### `id-from-path`
 

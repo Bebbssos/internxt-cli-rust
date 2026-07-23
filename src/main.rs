@@ -2,7 +2,7 @@ mod accounts;
 mod auth;
 mod commands;
 mod drive_ops;
-#[cfg(all(unix, feature = "fuse"))]
+#[cfg(feature = "fuse")]
 mod fuse;
 mod net_client;
 #[cfg(feature = "nfs")]
@@ -269,7 +269,7 @@ enum Commands {
     /// (`--cache-ttl`, `--folder-uuid`, `--delete-permanently`, `--spool`,
     /// `--spool-dir`, `--max-concurrent-uploads`, `--read-only`); protocol
     /// specific knobs are prefixed (`--webdav-port`, `--fuse-mountpoint`, …).
-    #[cfg(any(feature = "webdav", all(unix, feature = "fuse"), feature = "smb", feature = "nfs", feature = "sftp"))]
+    #[cfg(any(feature = "webdav", feature = "fuse", feature = "smb", feature = "nfs", feature = "sftp"))]
     Serve {
         /// Comma-separated protocols to serve (known: webdav, fuse, smb, nfs, sftp).
         #[arg(value_name = "PROTOCOLS")]
@@ -366,12 +366,14 @@ enum Commands {
         webdav_password: Option<String>,
 
         // ---- fuse ----
-        /// FUSE: local directory to mount onto (required when `fuse` is served).
-        #[cfg(all(unix, feature = "fuse"))]
+        /// FUSE: mount target, required when `fuse` is served (a directory on
+        /// Unix; a drive letter like `X:` or a directory on Windows).
+        #[cfg(feature = "fuse")]
         #[arg(long, value_name = "MOUNTPOINT")]
         fuse_mountpoint: Option<String>,
         /// FUSE: allow other users (and root) to access the mount (needs
-        /// user_allow_other in /etc/fuse.conf on Linux).
+        /// user_allow_other in /etc/fuse.conf on Linux). Unix only — no
+        /// WinFSP equivalent.
         #[cfg(all(unix, feature = "fuse"))]
         #[arg(long, default_value_t = false)]
         fuse_allow_other: bool,
@@ -437,14 +439,17 @@ enum Commands {
         #[arg(long, value_name = "PATH")]
         sftp_host_key: Option<String>,
     },
-    /// Mount your Internxt Drive as a local filesystem via FUSE (runs until Ctrl-C).
+    /// Mount your Internxt Drive as a local filesystem via FUSE/WinFSP (runs
+    /// until Ctrl-C).
     ///
-    /// Unix only (Linux / macOS / FreeBSD). Requires a FUSE driver at runtime
-    /// (fuse3 on Linux, macFUSE on macOS). Full read-write: writes buffer to a
-    /// temp file and upload in full when the file is closed.
-    #[cfg(all(unix, feature = "fuse"))]
+    /// Requires a driver at runtime: fuse3 on Linux, macFUSE on macOS,
+    /// fusefs-libs3 on FreeBSD, WinFsp on Windows (see README § FUSE/WinFSP
+    /// mount support). Full read-write: writes buffer to a temp file and
+    /// upload in full when the file is closed.
+    #[cfg(feature = "fuse")]
     Mount {
-        /// Local directory to mount onto (must already exist).
+        /// Mount target: must already exist. A directory on Unix; a drive
+        /// letter like `X:` or a directory on Windows.
         #[arg(value_name = "MOUNTPOINT")]
         mountpoint: String,
         /// Drive folder uuid to expose as the mount root. Omit for the drive root.
@@ -481,7 +486,9 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         read_only: bool,
         /// Allow other users (and root) to access the mount (needs
-        /// user_allow_other in /etc/fuse.conf on Linux).
+        /// user_allow_other in /etc/fuse.conf on Linux). Unix only — no
+        /// WinFSP equivalent.
+        #[cfg(unix)]
         #[arg(long, default_value_t = false)]
         allow_other: bool,
         /// Verbose: log every per-operation request. Without it, only
@@ -1505,7 +1512,7 @@ async fn run(cli: Cli) -> Result<()> {
                 thumbnail_ops::display(id.as_deref(), path.as_deref(), index, width, height).await?
             }
         },
-        #[cfg(any(feature = "webdav", all(unix, feature = "fuse"), feature = "smb"))]
+        #[cfg(any(feature = "webdav", feature = "fuse", feature = "smb"))]
         Commands::Serve {
             protocols,
             folder_uuid,
@@ -1539,7 +1546,7 @@ async fn run(cli: Cli) -> Result<()> {
             webdav_username,
             #[cfg(feature = "webdav")]
             webdav_password,
-            #[cfg(all(unix, feature = "fuse"))]
+            #[cfg(feature = "fuse")]
             fuse_mountpoint,
             #[cfg(all(unix, feature = "fuse"))]
             fuse_allow_other,
@@ -1613,18 +1620,22 @@ async fn run(cli: Cli) -> Result<()> {
                 None
             };
 
-            #[cfg(all(unix, feature = "fuse"))]
+            #[cfg(feature = "fuse")]
             let fuse = if protocols.contains(&serve::run::Protocol::Fuse) {
                 let mountpoint = fuse_mountpoint.ok_or_else(|| {
                     anyhow::anyhow!("serving `fuse` requires --fuse-mountpoint <MOUNTPOINT>")
                 })?;
+                #[cfg(unix)]
+                let allow_other = fuse_allow_other;
+                #[cfg(not(unix))]
+                let allow_other = false;
                 Some(fuse::MountConfig {
                     mountpoint: std::path::PathBuf::from(mountpoint),
                     cache_ttl,
                     delete_permanently,
                     spool_dir: spool_dir.clone(),
                     read_only,
-                    allow_other: fuse_allow_other,
+                    allow_other,
                     recent_window,
                 })
             } else {
@@ -1688,7 +1699,7 @@ async fn run(cli: Cli) -> Result<()> {
                 upload_limit: limit,
                 #[cfg(feature = "webdav")]
                 webdav,
-                #[cfg(all(unix, feature = "fuse"))]
+                #[cfg(feature = "fuse")]
                 fuse,
                 #[cfg(feature = "smb")]
                 smb,
@@ -1699,7 +1710,7 @@ async fn run(cli: Cli) -> Result<()> {
             };
             serve::run::run(config).await?;
         }
-        #[cfg(all(unix, feature = "fuse"))]
+        #[cfg(feature = "fuse")]
         Commands::Mount {
             mountpoint,
             folder_uuid,
@@ -1710,12 +1721,15 @@ async fn run(cli: Cli) -> Result<()> {
             spool_dir,
             max_concurrent_uploads,
             read_only,
+            #[cfg(unix)]
             allow_other,
             verbose,
             limit,
         } => {
             serve::log::set_verbose(verbose);
             let cache_ttl = if no_cache { 0 } else { cache_ttl };
+            #[cfg(not(unix))]
+            let allow_other = false;
             let mount = fuse::MountConfig {
                 mountpoint: std::path::PathBuf::from(mountpoint),
                 cache_ttl,
