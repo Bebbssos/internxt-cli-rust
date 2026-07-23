@@ -51,6 +51,7 @@ use internxt_core::api::DriveApi;
 use internxt_core::models::Credentials;
 use crate::serve::cache::FolderCache;
 use crate::serve::creds::SharedCreds;
+use crate::serve::recent_window::RecentWindow;
 use crate::serve::tree::{self, FileItem, FolderItem};
 
 /// Root inode, per the FUSE protocol.
@@ -65,12 +66,6 @@ const ROOT_INO: u64 = 1;
 /// to near EOF, and without this threshold that jump silently downloads (and
 /// discards) the entire file.
 const MAX_FORWARD_SKIP: u64 = 8 * 1024 * 1024;
-
-/// How much recently-streamed data [`RecentWindow`] keeps around per open
-/// file. Covers small backward/forward re-reads (container-index parsing:
-/// MP4 `moov`, MKV cues, …) without a network round trip; large enough for
-/// that, small enough that many open files stay cheap.
-const BACKWARD_WINDOW: u64 = 4 * 1024 * 1024;
 
 pub(crate) fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -167,60 +162,6 @@ struct ReadStream {
 impl Drop for ReadStream {
     fn drop(&mut self) {
         self.task.abort();
-    }
-}
-
-/// A trailing window of the most recently streamed bytes (whether served to
-/// the caller or discarded while skipping a forward gap), independent of any
-/// particular `ReadStream` — it survives a restart. Small backward re-reads
-/// and re-visits of a just-skipped forward gap are extremely common while a
-/// media player parses a container's index (e.g. an MP4 `moov` atom: lots of
-/// short hops re-reading a box header then its payload), and each one would
-/// otherwise force a full stream restart — a fresh `getDownloadLinks` round
-/// trip plus a new ranged GET. Serving those from memory instead is the
-/// difference between "instant" and "a network round trip per hop".
-struct RecentWindow {
-    /// Bytes `[start, start + data.len())` of the file, most recent last.
-    data: std::collections::VecDeque<u8>,
-    start: u64,
-}
-
-impl RecentWindow {
-    fn new() -> Self {
-        RecentWindow { data: std::collections::VecDeque::new(), start: 0 }
-    }
-
-    /// Record `chunk` as having been read from `chunk_start`. A discontinuity
-    /// (the stream restarted elsewhere) resets the window to just this chunk
-    /// rather than keeping a stale, disjoint range around.
-    fn push(&mut self, chunk: &[u8], chunk_start: u64) {
-        if chunk.is_empty() {
-            return;
-        }
-        if self.data.is_empty() || chunk_start != self.start + self.data.len() as u64 {
-            self.data.clear();
-            self.start = chunk_start;
-        }
-        self.data.extend(chunk.iter().copied());
-        while self.data.len() as u64 > BACKWARD_WINDOW {
-            self.data.pop_front();
-            self.start += 1;
-        }
-    }
-
-    /// `size` bytes at `offset`, only if fully covered by the window.
-    fn read_full(&self, offset: u64, size: usize) -> Option<Vec<u8>> {
-        if size == 0 {
-            return Some(Vec::new());
-        }
-        if offset < self.start {
-            return None;
-        }
-        let rel = usize::try_from(offset - self.start).ok()?;
-        if rel.checked_add(size)? > self.data.len() {
-            return None;
-        }
-        Some(self.data.iter().skip(rel).take(size).copied().collect())
     }
 }
 

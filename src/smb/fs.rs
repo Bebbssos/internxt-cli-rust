@@ -30,6 +30,7 @@ use internxt_core::api::DriveApi;
 use internxt_core::models::Credentials;
 use crate::serve::cache::FolderCache;
 use crate::serve::creds::SharedCreds;
+use crate::serve::recent_window::RecentWindow;
 use crate::serve::tree::{self, FileItem};
 
 /// 1601→1970 gap in 100ns ticks (FILETIME epoch offset).
@@ -219,7 +220,7 @@ impl Drop for ReadStream {
 /// Read-only file body: lazily (re)starts a decrypt stream and serves reads
 /// from it. Forward gaps up to [`MAX_FORWARD_SKIP`] skip in-stream; a backward
 /// read, or a forward gap past the threshold, restarts as a ranged download
-/// of only the covering shards.
+/// of only the covering shards — unless `recent` already has the bytes.
 struct ReadState {
     file_id: String,
     bucket: String,
@@ -228,6 +229,7 @@ struct ReadState {
     net_pass: String,
     size: u64,
     stream: tokio::sync::Mutex<Option<ReadStream>>,
+    recent: tokio::sync::Mutex<RecentWindow>,
 }
 
 impl ReadState {
@@ -260,6 +262,13 @@ impl ReadState {
         if self.file_id.is_empty() || offset >= self.size {
             return Ok(Bytes::new());
         }
+        // Fast path: fully served from recently-streamed bytes, whether or
+        // not the live stream has since moved on — no network touched, no
+        // stream restart, regardless of which way `offset` moved.
+        if let Some(buf) = self.recent.lock().await.read_full(offset, len) {
+            return Ok(Bytes::from(buf));
+        }
+
         let mut guard = self.stream.lock().await;
         let restart = match &*guard {
             Some(s) => offset < s.pos || offset - s.pos > MAX_FORWARD_SKIP,
@@ -270,7 +279,10 @@ impl ReadState {
         }
         let stream = guard.as_mut().unwrap();
 
-        // Forward gap: discard bytes already downloaded to reach `offset`.
+        // Forward gap: discard bytes already downloaded to reach `offset`,
+        // but still remember them — a re-read of this exact gap a moment
+        // later (common while parsing a container index) then hits the fast
+        // path above instead of forcing yet another restart.
         if offset > stream.pos {
             let mut to_skip = offset - stream.pos;
             let mut scratch = [0u8; 64 * 1024];
@@ -284,6 +296,7 @@ impl ReadState {
                 if n == 0 {
                     break;
                 }
+                self.recent.lock().await.push(&scratch[..n], stream.pos);
                 to_skip -= n as u64;
                 stream.pos += n as u64;
             }
@@ -300,6 +313,7 @@ impl ReadState {
             filled += n;
         }
         buf.truncate(filled);
+        self.recent.lock().await.push(&buf, offset);
         stream.pos += filled as u64;
         Ok(Bytes::from(buf))
     }
@@ -453,7 +467,7 @@ impl Drop for WriteState {
 // ---------------------------------------------------------------------------
 
 enum FileBody {
-    Read(ReadState),
+    Read(Box<ReadState>),
     Write(Arc<WriteState>),
 }
 
@@ -695,12 +709,13 @@ impl DriveBackend {
             net_pass: creds.net_pass().to_string(),
             size: f.size,
             stream: tokio::sync::Mutex::new(None),
+            recent: tokio::sync::Mutex::new(RecentWindow::new()),
         };
         Box::new(FileHandle {
             name: f.display_name(),
             updated_at: f.updated_at,
             uuid: f.uuid,
-            body: FileBody::Read(rs),
+            body: FileBody::Read(Box::new(rs)),
         })
     }
 

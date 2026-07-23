@@ -38,6 +38,7 @@ use internxt_core::api::DriveApi;
 use internxt_core::models::Credentials;
 use crate::serve::cache::FolderCache;
 use crate::serve::creds::SharedCreds;
+use crate::serve::recent_window::RecentWindow;
 use crate::serve::tree::{self, FileItem, FolderItem};
 
 /// Export root id (id 0 is reserved by NFS).
@@ -192,6 +193,7 @@ struct ReadState {
     net_pass: String,
     size: u64,
     stream: tokio::sync::Mutex<Option<ReadStream>>,
+    recent: tokio::sync::Mutex<RecentWindow>,
 }
 
 impl ReadState {
@@ -224,6 +226,13 @@ impl ReadState {
         if self.file_id.is_empty() || offset >= self.size {
             return Ok(Vec::new());
         }
+        // Fast path: fully served from recently-streamed bytes, whether or
+        // not the live stream has since moved on — no network touched, no
+        // stream restart, regardless of which way `offset` moved.
+        if let Some(buf) = self.recent.lock().await.read_full(offset, len) {
+            return Ok(buf);
+        }
+
         let mut guard = self.stream.lock().await;
         let restart = match &*guard {
             Some(s) => offset < s.pos || offset - s.pos > MAX_FORWARD_SKIP,
@@ -234,6 +243,10 @@ impl ReadState {
         }
         let stream = guard.as_mut().unwrap();
 
+        // Forward gap: discard bytes already downloaded to reach `offset`,
+        // but still remember them — a re-read of this exact gap a moment
+        // later (common while parsing a container index) then hits the fast
+        // path above instead of forcing yet another restart.
         if offset > stream.pos {
             let mut to_skip = offset - stream.pos;
             let mut scratch = [0u8; 64 * 1024];
@@ -243,6 +256,7 @@ impl ReadState {
                 if n == 0 {
                     break;
                 }
+                self.recent.lock().await.push(&scratch[..n], stream.pos);
                 to_skip -= n as u64;
                 stream.pos += n as u64;
             }
@@ -259,6 +273,7 @@ impl ReadState {
             filled += n;
         }
         buf.truncate(filled);
+        self.recent.lock().await.push(&buf, offset);
         stream.pos += filled as u64;
         Ok(buf)
     }
@@ -657,6 +672,7 @@ impl Inner {
             net_pass: creds.net_pass().to_string(),
             size: node.size,
             stream: tokio::sync::Mutex::new(None),
+            recent: tokio::sync::Mutex::new(RecentWindow::new()),
         });
         self.readers
             .lock()
