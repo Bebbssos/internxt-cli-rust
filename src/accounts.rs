@@ -15,7 +15,7 @@ pub async fn list() -> Result<()> {
 
     if !output::is_json() {
         if accounts.is_empty() {
-            output::status("No accounts logged in. Run `internxt login`.");
+            output::status("No accounts logged in. Run `ixr login`.");
         } else {
             for email in &accounts {
                 let marker = if Some(email) == active.as_ref() { "*" } else { " " };
@@ -33,7 +33,7 @@ pub async fn list() -> Result<()> {
 pub async fn switch(email: Option<String>) -> Result<()> {
     let accounts = auth::list_accounts()?;
     if accounts.is_empty() {
-        return Err(anyhow!("No accounts logged in. Run `internxt login` first."));
+        return Err(anyhow!("No accounts logged in. Run `ixr login` first."));
     }
 
     let target = match email {
