@@ -12,8 +12,13 @@ license=('MIT')
 provides=('ixr')
 conflicts=('ixr')
 
-source_x86_64=("https://github.com/Bebbssos/internxt-cli-rust/releases/download/v${pkgver}/ixr-x86_64-unknown-linux-gnu.tar.gz")
-source_aarch64=("https://github.com/Bebbssos/internxt-cli-rust/releases/download/v${pkgver}/ixr-aarch64-unknown-linux-gnu.tar.gz")
+# Local filename is versioned via `name::url` — the release asset itself
+# keeps a static name across versions, and makepkg/yay key their source
+# cache off the local filename, not the URL. Without the version in it, a
+# stale cached tarball from a prior pkgver survives a version bump and fails
+# the (correct, updated) sha256 check.
+source_x86_64=("ixr-x86_64-unknown-linux-gnu-${pkgver}.tar.gz::https://github.com/Bebbssos/internxt-cli-rust/releases/download/v${pkgver}/ixr-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("ixr-aarch64-unknown-linux-gnu-${pkgver}.tar.gz::https://github.com/Bebbssos/internxt-cli-rust/releases/download/v${pkgver}/ixr-aarch64-unknown-linux-gnu.tar.gz")
 sha256sums_x86_64=('@SHA256_X86_64@')
 sha256sums_aarch64=('@SHA256_AARCH64@')
 
