@@ -38,6 +38,7 @@ use internxt_core::api::DriveApi;
 use internxt_core::models::Credentials;
 use crate::serve::cache::FolderCache;
 use crate::serve::creds::SharedCreds;
+use crate::serve::recent_window::RecentWindow;
 use crate::serve::tree::{self, FileItem, FolderItem};
 
 /// Export root id (id 0 is reserved by NFS).
@@ -192,6 +193,7 @@ struct ReadState {
     net_pass: String,
     size: u64,
     stream: tokio::sync::Mutex<Option<ReadStream>>,
+    recent: tokio::sync::Mutex<RecentWindow>,
 }
 
 impl ReadState {
@@ -224,6 +226,13 @@ impl ReadState {
         if self.file_id.is_empty() || offset >= self.size {
             return Ok(Vec::new());
         }
+        // Fast path: fully served from recently-streamed bytes, whether or
+        // not the live stream has since moved on — no network touched, no
+        // stream restart, regardless of which way `offset` moved.
+        if let Some(buf) = self.recent.lock().await.read_full(offset, len) {
+            return Ok(buf);
+        }
+
         let mut guard = self.stream.lock().await;
         let restart = match &*guard {
             Some(s) => offset < s.pos || offset - s.pos > MAX_FORWARD_SKIP,
@@ -234,6 +243,10 @@ impl ReadState {
         }
         let stream = guard.as_mut().unwrap();
 
+        // Forward gap: discard bytes already downloaded to reach `offset`,
+        // but still remember them — a re-read of this exact gap a moment
+        // later (common while parsing a container index) then hits the fast
+        // path above instead of forcing yet another restart.
         if offset > stream.pos {
             let mut to_skip = offset - stream.pos;
             let mut scratch = [0u8; 64 * 1024];
@@ -243,6 +256,7 @@ impl ReadState {
                 if n == 0 {
                     break;
                 }
+                self.recent.lock().await.push(&scratch[..n], stream.pos);
                 to_skip -= n as u64;
                 stream.pos += n as u64;
             }
@@ -259,6 +273,7 @@ impl ReadState {
             filled += n;
         }
         buf.truncate(filled);
+        self.recent.lock().await.push(&buf, offset);
         stream.pos += filled as u64;
         Ok(buf)
     }
@@ -446,6 +461,7 @@ pub struct Inner {
     spool_dir: Option<PathBuf>,
     upload_sem: Option<Arc<tokio::sync::Semaphore>>,
     upload_limit: crate::upload_limit::UploadLimit,
+    recent_window: u64,
     inodes: Mutex<InodeTable>,
     readers: Mutex<HashMap<fileid3, Arc<ReadState>>>,
     writers: Mutex<HashMap<fileid3, Arc<WriteBuffer>>>,
@@ -463,6 +479,7 @@ impl Inner {
         spool_dir: Option<PathBuf>,
         upload_sem: Option<Arc<tokio::sync::Semaphore>>,
         upload_limit: crate::upload_limit::UploadLimit,
+        recent_window: u64,
     ) -> Self {
         let mut table = InodeTable {
             next_id: 2,
@@ -492,6 +509,7 @@ impl Inner {
             spool_dir,
             upload_sem,
             upload_limit,
+            recent_window,
             inodes: Mutex::new(table),
             readers: Mutex::new(HashMap::new()),
             writers: Mutex::new(HashMap::new()),
@@ -657,6 +675,7 @@ impl Inner {
             net_pass: creds.net_pass().to_string(),
             size: node.size,
             stream: tokio::sync::Mutex::new(None),
+            recent: tokio::sync::Mutex::new(RecentWindow::new(self.recent_window)),
         });
         self.readers
             .lock()
@@ -792,6 +811,8 @@ impl Inner {
                     wb.log_flush_failure(&format!("[nfs] replace_file failed: {e:#}"));
                     return;
                 }
+                // Cached listing would otherwise keep serving the old size.
+                self.cache.invalidate(&wb.parent_uuid);
                 uuid
             }
             // First flush of a new file: create the entry now (with content), then
@@ -955,10 +976,12 @@ impl NFSFileSystem for DriveNfs {
         }
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
-        // Files first (live listing), then folders (cached).
-        let files = tree::list_files(&api, &creds.token, &dir.uuid).await.map_err(to_nfs)?;
-        if let Some(f) = files.iter().find(|f| f.display_name() == name) {
-            let nd = self.inner.node_from_file(dirid, &dir.uuid, f);
+        // Files first (cached), then folders (cached).
+        if let Some(f) = tree::find_file(&api, &creds.token, &dir.uuid, &name, &self.inner.cache)
+            .await
+            .map_err(to_nfs)?
+        {
+            let nd = self.inner.node_from_file(dirid, &dir.uuid, &f);
             return Ok(self.inner.intern(dirid, nd));
         }
         if let Some(f) = tree::find_folder(&api, &creds.token, &dir.uuid, &name, &self.inner.cache)
@@ -1068,9 +1091,11 @@ impl NFSFileSystem for DriveNfs {
         let api = DriveApi::for_credentials(&creds);
 
         // An existing file of that name is returned as-is (UNCHECKED create).
-        let files = tree::list_files(&api, &creds.token, &dir.uuid).await.map_err(to_nfs)?;
-        if let Some(f) = files.iter().find(|f| f.display_name() == name) {
-            let nd = self.inner.node_from_file(dirid, &dir.uuid, f);
+        if let Some(f) = tree::find_file(&api, &creds.token, &dir.uuid, &name, &self.inner.cache)
+            .await
+            .map_err(to_nfs)?
+        {
+            let nd = self.inner.node_from_file(dirid, &dir.uuid, &f);
             let id = self.inner.intern(dirid, nd);
             return Ok((id, self.inner.make_fattr(id, NodeKind::File, f.size, &f.updated_at)));
         }
@@ -1109,8 +1134,11 @@ impl NFSFileSystem for DriveNfs {
         let dir = self.inner.node(dirid).ok_or(nfsstat3::NFS3ERR_STALE)?;
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
-        let files = tree::list_files(&api, &creds.token, &dir.uuid).await.map_err(to_nfs)?;
-        if files.iter().any(|f| f.display_name() == name) {
+        if tree::find_file(&api, &creds.token, &dir.uuid, &name, &self.inner.cache)
+            .await
+            .map_err(to_nfs)?
+            .is_some()
+        {
             return Err(nfsstat3::NFS3ERR_EXIST);
         }
         // Pending node only; the Drive entry is created on first flush (see `create`).
@@ -1187,8 +1215,10 @@ impl NFSFileSystem for DriveNfs {
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
 
-        let files = tree::list_files(&api, &creds.token, &dir.uuid).await.map_err(to_nfs)?;
-        if let Some(f) = files.into_iter().find(|f| f.display_name() == name) {
+        if let Some(f) = tree::find_file(&api, &creds.token, &dir.uuid, &name, &self.inner.cache)
+            .await
+            .map_err(to_nfs)?
+        {
             if self.inner.delete_permanently {
                 api.delete_file(&creds.token, &f.uuid).await.map_err(to_nfs)?;
             } else {
@@ -1196,6 +1226,7 @@ impl NFSFileSystem for DriveNfs {
                     .await
                     .map_err(to_nfs)?;
             }
+            self.inner.cache.invalidate(&dir.uuid);
             self.remove_child(dirid, &name);
             return Ok(());
         }
@@ -1236,20 +1267,21 @@ impl NFSFileSystem for DriveNfs {
         let api = DriveApi::for_credentials(&creds);
 
         // Resolve the source (file first, then folder).
-        let files = tree::list_files(&api, &creds.token, &src_dir.uuid).await.map_err(to_nfs)?;
-        let (uuid, is_folder, cur_name) =
-            if let Some(f) = files.into_iter().find(|f| f.display_name() == src_name) {
-                let cur = f.display_name();
-                (f.uuid, false, cur)
-            } else {
-                match tree::find_folder(&api, &creds.token, &src_dir.uuid, &src_name, &self.inner.cache)
-                    .await
-                    .map_err(to_nfs)?
-                {
-                    Some(f) => (f.uuid, true, f.plain_name),
-                    None => return Err(nfsstat3::NFS3ERR_NOENT),
-                }
-            };
+        let src_file = tree::find_file(&api, &creds.token, &src_dir.uuid, &src_name, &self.inner.cache)
+            .await
+            .map_err(to_nfs)?;
+        let (uuid, is_folder, cur_name) = if let Some(f) = src_file {
+            let cur = f.display_name();
+            (f.uuid, false, cur)
+        } else {
+            match tree::find_folder(&api, &creds.token, &src_dir.uuid, &src_name, &self.inner.cache)
+                .await
+                .map_err(to_nfs)?
+            {
+                Some(f) => (f.uuid, true, f.plain_name),
+                None => return Err(nfsstat3::NFS3ERR_NOENT),
+            }
+        };
 
         if src_dir.uuid != dst_dir.uuid {
             if is_folder {
@@ -1286,7 +1318,7 @@ impl NFSFileSystem for DriveNfs {
         let api = DriveApi::for_credentials(&creds);
         let (folders, files) = tokio::try_join!(
             tree::list_folders(&api, &creds.token, &dir.uuid, &self.inner.cache),
-            tree::list_files(&api, &creds.token, &dir.uuid),
+            tree::list_files_cached(&api, &creds.token, &dir.uuid, &self.inner.cache),
         )
         .map_err(to_nfs)?;
 

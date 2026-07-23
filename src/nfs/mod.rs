@@ -44,6 +44,10 @@ pub struct NfsConfig {
     pub read_only: bool,
     /// Directory for per-file write buffers. `None` = system temp dir.
     pub spool_dir: Option<std::path::PathBuf>,
+    /// Bytes of trailing-stream retention for the read path (see
+    /// `serve::recent_window`). `0` disables it: every non-sequential read
+    /// restarts the download stream instead of possibly hitting memory.
+    pub recent_window: u64,
 }
 
 /// Serve the Drive over NFSv3 until `shutdown` resolves. Credentials, the folder
@@ -69,6 +73,7 @@ pub async fn serve(
         config.spool_dir.clone(),
         shared.upload_sem.clone(),
         shared.upload_limit,
+        config.recent_window,
     ));
 
     let ipstr = format!("{}:{}", config.host, config.port);

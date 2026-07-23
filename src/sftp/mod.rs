@@ -48,6 +48,10 @@ pub struct SftpConfig {
     pub read_only: bool,
     /// Directory for per-write temp buffers. `None` = system temp dir.
     pub spool_dir: Option<PathBuf>,
+    /// Bytes of trailing-stream retention for the read path (see
+    /// `serve::recent_window`). `0` disables it: every non-sequential read
+    /// restarts the download stream instead of possibly hitting memory.
+    pub recent_window: u64,
 }
 
 /// Load (or, on first use, generate + persist) the default SFTP host key at
@@ -118,6 +122,7 @@ pub async fn serve(
         config.spool_dir.clone(),
         shared.upload_sem.clone(),
         shared.upload_limit,
+        config.recent_window,
     ));
 
     let russh_config = Arc::new(RusshConfig {

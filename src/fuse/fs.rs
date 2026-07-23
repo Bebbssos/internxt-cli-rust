@@ -51,6 +51,7 @@ use internxt_core::api::DriveApi;
 use internxt_core::models::Credentials;
 use crate::serve::cache::FolderCache;
 use crate::serve::creds::SharedCreds;
+use crate::serve::recent_window::RecentWindow;
 use crate::serve::tree::{self, FileItem, FolderItem};
 
 /// Root inode, per the FUSE protocol.
@@ -146,7 +147,7 @@ struct InodeTable {
 /// temp-file-backed writer (write opens and `create`), or a directory-listing
 /// snapshot (opendir).
 enum Handle {
-    Read(ReadHandle),
+    Read(Box<ReadHandle>),
     Write(Arc<WriteHandle>),
     /// (child inode, name, attrs) snapshot for one opendir/readdir(plus)/releasedir session.
     Dir(Vec<(u64, String, NodeData)>),
@@ -167,7 +168,7 @@ impl Drop for ReadStream {
 /// Read-only handle: lazily (re)starts a sequential decrypt stream and serves
 /// reads from it. Forward gaps up to [`MAX_FORWARD_SKIP`] are skipped in-stream;
 /// a backward seek, or a forward gap past the threshold, restarts as a ranged
-/// download.
+/// download — unless [`RecentWindow`] already has the bytes.
 struct ReadHandle {
     file_id: String,
     bucket: String,
@@ -176,6 +177,7 @@ struct ReadHandle {
     net_pass: String,
     size: u64,
     stream: tokio::sync::Mutex<Option<ReadStream>>,
+    recent: tokio::sync::Mutex<RecentWindow>,
 }
 
 impl ReadHandle {
@@ -206,6 +208,13 @@ impl ReadHandle {
     }
 
     async fn read_at(&self, rt: &RtHandle, offset: u64, size: usize) -> Result<Vec<u8>> {
+        // Fast path: fully served from recently-streamed bytes, whether or
+        // not the live stream has since moved on — no network touched, no
+        // stream restart, regardless of which way `offset` moved.
+        if let Some(buf) = self.recent.lock().await.read_full(offset, size) {
+            return Ok(buf);
+        }
+
         let mut guard = self.stream.lock().await;
         // (Re)start when there is no stream, the offset is behind the cursor,
         // or the forward gap is too big to cheaply skip over in-stream.
@@ -218,7 +227,10 @@ impl ReadHandle {
         }
         let stream = guard.as_mut().unwrap();
 
-        // Forward gap: discard bytes already downloaded to reach `offset`.
+        // Forward gap: discard bytes already downloaded to reach `offset`,
+        // but still remember them — a re-read of this exact gap a moment
+        // later (common while parsing a container index) then hits the fast
+        // path above instead of forcing yet another restart.
         if offset > stream.pos {
             let mut to_skip = offset - stream.pos;
             let mut scratch = [0u8; 64 * 1024];
@@ -228,6 +240,7 @@ impl ReadHandle {
                 if n == 0 {
                     break;
                 }
+                self.recent.lock().await.push(&scratch[..n], stream.pos);
                 to_skip -= n as u64;
                 stream.pos += n as u64;
             }
@@ -243,6 +256,7 @@ impl ReadHandle {
             filled += n;
         }
         buf.truncate(filled);
+        self.recent.lock().await.push(&buf, offset);
         stream.pos += filled as u64;
         Ok(buf)
     }
@@ -508,7 +522,7 @@ impl Inner {
         // network round trips for one directory listing.
         let (folders, files) = tokio::try_join!(
             tree::list_folders(&api, &creds.token, &node.uuid, &self.cache),
-            tree::list_files(&api, &creds.token, &node.uuid),
+            tree::list_files_cached(&api, &creds.token, &node.uuid, &self.cache),
         )?;
 
         let mut entries: Vec<(u64, String, NodeData)> =
@@ -711,6 +725,10 @@ impl Inner {
             nd.updated_at = now;
             nd.bucket = wh.bucket.clone();
         }
+        drop(t);
+        // New/updated file must show up immediately for this process's own
+        // subsequent lookups/readdir, same as folder mutations already do.
+        self.cache.invalidate(&wh.parent_uuid);
         Ok(())
     }
 }
@@ -770,16 +788,17 @@ impl Filesystem for InxtFs {
             };
             let creds = inner.creds();
             let api = DriveApi::for_credentials(&creds);
-            // Files first, then folders (folder listing is cached).
-            match tree::list_files(&api, &creds.token, &pnode.uuid).await {
-                Ok(files) => {
-                    if let Some(f) = files.iter().find(|f| f.display_name() == name) {
-                        let nd = inner.node_from_file(parent, &pnode.uuid, f);
-                        let ino = inner.intern(parent, nd.clone());
-                        reply.entry(&inner.ttl(), &inner.attr(ino, &nd), Generation(0));
-                        return;
-                    }
+            // Files first, then folders (both cache-backed: a name miss
+            // against a cached listing forces one live re-fetch before
+            // concluding it's really not there — see `tree::find_file`).
+            match tree::find_file(&api, &creds.token, &pnode.uuid, &name, &inner.cache).await {
+                Ok(Some(f)) => {
+                    let nd = inner.node_from_file(parent, &pnode.uuid, &f);
+                    let ino = inner.intern(parent, nd.clone());
+                    reply.entry(&inner.ttl(), &inner.attr(ino, &nd), Generation(0));
+                    return;
                 }
+                Ok(None) => {}
                 Err(e) => {
                     reply.error(errno(&e));
                     return;
@@ -1066,8 +1085,9 @@ impl Filesystem for InxtFs {
                     net_pass: creds.net_pass().to_string(),
                     size: nd.size,
                     stream: tokio::sync::Mutex::new(None),
+                    recent: tokio::sync::Mutex::new(RecentWindow::new(inner.config.recent_window)),
                 };
-                let fh = inner.new_fh(Handle::Read(rh));
+                let fh = inner.new_fh(Handle::Read(Box::new(rh)));
                 reply.opened(FileHandle(fh), FopenFlags::empty());
                 return;
             }
@@ -1433,14 +1453,13 @@ impl Filesystem for InxtFs {
             };
             let creds = inner.creds();
             let api = DriveApi::for_credentials(&creds);
-            let files = match tree::list_files(&api, &creds.token, &pnode.uuid).await {
+            let Some(f) = (match tree::find_file(&api, &creds.token, &pnode.uuid, &name, &inner.cache).await {
                 Ok(v) => v,
                 Err(e) => {
                     reply.error(errno(&e));
                     return;
                 }
-            };
-            let Some(f) = files.into_iter().find(|f| f.display_name() == name) else {
+            }) else {
                 reply.error(Errno::ENOENT);
                 return;
             };
@@ -1452,6 +1471,7 @@ impl Filesystem for InxtFs {
             };
             match res {
                 Ok(_) => {
+                    inner.cache.invalidate(&pnode.uuid);
                     // Look up the inode in its own statement so the mutex guard
                     // is dropped before `remove_node` re-locks it (non-reentrant).
                     let ino = inner
@@ -1555,8 +1575,8 @@ impl Filesystem for InxtFs {
             let api = DriveApi::for_credentials(&creds);
 
             // Resolve the source item (file first, then folder).
-            let src_file = match tree::list_files(&api, &creds.token, &pnode.uuid).await {
-                Ok(v) => v.into_iter().find(|f| f.display_name() == name),
+            let src_file = match tree::find_file(&api, &creds.token, &pnode.uuid, &name, &inner.cache).await {
+                Ok(v) => v,
                 Err(e) => {
                     reply.error(errno(&e));
                     return;
@@ -1727,6 +1747,7 @@ mod tests {
                 spool_dir: None,
                 read_only: false,
                 allow_other: false,
+                recent_window: crate::serve::recent_window::DEFAULT_RECENT_WINDOW,
             },
         ))
     }

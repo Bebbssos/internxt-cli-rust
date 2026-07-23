@@ -30,6 +30,7 @@ use internxt_core::api::DriveApi;
 use internxt_core::models::Credentials;
 use crate::serve::cache::FolderCache;
 use crate::serve::creds::SharedCreds;
+use crate::serve::recent_window::RecentWindow;
 use crate::serve::tree::{self, FileItem};
 
 /// 1601→1970 gap in 100ns ticks (FILETIME epoch offset).
@@ -160,6 +161,7 @@ pub struct Inner {
     spool_dir: Option<PathBuf>,
     upload_sem: Option<Arc<tokio::sync::Semaphore>>,
     upload_limit: crate::upload_limit::UploadLimit,
+    recent_window: u64,
 }
 
 impl Inner {
@@ -174,6 +176,7 @@ impl Inner {
         spool_dir: Option<PathBuf>,
         upload_sem: Option<Arc<tokio::sync::Semaphore>>,
         upload_limit: crate::upload_limit::UploadLimit,
+        recent_window: u64,
     ) -> Self {
         Inner {
             shared,
@@ -185,6 +188,7 @@ impl Inner {
             spool_dir,
             upload_sem,
             upload_limit,
+            recent_window,
         }
     }
 
@@ -219,7 +223,7 @@ impl Drop for ReadStream {
 /// Read-only file body: lazily (re)starts a decrypt stream and serves reads
 /// from it. Forward gaps up to [`MAX_FORWARD_SKIP`] skip in-stream; a backward
 /// read, or a forward gap past the threshold, restarts as a ranged download
-/// of only the covering shards.
+/// of only the covering shards — unless `recent` already has the bytes.
 struct ReadState {
     file_id: String,
     bucket: String,
@@ -228,6 +232,7 @@ struct ReadState {
     net_pass: String,
     size: u64,
     stream: tokio::sync::Mutex<Option<ReadStream>>,
+    recent: tokio::sync::Mutex<RecentWindow>,
 }
 
 impl ReadState {
@@ -260,6 +265,13 @@ impl ReadState {
         if self.file_id.is_empty() || offset >= self.size {
             return Ok(Bytes::new());
         }
+        // Fast path: fully served from recently-streamed bytes, whether or
+        // not the live stream has since moved on — no network touched, no
+        // stream restart, regardless of which way `offset` moved.
+        if let Some(buf) = self.recent.lock().await.read_full(offset, len) {
+            return Ok(Bytes::from(buf));
+        }
+
         let mut guard = self.stream.lock().await;
         let restart = match &*guard {
             Some(s) => offset < s.pos || offset - s.pos > MAX_FORWARD_SKIP,
@@ -270,7 +282,10 @@ impl ReadState {
         }
         let stream = guard.as_mut().unwrap();
 
-        // Forward gap: discard bytes already downloaded to reach `offset`.
+        // Forward gap: discard bytes already downloaded to reach `offset`,
+        // but still remember them — a re-read of this exact gap a moment
+        // later (common while parsing a container index) then hits the fast
+        // path above instead of forcing yet another restart.
         if offset > stream.pos {
             let mut to_skip = offset - stream.pos;
             let mut scratch = [0u8; 64 * 1024];
@@ -284,6 +299,7 @@ impl ReadState {
                 if n == 0 {
                     break;
                 }
+                self.recent.lock().await.push(&scratch[..n], stream.pos);
                 to_skip -= n as u64;
                 stream.pos += n as u64;
             }
@@ -300,6 +316,7 @@ impl ReadState {
             filled += n;
         }
         buf.truncate(filled);
+        self.recent.lock().await.push(&buf, offset);
         stream.pos += filled as u64;
         Ok(Bytes::from(buf))
     }
@@ -435,6 +452,9 @@ impl WriteState {
             &self.temp_path, size, "smb",
         )
         .await;
+        // New/updated file must show up immediately for this process's own
+        // subsequent list_dir/open, same as folder mutations already do.
+        self.inner.cache.invalidate(&self.parent_uuid);
         Ok(())
     }
 }
@@ -450,7 +470,7 @@ impl Drop for WriteState {
 // ---------------------------------------------------------------------------
 
 enum FileBody {
-    Read(ReadState),
+    Read(Box<ReadState>),
     Write(Arc<WriteState>),
 }
 
@@ -635,7 +655,7 @@ impl Handle for DirHandle {
         let api = DriveApi::for_credentials(&creds);
         let (folders, files) = tokio::try_join!(
             tree::list_folders(&api, &creds.token, &self.uuid, &self.inner.cache),
-            tree::list_files(&api, &creds.token, &self.uuid),
+            tree::list_files_cached(&api, &creds.token, &self.uuid, &self.inner.cache),
         )
         .map_err(to_smb)?;
         let matches = |name: &str| pattern.map(|p| glob_match(p, name)).unwrap_or(true);
@@ -692,12 +712,13 @@ impl DriveBackend {
             net_pass: creds.net_pass().to_string(),
             size: f.size,
             stream: tokio::sync::Mutex::new(None),
+            recent: tokio::sync::Mutex::new(RecentWindow::new(self.inner.recent_window)),
         };
         Box::new(FileHandle {
             name: f.display_name(),
             updated_at: f.updated_at,
             uuid: f.uuid,
-            body: FileBody::Read(rs),
+            body: FileBody::Read(Box::new(rs)),
         })
     }
 
@@ -819,8 +840,9 @@ impl ShareBackend for DriveBackend {
         let found_folder = tree::find_folder(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
             .await
             .map_err(to_smb)?;
-        let files = tree::list_files(&api, &creds.token, &parent.uuid).await.map_err(to_smb)?;
-        let found_file = files.into_iter().find(|f| f.display_name() == name);
+        let found_file = tree::find_file(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
+            .await
+            .map_err(to_smb)?;
 
         // Directory CREATE (FILE_DIRECTORY_FILE set).
         if opts.directory {
@@ -942,8 +964,10 @@ impl ShareBackend for DriveBackend {
         .map_err(to_smb)?
         .ok_or(SmbError::PathNotFound)?;
 
-        let files = tree::list_files(&api, &creds.token, &parent.uuid).await.map_err(to_smb)?;
-        if let Some(f) = files.into_iter().find(|f| f.display_name() == name) {
+        if let Some(f) = tree::find_file(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
+            .await
+            .map_err(to_smb)?
+        {
             if self.inner.delete_permanently {
                 api.delete_file(&creds.token, &f.uuid).await.map_err(to_smb)?;
             } else {
@@ -951,6 +975,7 @@ impl ShareBackend for DriveBackend {
                     .await
                     .map_err(to_smb)?;
             }
+            self.inner.cache.invalidate(&parent.uuid);
             return Ok(());
         }
         if let Some(f) = tree::find_folder(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
@@ -1014,29 +1039,34 @@ impl ShareBackend for DriveBackend {
         .ok_or(SmbError::PathNotFound)?;
 
         // Resolve the source item (file first, then folder).
-        let files = tree::list_files(&api, &creds.token, &src_parent.uuid).await.map_err(to_smb)?;
-        let (uuid, is_folder, cur_name) =
-            if let Some(f) = files.into_iter().find(|f| f.display_name() == src_name) {
-                let cur = f.display_name();
-                (f.uuid, false, cur)
-            } else {
-                match tree::find_folder(&api, &creds.token, &src_parent.uuid, &src_name, &self.inner.cache)
-                    .await
-                    .map_err(to_smb)?
-                {
-                    Some(f) => (f.uuid, true, f.plain_name),
-                    None => return Err(SmbError::NotFound),
-                }
-            };
+        let src_file = tree::find_file(&api, &creds.token, &src_parent.uuid, &src_name, &self.inner.cache)
+            .await
+            .map_err(to_smb)?;
+        let (uuid, is_folder, cur_name) = if let Some(f) = src_file {
+            let cur = f.display_name();
+            (f.uuid, false, cur)
+        } else {
+            match tree::find_folder(&api, &creds.token, &src_parent.uuid, &src_name, &self.inner.cache)
+                .await
+                .map_err(to_smb)?
+            {
+                Some(f) => (f.uuid, true, f.plain_name),
+                None => return Err(SmbError::NotFound),
+            }
+        };
 
         // Reject if the destination name already exists in the target folder.
-        let dst_files = tree::list_files(&api, &creds.token, &dst_parent.uuid).await.map_err(to_smb)?;
+        let dst_file_clash =
+            tree::find_file(&api, &creds.token, &dst_parent.uuid, &dst_name, &self.inner.cache)
+                .await
+                .map_err(to_smb)?
+                .is_some();
         let dst_folder_clash =
             tree::find_folder(&api, &creds.token, &dst_parent.uuid, &dst_name, &self.inner.cache)
                 .await
                 .map_err(to_smb)?
                 .is_some();
-        let clashes = dst_files.iter().any(|f| f.display_name() == dst_name) || dst_folder_clash;
+        let clashes = dst_file_clash || dst_folder_clash;
         // A no-op rename to the same path is fine; anything else that clashes is not.
         if clashes && !(src_parent.uuid == dst_parent.uuid && cur_name == dst_name) {
             return Err(SmbError::Exists);

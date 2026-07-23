@@ -706,8 +706,11 @@ Shared flags (bare): `-i/--folder-uuid <UUID>` (root to expose), `-d
 `-v/--verbose` (log every per-op request across all backends), `--spool`
 (spool uploads to a temp file before uploading; FUSE always spools),
 `--spool-dir <DIR>`, `--max-concurrent-uploads <N>` (0 = unlimited),
-`--cache-ttl <SECS>` (default 5; also the FUSE kernel attr/entry TTL),
-`--no-cache`, plus the [upload-limit flags](#upload-size-limit).
+`--cache-ttl <SECS>` (default 300 — matches rclone's own `--dir-cache-time`;
+also the FUSE kernel attr/entry TTL), `--no-cache`, `--recent-window <BYTES>`
+(default 4194304 — trailing-stream retention on the read path for
+FUSE/SMB/NFS/SFTP, see below; 0 disables it), plus the
+[upload-limit flags](#upload-size-limit).
 
 Protocol-specific flags are prefixed:
 
@@ -749,6 +752,16 @@ items by default (`--delete-permanently` for a hard delete).
 `serve`/`mount` run until interrupted — there's no terminal JSON result
 object to speak of; `--json` mainly suppresses the startup/progress banner.
 
+FUSE/SMB/NFS/SFTP each serve reads from one lazily-started decrypt stream per
+open file; a small backward/forward re-read (e.g. a media player re-visiting
+a container-index box — an MP4 `moov` atom, MKV cues — while probing a file)
+would otherwise force a full stream restart, a fresh network round trip.
+`--recent-window <BYTES>` keeps that many recently-streamed bytes per open
+file so those re-reads are served from memory instead; `--recent-window 0`
+disables it (every non-sequential read restarts the stream, trading the
+per-file memory for none of the retention). WebDAV's GET is one-shot per
+HTTP request and doesn't use this.
+
 Pass `--verbose` to dump each WebDAV request/response, headers included, to
 stderr.
 
@@ -760,7 +773,8 @@ bare names (no `fuse-` prefix).
 
 Flags: `-i/--folder-uuid <UUID>`, `--read-only`, `-d/--delete-permanently`,
 `--spool-dir <DIR>`, `--max-concurrent-uploads <N>`, `--cache-ttl <SECS>` /
-`--no-cache`, `--allow-other`, `-v/--verbose`, plus the
+`--no-cache`, `--recent-window <BYTES>` (see [`serve`](#serve) above),
+`--allow-other`, `-v/--verbose`, plus the
 [upload-limit flags](#upload-size-limit).
 
 ```sh

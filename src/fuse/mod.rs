@@ -34,6 +34,10 @@ pub struct MountConfig {
     pub spool_dir: Option<PathBuf>,
     /// Mount read-only (reject all mutations at the kernel level).
     pub read_only: bool,
+    /// Bytes of trailing-stream retention for the read path (see
+    /// `serve::recent_window`). `0` disables it: every non-sequential read
+    /// restarts the download stream instead of possibly hitting memory.
+    pub recent_window: u64,
     /// Allow other users (and root) to access the mount (`allow_other`). Needed
     /// for e.g. serving the mount to another daemon; requires `user_allow_other`
     /// in /etc/fuse.conf on Linux.

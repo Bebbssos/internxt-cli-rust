@@ -281,12 +281,24 @@ enum Commands {
         #[arg(short = 'i', long)]
         folder_uuid: Option<String>,
         /// Cache folder listings for this many seconds (also the FUSE kernel
-        /// attr/entry TTL). Shared by all backends.
-        #[arg(long, default_value_t = 5)]
+        /// attr/entry TTL). Shared by all backends. Matches rclone's own
+        /// `--dir-cache-time` default (300s/5min): a short TTL can expire
+        /// mid-traversal on a deep path or a folder with hundreds of
+        /// entries (each level/page is a network round trip), forcing a
+        /// redundant re-fetch of ancestors that were only just resolved.
+        #[arg(long, default_value_t = 300)]
         cache_ttl: u64,
         /// Disable caching (same as --cache-ttl 0).
         #[arg(long, default_value_t = false)]
         no_cache: bool,
+        /// Bytes of trailing-stream retention on the read path, shared by
+        /// FUSE/SMB/NFS/SFTP (WebDAV's GET is one-shot per request and doesn't
+        /// use this). Lets a small backward/forward re-read (e.g. a media
+        /// player re-visiting a container-index box during MP4/MKV parsing)
+        /// be served from memory instead of restarting the download stream
+        /// (a fresh network round trip). 0 disables it entirely.
+        #[arg(long, default_value_t = crate::serve::recent_window::DEFAULT_RECENT_WINDOW)]
+        recent_window: u64,
         /// Delete files permanently instead of moving them to trash.
         #[arg(short = 'd', long, default_value_t = false)]
         delete_permanently: bool,
@@ -439,11 +451,23 @@ enum Commands {
         #[arg(short = 'i', long)]
         folder_uuid: Option<String>,
         /// Cache folder listings + kernel attributes for this many seconds.
-        #[arg(long, default_value_t = 5)]
+        /// Matches rclone's own `--dir-cache-time` default (300s/5min): a
+        /// short TTL can expire mid-traversal on a deep path or a folder
+        /// with hundreds of entries (each level/page is a network round
+        /// trip), forcing a redundant re-fetch of ancestors that were only
+        /// just resolved.
+        #[arg(long, default_value_t = 300)]
         cache_ttl: u64,
         /// Disable caching (same as --cache-ttl 0; always live, slower).
         #[arg(long, default_value_t = false)]
         no_cache: bool,
+        /// Bytes of trailing-stream retention on the read path. Lets a small
+        /// backward/forward re-read (e.g. a media player re-visiting a
+        /// container-index box during MP4/MKV parsing) be served from memory
+        /// instead of restarting the download stream (a fresh network round
+        /// trip). 0 disables it entirely.
+        #[arg(long, default_value_t = crate::serve::recent_window::DEFAULT_RECENT_WINDOW)]
+        recent_window: u64,
         /// Delete files permanently instead of moving them to trash.
         #[arg(short = 'd', long, default_value_t = false)]
         delete_permanently: bool,
@@ -1487,6 +1511,7 @@ async fn run(cli: Cli) -> Result<()> {
             folder_uuid,
             cache_ttl,
             no_cache,
+            recent_window,
             delete_permanently,
             spool,
             spool_dir,
@@ -1600,6 +1625,7 @@ async fn run(cli: Cli) -> Result<()> {
                     spool_dir: spool_dir.clone(),
                     read_only,
                     allow_other: fuse_allow_other,
+                    recent_window,
                 })
             } else {
                 None
@@ -1617,6 +1643,7 @@ async fn run(cli: Cli) -> Result<()> {
                     read_only,
                     spool_dir: spool_dir.clone(),
                     max_transfer_size: 1024 * 1024,
+                    recent_window,
                 })
             } else {
                 None
@@ -1630,6 +1657,7 @@ async fn run(cli: Cli) -> Result<()> {
                     delete_permanently,
                     read_only,
                     spool_dir: spool_dir.clone(),
+                    recent_window,
                 })
             } else {
                 None
@@ -1646,6 +1674,7 @@ async fn run(cli: Cli) -> Result<()> {
                     delete_permanently,
                     read_only,
                     spool_dir: spool_dir.clone(),
+                    recent_window,
                 })
             } else {
                 None
@@ -1676,6 +1705,7 @@ async fn run(cli: Cli) -> Result<()> {
             folder_uuid,
             cache_ttl,
             no_cache,
+            recent_window,
             delete_permanently,
             spool_dir,
             max_concurrent_uploads,
@@ -1693,6 +1723,7 @@ async fn run(cli: Cli) -> Result<()> {
                 spool_dir: spool_dir.map(std::path::PathBuf::from),
                 read_only,
                 allow_other,
+                recent_window,
             };
             let config = serve::run::ServeConfig {
                 protocols: vec![serve::run::Protocol::Fuse],

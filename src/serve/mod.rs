@@ -6,6 +6,7 @@
 pub mod cache;
 pub mod creds;
 pub mod log;
+pub mod recent_window;
 #[cfg(any(
     feature = "webdav",
     all(unix, feature = "fuse"),

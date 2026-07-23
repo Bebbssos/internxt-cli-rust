@@ -195,6 +195,55 @@ pub async fn list_files(api: &DriveApi, token: &str, folder_uuid: &str) -> Resul
     Ok(out)
 }
 
+/// All EXISTS subfiles of a folder, following pagination. Served from `cache`
+/// when a fresh entry exists; a miss populates it.
+///
+/// Opt-in: callers that need read-your-own-writes visibility (a file this
+/// process just uploaded must show up immediately) should invalidate the
+/// parent's cache entry on their own mutations, same as folder callers already
+/// do — see `Inner::finalize_write_inner`/`unlink`/`rename` in the FUSE
+/// backend for the pattern.
+pub async fn list_files_cached(
+    api: &DriveApi,
+    token: &str,
+    folder_uuid: &str,
+    cache: &FolderCache,
+) -> Result<Vec<FileItem>> {
+    if let Some(hit) = cache.get_files(folder_uuid) {
+        return Ok(hit);
+    }
+    let out = list_files(api, token, folder_uuid).await?;
+    cache.put_files(folder_uuid, out.clone());
+    Ok(out)
+}
+
+/// Find a subfile of `parent_uuid` by display name (`plainName` + `.type`).
+/// Cache-backed like `find_folder`: a name miss against a *cached* listing
+/// forces one live re-fetch before concluding the file really isn't there, so
+/// a file created by another device/process since this process cached the
+/// listing doesn't look missing until the TTL expires.
+pub async fn find_file(
+    api: &DriveApi,
+    token: &str,
+    parent_uuid: &str,
+    name: &str,
+    cache: &FolderCache,
+) -> Result<Option<FileItem>> {
+    if let Some(cached) = cache.get_files(parent_uuid) {
+        if let Some(f) = cached.iter().find(|f| f.display_name() == name) {
+            return Ok(Some(f.clone()));
+        }
+        let fresh = list_files(api, token, parent_uuid).await?;
+        let found = fresh.iter().find(|f| f.display_name() == name).cloned();
+        cache.put_files(parent_uuid, fresh);
+        return Ok(found);
+    }
+    let out = list_files(api, token, parent_uuid).await?;
+    let found = out.iter().find(|f| f.display_name() == name).cloned();
+    cache.put_files(parent_uuid, out);
+    Ok(found)
+}
+
 /// Resolve the folder at `components` (walking from `root`). `None` if any
 /// segment is missing or is a file rather than a folder.
 pub async fn resolve_folder(
