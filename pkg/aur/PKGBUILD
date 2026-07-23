@@ -11,6 +11,7 @@ url="https://github.com/Bebbssos/internxt-cli-rust"
 license=('MIT')
 provides=('ixr')
 conflicts=('ixr')
+optdepends=('fuse3: needed by `mount`/`serve fuse` — provides the fusermount3 helper the binary shells out to')
 
 # Local filename is versioned via `name::url` — the release asset itself
 # keeps a static name across versions, and makepkg/yay key their source
