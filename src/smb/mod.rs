@@ -45,6 +45,10 @@ pub struct SmbConfig {
     pub spool_dir: Option<PathBuf>,
     /// Max read/write payload size advertised to clients, in bytes.
     pub max_transfer_size: u32,
+    /// Bytes of trailing-stream retention for the read path (see
+    /// `serve::recent_window`). `0` disables it: every non-sequential read
+    /// restarts the download stream instead of possibly hitting memory.
+    pub recent_window: u64,
 }
 
 /// Serve the Drive over SMB until `shutdown` resolves. Credentials, the folder
@@ -82,6 +86,7 @@ pub async fn serve(
         config.spool_dir.clone(),
         shared.upload_sem.clone(),
         shared.upload_limit,
+        config.recent_window,
     ));
     let backend = fs::DriveBackend::new(inner);
 

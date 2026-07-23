@@ -461,6 +461,7 @@ pub struct Inner {
     spool_dir: Option<PathBuf>,
     upload_sem: Option<Arc<tokio::sync::Semaphore>>,
     upload_limit: crate::upload_limit::UploadLimit,
+    recent_window: u64,
     inodes: Mutex<InodeTable>,
     readers: Mutex<HashMap<fileid3, Arc<ReadState>>>,
     writers: Mutex<HashMap<fileid3, Arc<WriteBuffer>>>,
@@ -478,6 +479,7 @@ impl Inner {
         spool_dir: Option<PathBuf>,
         upload_sem: Option<Arc<tokio::sync::Semaphore>>,
         upload_limit: crate::upload_limit::UploadLimit,
+        recent_window: u64,
     ) -> Self {
         let mut table = InodeTable {
             next_id: 2,
@@ -507,6 +509,7 @@ impl Inner {
             spool_dir,
             upload_sem,
             upload_limit,
+            recent_window,
             inodes: Mutex::new(table),
             readers: Mutex::new(HashMap::new()),
             writers: Mutex::new(HashMap::new()),
@@ -672,7 +675,7 @@ impl Inner {
             net_pass: creds.net_pass().to_string(),
             size: node.size,
             stream: tokio::sync::Mutex::new(None),
-            recent: tokio::sync::Mutex::new(RecentWindow::new()),
+            recent: tokio::sync::Mutex::new(RecentWindow::new(self.recent_window)),
         });
         self.readers
             .lock()

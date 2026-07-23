@@ -147,6 +147,7 @@ pub struct SftpInner {
     spool_dir: Option<PathBuf>,
     upload_sem: Option<Arc<tokio::sync::Semaphore>>,
     upload_limit: crate::upload_limit::UploadLimit,
+    recent_window: u64,
 }
 
 impl SftpInner {
@@ -161,6 +162,7 @@ impl SftpInner {
         spool_dir: Option<PathBuf>,
         upload_sem: Option<Arc<tokio::sync::Semaphore>>,
         upload_limit: crate::upload_limit::UploadLimit,
+        recent_window: u64,
     ) -> Self {
         SftpInner {
             shared,
@@ -172,6 +174,7 @@ impl SftpInner {
             spool_dir,
             upload_sem,
             upload_limit,
+            recent_window,
         }
     }
 
@@ -664,7 +667,7 @@ impl SftpSession {
                 net_pass: creds.net_pass().to_string(),
                 size: f.size,
                 stream: tokio::sync::Mutex::new(None),
-                recent: tokio::sync::Mutex::new(RecentWindow::new()),
+                recent: tokio::sync::Mutex::new(RecentWindow::new(self.inner.recent_window)),
             }),
         }
     }

@@ -1085,7 +1085,7 @@ impl Filesystem for InxtFs {
                     net_pass: creds.net_pass().to_string(),
                     size: nd.size,
                     stream: tokio::sync::Mutex::new(None),
-                    recent: tokio::sync::Mutex::new(RecentWindow::new()),
+                    recent: tokio::sync::Mutex::new(RecentWindow::new(inner.config.recent_window)),
                 };
                 let fh = inner.new_fh(Handle::Read(Box::new(rh)));
                 reply.opened(FileHandle(fh), FopenFlags::empty());
@@ -1747,6 +1747,7 @@ mod tests {
                 spool_dir: None,
                 read_only: false,
                 allow_other: false,
+                recent_window: crate::serve::recent_window::DEFAULT_RECENT_WINDOW,
             },
         ))
     }

@@ -161,6 +161,7 @@ pub struct Inner {
     spool_dir: Option<PathBuf>,
     upload_sem: Option<Arc<tokio::sync::Semaphore>>,
     upload_limit: crate::upload_limit::UploadLimit,
+    recent_window: u64,
 }
 
 impl Inner {
@@ -175,6 +176,7 @@ impl Inner {
         spool_dir: Option<PathBuf>,
         upload_sem: Option<Arc<tokio::sync::Semaphore>>,
         upload_limit: crate::upload_limit::UploadLimit,
+        recent_window: u64,
     ) -> Self {
         Inner {
             shared,
@@ -186,6 +188,7 @@ impl Inner {
             spool_dir,
             upload_sem,
             upload_limit,
+            recent_window,
         }
     }
 
@@ -709,7 +712,7 @@ impl DriveBackend {
             net_pass: creds.net_pass().to_string(),
             size: f.size,
             stream: tokio::sync::Mutex::new(None),
-            recent: tokio::sync::Mutex::new(RecentWindow::new()),
+            recent: tokio::sync::Mutex::new(RecentWindow::new(self.inner.recent_window)),
         };
         Box::new(FileHandle {
             name: f.display_name(),

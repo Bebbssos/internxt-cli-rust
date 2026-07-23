@@ -16,28 +16,33 @@
 
 use std::collections::VecDeque;
 
-/// How much recently-streamed data is kept around per open file. Covers small
-/// backward/forward re-reads (container-index parsing) without a network
-/// round trip; large enough for that, small enough that many open files stay
-/// cheap.
-pub const BACKWARD_WINDOW: u64 = 4 * 1024 * 1024;
+/// Default `cap` for [`RecentWindow::new`] (also the CLI default for
+/// `--recent-window`). Covers small backward/forward re-reads
+/// (container-index parsing) without a network round trip; large enough for
+/// that, small enough that many open files stay cheap.
+pub const DEFAULT_RECENT_WINDOW: u64 = 4 * 1024 * 1024;
 
 pub struct RecentWindow {
     /// Bytes `[start, start + data.len())` of the file, most recent last.
     data: VecDeque<u8>,
     start: u64,
+    /// Max bytes retained. `0` disables the window entirely: `push` never
+    /// stores anything and `read_full` always misses, so every read falls
+    /// through to the normal stream-restart path — for anyone who'd rather
+    /// pay that cost than hold the extra per-file memory.
+    cap: u64,
 }
 
 impl RecentWindow {
-    pub fn new() -> Self {
-        RecentWindow { data: VecDeque::new(), start: 0 }
+    pub fn new(cap: u64) -> Self {
+        RecentWindow { data: VecDeque::new(), start: 0, cap }
     }
 
     /// Record `chunk` as having been read from `chunk_start`. A discontinuity
     /// (the stream restarted elsewhere) resets the window to just this chunk
     /// rather than keeping a stale, disjoint range around.
     pub fn push(&mut self, chunk: &[u8], chunk_start: u64) {
-        if chunk.is_empty() {
+        if self.cap == 0 || chunk.is_empty() {
             return;
         }
         if self.data.is_empty() || chunk_start != self.start + self.data.len() as u64 {
@@ -45,7 +50,7 @@ impl RecentWindow {
             self.start = chunk_start;
         }
         self.data.extend(chunk.iter().copied());
-        while self.data.len() as u64 > BACKWARD_WINDOW {
+        while self.data.len() as u64 > self.cap {
             self.data.pop_front();
             self.start += 1;
         }
@@ -53,6 +58,9 @@ impl RecentWindow {
 
     /// `size` bytes at `offset`, only if fully covered by the window.
     pub fn read_full(&self, offset: u64, size: usize) -> Option<Vec<u8>> {
+        if self.cap == 0 {
+            return None;
+        }
         if size == 0 {
             return Some(Vec::new());
         }
@@ -64,11 +72,5 @@ impl RecentWindow {
             return None;
         }
         Some(self.data.iter().skip(rel).take(size).copied().collect())
-    }
-}
-
-impl Default for RecentWindow {
-    fn default() -> Self {
-        Self::new()
     }
 }
