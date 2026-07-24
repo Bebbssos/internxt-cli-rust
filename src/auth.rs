@@ -210,7 +210,7 @@ pub fn read_credentials() -> Result<Credentials> {
     let file = read_accounts_file()?;
     let email = env_account_override()
         .or(active_account_email()?)
-        .ok_or_else(|| anyhow!("Not logged in. Run `internxt login` first."))?;
+        .ok_or_else(|| anyhow!("Not logged in. Run `ixr login` first."))?;
     file.accounts
         .get(&email)
         .cloned()
@@ -252,7 +252,7 @@ pub async fn get_auth_details() -> Result<Credentials> {
     let no_persist = env_override.is_some() && env_no_persist();
     let email = match env_override.clone().or(active_account_email()?) {
         Some(e) => e,
-        None => return Err(anyhow!("Not logged in. Run `internxt login` first.")),
+        None => return Err(anyhow!("Not logged in. Run `ixr login` first.")),
     };
 
     let creds = match read_accounts_file()?.accounts.get(&email).cloned() {
@@ -263,7 +263,7 @@ pub async fn get_auth_details() -> Result<Credentials> {
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| {
                     anyhow!(
-                        "Account {email} (from IXR_USER) is not logged in. Set IXR_PASSWORD to auto-login, or run `internxt login` first."
+                        "Account {email} (from IXR_USER) is not logged in. Set IXR_PASSWORD to auto-login, or run `ixr login` first."
                     )
                 })?;
             let tfa = std::env::var("IXR_TWOFACTORCODE").ok().filter(|s| !s.is_empty());

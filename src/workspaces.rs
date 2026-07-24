@@ -88,7 +88,7 @@ pub(crate) async fn build_context(
         .ok_or_else(|| anyhow!("Workspace {workspace_id} not found."))?;
 
     let ecc = creds.user.ecc_private_key.as_deref().ok_or_else(|| {
-        anyhow!("Your stored credentials have no private keys; run `internxt login` again to enable workspaces.")
+        anyhow!("Your stored credentials have no private keys; run `ixr login` again to enable workspaces.")
     })?;
     let encrypted_mnemonic = selected["workspaceUser"]["key"]
         .as_str()
