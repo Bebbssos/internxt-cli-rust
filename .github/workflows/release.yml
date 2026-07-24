@@ -48,20 +48,30 @@ jobs:
         shell: bash
         run: |
           set -eux
+          # `fuse` is pure-rust on Linux (fuser's `fuser_mount_impl="pure-rust"`
+          # path) — no libfuse headers needed to build, so the plain
+          # `--all-features` Linux legs need no extra apt package. Windows
+          # needs WinFsp actually installed at build time (its build.rs reads
+          # the WinFsp registry key) — installed below via choco before the
+          # build step runs. macOS still excludes `fuse`: it needs macFUSE
+          # headers to build (real requirement, not a doc error like the
+          # other two used to claim) and there's no verified unattended,
+          # non-hanging way to get those into a macos-latest runner yet — see
+          # docs/FUSE.md.
           quick='{"include":[
-            {"name":"x86_64-unknown-linux-gnu","targets":"x86_64-unknown-linux-gnu","os":"ubuntu-latest","apt":"libfuse3-dev","features":"--all-features"},
+            {"name":"x86_64-unknown-linux-gnu","targets":"x86_64-unknown-linux-gnu","os":"ubuntu-latest","features":"--all-features"},
             {"name":"macos","targets":"x86_64-apple-darwin","os":"macos-latest","features":"--no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage"},
-            {"name":"x86_64-pc-windows-msvc","targets":"x86_64-pc-windows-msvc","os":"windows-latest","features":"--no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update"}
+            {"name":"x86_64-pc-windows-msvc","targets":"x86_64-pc-windows-msvc","os":"windows-latest","winfsp":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update"}
           ]}'
           full='{"include":[
-            {"name":"x86_64-unknown-linux-gnu","targets":"x86_64-unknown-linux-gnu","os":"ubuntu-latest","apt":"libfuse3-dev","features":"--all-features"},
-            {"name":"aarch64-unknown-linux-gnu","targets":"aarch64-unknown-linux-gnu","os":"ubuntu-24.04-arm","apt":"libfuse3-dev","features":"--all-features"},
-            {"name":"i686-unknown-linux-musl","targets":"i686-unknown-linux-musl","os":"ubuntu-latest","cross":"zig","features":"--no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage"},
-            {"name":"armv7-unknown-linux-musleabihf","targets":"armv7-unknown-linux-musleabihf","os":"ubuntu-latest","cross":"zig","features":"--no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage"},
-            {"name":"arm-unknown-linux-musleabihf","targets":"arm-unknown-linux-musleabihf","os":"ubuntu-latest","cross":"zig","features":"--no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage"},
+            {"name":"x86_64-unknown-linux-gnu","targets":"x86_64-unknown-linux-gnu","os":"ubuntu-latest","features":"--all-features"},
+            {"name":"aarch64-unknown-linux-gnu","targets":"aarch64-unknown-linux-gnu","os":"ubuntu-24.04-arm","features":"--all-features"},
+            {"name":"i686-unknown-linux-musl","targets":"i686-unknown-linux-musl","os":"ubuntu-latest","cross":"zig","features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update,termimage"},
+            {"name":"armv7-unknown-linux-musleabihf","targets":"armv7-unknown-linux-musleabihf","os":"ubuntu-latest","cross":"zig","features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update,termimage"},
+            {"name":"arm-unknown-linux-musleabihf","targets":"arm-unknown-linux-musleabihf","os":"ubuntu-latest","cross":"zig","features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update,termimage"},
             {"name":"macos","targets":"aarch64-apple-darwin,x86_64-apple-darwin","os":"macos-latest","features":"--no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage"},
-            {"name":"x86_64-pc-windows-msvc","targets":"x86_64-pc-windows-msvc","os":"windows-latest","features":"--no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update"},
-            {"name":"aarch64-pc-windows-msvc","targets":"aarch64-pc-windows-msvc","os":"windows-11-arm","features":"--no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update"}
+            {"name":"x86_64-pc-windows-msvc","targets":"x86_64-pc-windows-msvc","os":"windows-latest","winfsp":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update"},
+            {"name":"aarch64-pc-windows-msvc","targets":"aarch64-pc-windows-msvc","os":"windows-11-arm","winfsp":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update"}
           ]}'
           if [[ "${{ github.ref_name }}" == *-* ]]; then
             echo "matrix=$(echo "$quick" | jq -c .)" >> "$GITHUB_OUTPUT"
@@ -87,9 +97,12 @@ jobs:
         with:
           key: ${{ matrix.name }}
 
-      - name: Install libfuse (native linux only)
-        if: matrix.apt
-        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+      # WinFsp must actually be installed at build time — winfsp_wrs_sys's
+      # build.rs reads the `WinFsp\InstallDir` registry key set by this
+      # installer and panics if it's missing.
+      - name: Install WinFsp (windows only)
+        if: matrix.winfsp
+        run: choco install winfsp -y --no-progress
 
       - name: Install zig + cargo-zigbuild (musl cross only)
         if: matrix.cross == 'zig'
@@ -164,7 +177,7 @@ jobs:
           run: |
             . "$HOME/.cargo/env"
             cargo build --release --locked -p internxt-cli \
-              --no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage
+              --no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update,termimage
             mkdir -p out
             cp target/release/ixr out/ixr
 

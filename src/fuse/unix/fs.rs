@@ -46,7 +46,7 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, DuplexStream};
 use tokio::runtime::Handle as RtHandle;
 
-use super::MountConfig;
+use crate::fuse::MountConfig;
 use internxt_core::api::DriveApi;
 use internxt_core::models::Credentials;
 use crate::serve::cache::FolderCache;
