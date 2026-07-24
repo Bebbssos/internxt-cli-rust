@@ -25,7 +25,7 @@ use crate::serve::creds::{spawn_refresh, SharedCreds};
 pub enum Protocol {
     #[cfg(feature = "webdav")]
     Webdav,
-    #[cfg(all(unix, feature = "fuse"))]
+    #[cfg(feature = "fuse")]
     Fuse,
     #[cfg(feature = "smb")]
     Smb,
@@ -40,7 +40,7 @@ impl Protocol {
         match self {
             #[cfg(feature = "webdav")]
             Protocol::Webdav => "webdav",
-            #[cfg(all(unix, feature = "fuse"))]
+            #[cfg(feature = "fuse")]
             Protocol::Fuse => "fuse",
             #[cfg(feature = "smb")]
             Protocol::Smb => "smb",
@@ -70,14 +70,14 @@ pub fn parse_protocol(token: &str) -> Result<Protocol> {
             }
         }
         "fuse" => {
-            #[cfg(all(unix, feature = "fuse"))]
+            #[cfg(feature = "fuse")]
             {
                 Ok(Protocol::Fuse)
             }
-            #[cfg(not(all(unix, feature = "fuse")))]
+            #[cfg(not(feature = "fuse"))]
             {
                 Err(anyhow!(
-                    "protocol `fuse` is unavailable: FUSE mounting is Unix-only and requires the `fuse` feature"
+                    "protocol `fuse` is unavailable: this binary was built without the `fuse` feature"
                 ))
             }
         }
@@ -182,7 +182,7 @@ pub struct ServeConfig {
     #[cfg(feature = "webdav")]
     pub webdav: Option<crate::webdav::WebdavConfig>,
     /// FUSE backend config (present iff `fuse` is in `protocols`).
-    #[cfg(all(unix, feature = "fuse"))]
+    #[cfg(feature = "fuse")]
     pub fuse: Option<crate::fuse::MountConfig>,
     /// SMB backend config (present iff `smb` is in `protocols`).
     #[cfg(feature = "smb")]
@@ -241,7 +241,7 @@ pub async fn run(config: ServeConfig) -> Result<()> {
 
     #[cfg(feature = "webdav")]
     let mut webdav_cfg = config.webdav;
-    #[cfg(all(unix, feature = "fuse"))]
+    #[cfg(feature = "fuse")]
     let mut fuse_cfg = config.fuse;
     #[cfg(feature = "smb")]
     let mut smb_cfg = config.smb;
@@ -261,7 +261,7 @@ pub async fn run(config: ServeConfig) -> Result<()> {
                 let shutdown = shutdown_future(shutdown_rx.clone());
                 set.spawn(async move { crate::webdav::serve(shared, cfg, shutdown).await });
             }
-            #[cfg(all(unix, feature = "fuse"))]
+            #[cfg(feature = "fuse")]
             Protocol::Fuse => {
                 let cfg = fuse_cfg
                     .take()

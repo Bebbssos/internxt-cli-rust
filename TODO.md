@@ -85,7 +85,11 @@ diff upstream against them to find changes worth pulling in.
 - Read-modify-write of a large existing file downloads the whole file first (materialize),
   then re-uploads it whole. Fine for typical edits; heavy for huge files.
 - No `--timeout`. Thumbnails ARE uploaded on write (from the whole-file temp). macOS/FreeBSD
-  build the same way but are untested here (developed/verified on Linux + libfuse3).
+  build the same way but are untested here (developed/verified on Linux, pure-rust `fuser`
+  mount path). Windows (WinFSP via `winfsp_wrs`) is a separate, path-based implementation
+  (`src/fuse/windows.rs`, no shared inode table with the Unix side) — untested end-to-end,
+  only verified against `winfsp_wrs`'s API surface by reading its source; a real Windows +
+  WinFsp run is the first real test.
 
 ### SMB/CIFS (`serve smb`, beyond og — no official equivalent, experimental, feature default-off)
 - Shares the whole-file write + streaming/ranged read model with FUSE; RMW of a large file
