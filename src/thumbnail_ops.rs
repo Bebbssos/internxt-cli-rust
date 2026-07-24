@@ -247,7 +247,7 @@ pub async fn display(
     let (_name, _ftype, thumbnails) = fetch_thumbnails(&api, &creds.token, &uuid).await?;
     if thumbnails.is_empty() {
         return Err(anyhow!(
-            "File has no thumbnail. Run `internxt thumbnail generate` first."
+            "File has no thumbnail. Run `ixr thumbnail generate` first."
         ));
     }
     let idx = index.unwrap_or(0);
@@ -302,7 +302,7 @@ pub async fn download(
     let (name, _ftype, thumbnails) = fetch_thumbnails(&api, &creds.token, &uuid).await?;
     if thumbnails.is_empty() {
         return Err(anyhow!(
-            "File has no thumbnail. Run `internxt thumbnail generate` first."
+            "File has no thumbnail. Run `ixr thumbnail generate` first."
         ));
     }
     let idx = index.unwrap_or(0);
