@@ -132,9 +132,15 @@ jobs:
         # macFUSE's installer places its pkg-config file at a fixed path
         # outside Homebrew's own prefix (true on both arm64 and x86_64
         # runners) — harmless to export unconditionally on other OSes.
+        # ALLOW_CROSS: macos-latest is arm64, so building the x86_64-apple-darwin
+        # leg (or the universal full-matrix job) makes pkg-config think it's a
+        # cross-compile and refuse outright — the .pc file itself has no
+        # arch-specific content (just include/lib paths for a lipo'd macFUSE),
+        # so the check is a false positive here.
         run: |
           set -eux
           export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          export PKG_CONFIG_ALLOW_CROSS=1
           IFS=',' read -ra targets <<< "${{ matrix.targets }}"
           for t in "${targets[@]}"; do
             cargo build --release --locked -p internxt-cli --target "$t" ${{ matrix.features }}
