@@ -63,13 +63,13 @@ CLI front-end built on top of it.
 
   These links always resolve to the latest stable release. Every build ships
   with the full feature set (SSO, WebDAV+TLS, SMB/NFS/SFTP servers, self-update,
-  in-terminal thumbnails, FUSE/WinFSP mount) except: macOS drops FUSE (needs
-  macFUSE headers to build; no verified unattended way to get those onto a CI
-  runner yet), and Windows drops in-terminal thumbnails (no Kitty/iTerm2
-  graphics protocol on Windows). See [FUSE/mount support](#fusewinfsp-mount-support)
-  for the full build/runtime matrix. `ixr update` self-updates in place
-  afterwards (standalone-binary installs only — the other methods above manage
-  updates themselves).
+  in-terminal thumbnails, FUSE/WinFSP mount) except: Windows drops in-terminal
+  thumbnails (no Kitty/iTerm2 graphics protocol on Windows). See
+  [FUSE/mount support](#fusewinfsp-mount-support) for the full build/runtime
+  matrix — mount still needs the OS driver package installed locally to
+  actually run (macFUSE on macOS, WinFsp on Windows), same as any FUSE-based
+  tool. `ixr update` self-updates in place afterwards (standalone-binary
+  installs only — the other methods above manage updates themselves).
 - **From source**: see [Build](#build) below.
 
 ## Build
@@ -126,7 +126,7 @@ constraint every FUSE-based tool has — rclone, sshfs, etc.).
 | OS | To build | To run | Notes |
 |---|---|---|---|
 | Linux (glibc & musl) | Nothing extra — `fuser`'s pure-rust mount path talks to `/dev/fuse` directly, no libfuse headers needed. | [`fuse3`](https://github.com/libfuse/libfuse) package (provides `/dev/fuse` + the `fusermount3` helper); most distros ship it, install via your package manager (e.g. `apt install fuse3`, `dnf install fuse3`, `pacman -S fuse3`). | CI-verified on Linux x86_64/ARM64 (glibc) and the three musl cross targets. |
-| macOS | [macFUSE](https://osxfuse.github.io/) headers (provides the `fuse.pc` pkg-config file `fuser`'s build.rs probes for). | macFUSE, plus approving its kernel extension once in System Settings → Privacy & Security (a GUI step — can't be scripted). | Not currently in the official release binaries — no unattended, non-hanging way to get macFUSE's headers onto a `macos-latest` CI runner has been verified yet. Builds fine from source once macFUSE is installed locally: `brew install --cask macfuse && cargo build --release --features fuse`. |
+| macOS | [macFUSE](https://osxfuse.github.io/) headers (provides the `fuse.pc` pkg-config file `fuser`'s build.rs probes for) — `brew install --cask macfuse` (no reboot/approval needed just to build). | macFUSE, plus approving its kernel extension once in System Settings → Privacy & Security (a GUI step — can't be scripted). | CI-built into the official release binaries (`brew install --cask macfuse` on the `macos-latest` runner, same as upstream `fuser`'s own CI). |
 | FreeBSD | Nothing extra — same pure-rust path as Linux. | [`fusefs-libs3`](https://cgit.freebsd.org/ports/tree/sysutils/fusefs-libs3) (`pkg install fusefs-libs3`) + `kldload fusefs` if the module isn't auto-loaded. | Official release binaries build with `fuse` enabled. |
 | Windows | [WinFsp](https://winfsp.dev/) installed (its build.rs reads the `WinFsp\InstallDir` registry key) — build must run natively on Windows, this cannot be cross-compiled from another OS. | [WinFsp](https://winfsp.dev/) installed (the driver + `winfsp-x64.dll`, delay-loaded so `ixr` finds it via the registry rather than needing it next to the exe). | Uses [`winfsp_wrs`](https://github.com/Scille/winfsp_wrs) (MIT), not SnowflakePowered's `winfsp`/`winfsp-sys` crates (GPL-3.0 — wrong license for this project). Mount target can be a drive letter (`X:`) or an empty directory. |
 

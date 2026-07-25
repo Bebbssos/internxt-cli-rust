@@ -392,11 +392,16 @@ impl Inner {
         }
     }
 
-    /// Resolve the folder at `components` from the mount root.
+    /// Resolve the folder at `components` from the mount root. Case-insensitive
+    /// — WinFSP's volume is declared `case_sensitive_search = false`, and
+    /// Windows' own namespace resolution for some request types (observed:
+    /// Rename) hands callbacks an upcased path even though the real, Explorer-
+    /// displayed name differs in case; a case-sensitive lookup against Drive's
+    /// exact-cased names would spuriously 404 those.
     async fn resolve_dir(&self, components: &[String]) -> Result<tree::FolderItem, NTSTATUS> {
         let creds = self.creds();
         let api = DriveApi::for_credentials(&creds);
-        tree::resolve_folder(
+        tree::resolve_folder_ci(
             &api,
             &creds.token,
             &self.root_folder,
@@ -555,6 +560,27 @@ impl Inner {
                 (!st.uuid.is_empty()).then(|| st.uuid.clone()),
             )
         };
+        // `old_uuid` is empty for a context that was renamed onto an existing
+        // name before its first upload landed (`rename`'s "not-yet-uploaded
+        // pending file" branch only relabels the local context — it never
+        // touches Drive, so whatever was already at that name is still
+        // there). That's exactly the temp-file "safe save" pattern editors
+        // like Notepad use: write a temp file, rename it over the target,
+        // close. Without this, we'd `create_file_entry` into an occupied
+        // name and get back 409 Conflict, losing the new content. Re-resolve
+        // at finalize time instead of trusting the stale local uuid — same
+        // fresh-lookup posture as `webdav::handlers::put`.
+        let old_uuid = match old_uuid {
+            Some(uuid) => Some(uuid),
+            None => {
+                let display = if ftype.is_empty() { plain.clone() } else { format!("{plain}.{ftype}") };
+                tree::find_file_ci(&api, token, &parent_uuid, &display, &self.cache)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|f| f.uuid)
+            }
+        };
         let result_uuid = match old_uuid {
             Some(uuid) => api.replace_file(token, &uuid, &file_id, size).await?.uuid,
             None => {
@@ -652,7 +678,7 @@ impl FileSystemInterface for InxtWinFs {
             let api = DriveApi::for_credentials(&creds);
 
             if create_file_info.create_options.is(CreateOptions::FILE_DIRECTORY_FILE) {
-                if tree::find_folder(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
+                if tree::find_folder_ci(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
                     .await
                     .map_err(|e| err_status(&e))?
                     .is_some()
@@ -728,7 +754,7 @@ impl FileSystemInterface for InxtWinFs {
             let api = DriveApi::for_credentials(&creds);
 
             if let Some(f) =
-                tree::find_folder(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
+                tree::find_folder_ci(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
                     .await
                     .map_err(|e| err_status(&e))?
             {
@@ -741,7 +767,7 @@ impl FileSystemInterface for InxtWinFs {
                 let fi = ctx.file_info();
                 return Ok((ctx, fi));
             }
-            let Some(f) = tree::find_file(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
+            let Some(f) = tree::find_file_ci(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
                 .await
                 .map_err(|e| err_status(&e))?
             else {
@@ -932,7 +958,7 @@ impl FileSystemInterface for InxtWinFs {
         &self,
         file_context: Self::FileContext,
         new_size: u64,
-        _set_allocation_size: bool,
+        set_allocation_size: bool,
     ) -> Result<FileInfo, NTSTATUS> {
         if self.inner.config.read_only {
             return Err(STATUS_MEDIA_WRITE_PROTECTED);
@@ -940,6 +966,22 @@ impl FileSystemInterface for InxtWinFs {
         let Body::Write(ws) = &file_context.body else {
             return Err(STATUS_ACCESS_DENIED);
         };
+        // WinFSP overloads this one callback for two different requests
+        // (distinguished only by `set_allocation_size`): a real EndOfFile
+        // change (truncate/extend — must move `ws.size`, the content
+        // boundary we upload), vs. a pure disk-space reservation hint (must
+        // NOT touch content length). Windows commonly sends an allocation
+        // hint rounded up to the volume's sector size right as a new file is
+        // created — treating it as a truncate here used to pin `ws.size` at
+        // that rounded-up size before any bytes were written, and a
+        // same-size-or-smaller write's `fetch_max` could never shrink it back
+        // down. Net effect: every small new file got uploaded padded with
+        // trailing zero bytes out to a sector boundary — invisible to `cat`
+        // but enough stray NULs to make Notepad misdetect the encoding and
+        // render the file as junk.
+        if set_allocation_size {
+            return Ok(file_context.file_info());
+        }
         self.rt.block_on(async {
             if new_size == 0 {
                 *ws.materialized.lock().await = true;
@@ -997,12 +1039,12 @@ impl FileSystemInterface for InxtWinFs {
 
             if !replace_if_exists {
                 let clash_file =
-                    tree::find_file(&api, &creds.token, &dst_parent.uuid, &dst_name, &self.inner.cache)
+                    tree::find_file_ci(&api, &creds.token, &dst_parent.uuid, &dst_name, &self.inner.cache)
                         .await
                         .map_err(|e| err_status(&e))?
                         .is_some();
                 let clash_dir =
-                    tree::find_folder(&api, &creds.token, &dst_parent.uuid, &dst_name, &self.inner.cache)
+                    tree::find_folder_ci(&api, &creds.token, &dst_parent.uuid, &dst_name, &self.inner.cache)
                         .await
                         .map_err(|e| err_status(&e))?
                         .is_some();
