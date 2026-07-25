@@ -134,7 +134,7 @@ jobs:
         # runners) — harmless to export unconditionally on other OSes.
         run: |
           set -eux
-          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
           IFS=',' read -ra targets <<< "${{ matrix.targets }}"
           for t in "${targets[@]}"; do
             cargo build --release --locked -p internxt-cli --target "$t" ${{ matrix.features }}
