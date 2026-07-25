@@ -53,14 +53,17 @@ jobs:
           # `--all-features` Linux legs need no extra apt package. Windows
           # needs WinFsp actually installed at build time (its build.rs reads
           # the WinFsp registry key) — installed below via choco before the
-          # build step runs. macOS still excludes `fuse`: it needs macFUSE
-          # headers to build (real requirement, not a doc error like the
-          # other two used to claim) and there's no verified unattended,
-          # non-hanging way to get those into a macos-latest runner yet — see
-          # docs/FUSE.md.
+          # build step runs. macOS needs macFUSE headers (fuser's build.rs
+          # pkg-config-probes for them unconditionally there) — installed
+          # below via `brew install --cask macfuse`, same as upstream fuser's
+          # own CI (cberner/fuser .github/workflows/ci.yml, mac-ci job): the
+          # cask installer places the pkg-config file and headers unattended,
+          # no kext/system-extension approval needed just to compile (that's
+          # only required to actually *load* the driver at mount time, not
+          # build time).
           quick='{"include":[
             {"name":"x86_64-unknown-linux-gnu","targets":"x86_64-unknown-linux-gnu","os":"ubuntu-latest","features":"--all-features"},
-            {"name":"macos","targets":"x86_64-apple-darwin","os":"macos-latest","features":"--no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage"},
+            {"name":"macos","targets":"x86_64-apple-darwin","os":"macos-latest","macfuse":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update,termimage"},
             {"name":"x86_64-pc-windows-msvc","targets":"x86_64-pc-windows-msvc","os":"windows-latest","winfsp":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update"}
           ]}'
           full='{"include":[
@@ -69,7 +72,7 @@ jobs:
             {"name":"i686-unknown-linux-musl","targets":"i686-unknown-linux-musl","os":"ubuntu-latest","cross":"zig","features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update,termimage"},
             {"name":"armv7-unknown-linux-musleabihf","targets":"armv7-unknown-linux-musleabihf","os":"ubuntu-latest","cross":"zig","features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update,termimage"},
             {"name":"arm-unknown-linux-musleabihf","targets":"arm-unknown-linux-musleabihf","os":"ubuntu-latest","cross":"zig","features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update,termimage"},
-            {"name":"macos","targets":"aarch64-apple-darwin,x86_64-apple-darwin","os":"macos-latest","features":"--no-default-features --features sso,webdav,webdav-tls,smb,nfs,sftp,dotenv,self-update,termimage"},
+            {"name":"macos","targets":"aarch64-apple-darwin,x86_64-apple-darwin","os":"macos-latest","macfuse":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update,termimage"},
             {"name":"x86_64-pc-windows-msvc","targets":"x86_64-pc-windows-msvc","os":"windows-latest","winfsp":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update"},
             {"name":"aarch64-pc-windows-msvc","targets":"aarch64-pc-windows-msvc","os":"windows-11-arm","winfsp":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update"}
           ]}'
@@ -104,6 +107,15 @@ jobs:
         if: matrix.winfsp
         run: choco install winfsp -y --no-progress
 
+      # Header/pkg-config-only install — no reboot, no system-extension
+      # approval needed (that's only for actually loading the driver at
+      # mount time). Matches upstream fuser's own mac-ci job.
+      - name: Install macFUSE (macos only)
+        if: matrix.macfuse
+        run: |
+          brew update > /dev/null
+          brew install --cask macfuse
+
       - name: Install zig + cargo-zigbuild (musl cross only)
         if: matrix.cross == 'zig'
         run: |
@@ -117,8 +129,12 @@ jobs:
       - name: Build (native)
         if: matrix.cross != 'zig'
         shell: bash
+        # macFUSE's installer places its pkg-config file at a fixed path
+        # outside Homebrew's own prefix (true on both arm64 and x86_64
+        # runners) — harmless to export unconditionally on other OSes.
         run: |
           set -eux
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
           IFS=',' read -ra targets <<< "${{ matrix.targets }}"
           for t in "${targets[@]}"; do
             cargo build --release --locked -p internxt-cli --target "$t" ${{ matrix.features }}
