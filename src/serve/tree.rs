@@ -178,6 +178,36 @@ pub async fn find_folder(
     Ok(found)
 }
 
+/// Case-insensitive sibling of [`find_folder`], for backends that advertise a
+/// case-insensitive namespace to their client (WinFSP: `case_sensitive_search
+/// = false`). Windows' own case-insensitive-volume name resolution can hand a
+/// callback an upcased path for some request types (observed: the Rename
+/// IRP's parent-directory components) even though the client typed — and
+/// Explorer displays — the real case; a case-sensitive lookup against Drive's
+/// exact-cased `plainName` then spuriously 404s. Same cache/re-fetch-on-miss
+/// posture as `find_folder`.
+pub async fn find_folder_ci(
+    api: &DriveApi,
+    token: &str,
+    parent_uuid: &str,
+    name: &str,
+    cache: &FolderCache,
+) -> Result<Option<FolderItem>> {
+    if let Some(cached) = cache.get(parent_uuid) {
+        if let Some(f) = cached.iter().find(|f| f.plain_name.eq_ignore_ascii_case(name)) {
+            return Ok(Some(f.clone()));
+        }
+        let fresh = fetch_folders(api, token, parent_uuid).await?;
+        let found = fresh.iter().find(|f| f.plain_name.eq_ignore_ascii_case(name)).cloned();
+        cache.put(parent_uuid, fresh);
+        return Ok(found);
+    }
+    let out = fetch_folders(api, token, parent_uuid).await?;
+    let found = out.iter().find(|f| f.plain_name.eq_ignore_ascii_case(name)).cloned();
+    cache.put(parent_uuid, out);
+    Ok(found)
+}
+
 /// All EXISTS subfiles of a folder, following pagination.
 pub async fn list_files(api: &DriveApi, token: &str, folder_uuid: &str) -> Result<Vec<FileItem>> {
     let mut out = Vec::new();
@@ -244,6 +274,30 @@ pub async fn find_file(
     Ok(found)
 }
 
+/// Case-insensitive sibling of [`find_file`] — see [`find_folder_ci`] for why
+/// WinFSP needs this.
+pub async fn find_file_ci(
+    api: &DriveApi,
+    token: &str,
+    parent_uuid: &str,
+    name: &str,
+    cache: &FolderCache,
+) -> Result<Option<FileItem>> {
+    if let Some(cached) = cache.get_files(parent_uuid) {
+        if let Some(f) = cached.iter().find(|f| f.display_name().eq_ignore_ascii_case(name)) {
+            return Ok(Some(f.clone()));
+        }
+        let fresh = list_files(api, token, parent_uuid).await?;
+        let found = fresh.iter().find(|f| f.display_name().eq_ignore_ascii_case(name)).cloned();
+        cache.put_files(parent_uuid, fresh);
+        return Ok(found);
+    }
+    let out = list_files(api, token, parent_uuid).await?;
+    let found = out.iter().find(|f| f.display_name().eq_ignore_ascii_case(name)).cloned();
+    cache.put_files(parent_uuid, out);
+    Ok(found)
+}
+
 /// Resolve the folder at `components` (walking from `root`). `None` if any
 /// segment is missing or is a file rather than a folder.
 pub async fn resolve_folder(
@@ -261,6 +315,30 @@ pub async fn resolve_folder(
     };
     for comp in components {
         match find_folder(api, token, &current.uuid, comp, cache).await? {
+            Some(f) => current = f,
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(current))
+}
+
+/// Case-insensitive sibling of [`resolve_folder`] — see [`find_folder_ci`]
+/// for why WinFSP needs this.
+pub async fn resolve_folder_ci(
+    api: &DriveApi,
+    token: &str,
+    root: &str,
+    root_updated_at: &str,
+    components: &[String],
+    cache: &FolderCache,
+) -> Result<Option<FolderItem>> {
+    let mut current = FolderItem {
+        uuid: root.to_string(),
+        plain_name: String::new(),
+        updated_at: root_updated_at.to_string(),
+    };
+    for comp in components {
+        match find_folder_ci(api, token, &current.uuid, comp, cache).await? {
             Some(f) => current = f,
             None => return Ok(None),
         }
