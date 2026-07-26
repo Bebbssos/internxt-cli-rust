@@ -32,6 +32,11 @@ ARG ALPINE_VERSION=3.21
 # ---------------------------------------------------------------------------
 FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-bookworm AS builder
 ARG ZIG_VERSION
+# Real tag version (e.g. `0.2.1-rc.3`), threaded in by the release workflow;
+# stays `dev` for local/manual builds. Needed here (not just in the `final`
+# stage below) so it can be stamped into Cargo.toml before compiling — see
+# the stamp step after `COPY . .` for why.
+ARG VERSION=dev
 
 # clang/cmake/nasm/perl: build-time deps of C crates in the dependency tree
 # (bindgen needs a *host* libclang; aws-lc-sys falls back to cmake+nasm for
@@ -66,6 +71,16 @@ RUN rustup target add \
 
 WORKDIR /src
 COPY . .
+
+# Cargo.toml's committed `version` never carries a `-rc.N`/tag suffix (that'd
+# make every ordinary `cargo build` think it's a prerelease) — so `ixr
+# --version` would otherwise report the wrong thing for anything but a
+# stable tag. Stamp the real tag version in before compiling; skip for local
+# `dev` builds since "dev" isn't valid semver for Cargo to parse. Mirrors
+# the same stamp step in release.yml's `build`/`build-freebsd` jobs.
+RUN if [ "$VERSION" != "dev" ]; then \
+      perl -0pi -e 's/(name = "internxt-cli"\nversion = ")[^"]*(")/${1}'"$VERSION"'${2}/' Cargo.toml Cargo.lock; \
+    fi
 
 # fuse needs libfuse (no cross story worth the pain in a headless container,
 # and a container-local FUSE mount can't be seen from the host anyway); sso
@@ -106,8 +121,9 @@ FROM alpine:${ALPINE_VERSION} AS final
 RUN apk add --no-cache ca-certificates
 
 # VERSION: set by the release workflow to the tag (e.g. `1.2.3`); left `dev`
-# for local/manual builds. Purely metadata (OCI labels) — not baked into the
-# binary, which gets its version from Cargo.toml at compile time.
+# for local/manual builds. Used for the OCI label below; the builder stage
+# above also stamps it into Cargo.toml so it matches what `ixr --version`
+# reports.
 ARG VERSION=dev
 LABEL org.opencontainers.image.title="ixr" \
       org.opencontainers.image.description="Unofficial Rust port of the Internxt CLI" \
