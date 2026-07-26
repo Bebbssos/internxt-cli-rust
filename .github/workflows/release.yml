@@ -92,6 +92,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Cargo.toml's committed `version` never carries a `-rc.N` suffix (that
+      # would make every day-to-day `cargo build` think it's a prerelease).
+      # So a build off an rc tag has to stamp the real tag version in here —
+      # otherwise CARGO_PKG_VERSION bakes in as e.g. "0.2.1", which `ixr
+      # update`'s semver compare (self_update_cmd.rs) sees as *newer* than
+      # any "0.2.1-rc.N" release, so rc builds could never see rc-or-later
+      # updates. Cargo.lock's own entry for this package must match or
+      # `--locked` below fails.
+      - name: Stamp crate version from tag
+        shell: bash
+        run: |
+          set -eux
+          v="${GITHUB_REF_NAME#v}"
+          perl -0pi -e 's/(name = "internxt-cli"\nversion = ")[^"]*(")/${1}'"$v"'${2}/' Cargo.toml Cargo.lock
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.targets }}
@@ -185,6 +200,16 @@ jobs:
     if: ${{ !contains(github.ref_name, '-') }}
     steps:
       - uses: actions/checkout@v7
+
+      # See the "Stamp crate version from tag" step in the `build` job above
+      # for why this is needed.
+      - name: Stamp crate version from tag
+        shell: bash
+        run: |
+          set -eux
+          v="${GITHUB_REF_NAME#v}"
+          perl -0pi -e 's/(name = "internxt-cli"\nversion = ")[^"]*(")/${1}'"$v"'${2}/' Cargo.toml Cargo.lock
+
       # No usable cross-compile sysroot for FreeBSD (unlike the musl targets,
       # zig doesn't bundle one) — build natively inside a real FreeBSD guest
       # instead. vmactions boots the VM under QEMU and mounts this checkout
