@@ -7,6 +7,15 @@
 //!
 //! Only *live* (non-trashed) items are reachable by path — the walk uses the
 //! same paginated `subfolders`/`subfiles` listings the rest of the CLI uses.
+//!
+//! A leading `//` escapes into an explicit namespace instead of the given
+//! root: `//backups/<device>/...` walks a backup device's folder (personal
+//! account only — see `backups.rs`) and `//drive/...` is an explicit alias
+//! for the default `/...` walk from the given root (mostly for symmetry with
+//! `//backups/`). A single leading `/` (or none) always means the given
+//! root, same as before. The reverse direction (`path_from_id`) prints
+//! `//backups/<device>/...` for anything found to live under a device, and
+//! plain `/...` otherwise — `//drive/` is input-only sugar, never emitted.
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -44,6 +53,40 @@ fn file_display_name(v: &Value) -> String {
         plain
     } else {
         format!("{plain}.{ftype}")
+    }
+}
+
+/// GET /backup/deviceAsFolder — the account's backup devices (personal only;
+/// callers must check `api.is_workspace()` first). Shared by the `//backups/`
+/// path escape here and by `backups.rs`'s own device commands.
+pub(crate) async fn fetch_backup_devices(api: &DriveApi, token: &str) -> Result<Vec<Value>> {
+    let resp = api.get_backup_devices(token).await?;
+    Ok(resp.as_array().cloned().unwrap_or_default())
+}
+
+/// Resolve a user-supplied device (uuid or name) against `devices`. Exact
+/// uuid match wins; otherwise a case-insensitive exact match on `plainName`
+/// (erroring on ambiguity).
+pub(crate) fn resolve_backup_device<'a>(devices: &'a [Value], needle: &str) -> Result<&'a Value> {
+    if let Some(d) = devices.iter().find(|d| str_field(d, "uuid") == needle) {
+        return Ok(d);
+    }
+    let matches: Vec<&Value> = devices
+        .iter()
+        .filter(|d| str_field(d, "plainName").eq_ignore_ascii_case(needle))
+        .collect();
+    match matches.len() {
+        0 => {
+            let available: Vec<String> = devices.iter().map(|d| str_field(d, "plainName")).collect();
+            Err(anyhow!(
+                "No backup device found matching '{needle}'. Available devices: {}",
+                if available.is_empty() { "(none)".to_string() } else { available.join(", ") }
+            ))
+        }
+        1 => Ok(matches[0]),
+        _ => Err(anyhow!(
+            "Multiple backup devices are named '{needle}'; use its id (from `backups devices list`) instead."
+        )),
     }
 }
 
@@ -100,18 +143,20 @@ pub struct Resolved {
     pub is_folder: bool,
 }
 
-/// Resolve `path` (relative to `root`) to a Drive item, walking the folder tree.
-pub async fn resolve_path(
+/// Walk pre-split `comps` from `root`. Shared by the default `/...` walk and
+/// the `//backups/<device>/...` walk (rooted at the device instead of the
+/// account/workspace root) — `display` is only used to phrase error messages.
+async fn walk_components(
     api: &DriveApi,
     token: &str,
     root: &str,
-    path: &str,
+    comps: &[String],
     expect: Expect,
+    display: &str,
 ) -> Result<Resolved> {
-    let comps = components(path);
     if comps.is_empty() {
         if expect == Expect::File {
-            return Err(anyhow!("Path '/' is the root folder, not a file"));
+            return Err(anyhow!("Path '{display}' is a folder, not a file"));
         }
         return Ok(Resolved {
             uuid: root.to_string(),
@@ -127,7 +172,7 @@ pub async fn resolve_path(
             current = str_field(f, "uuid");
             if i == last {
                 if expect == Expect::File {
-                    return Err(anyhow!("'{path}' is a folder, not a file"));
+                    return Err(anyhow!("'{display}' is a folder, not a file"));
                 }
                 return Ok(Resolved {
                     uuid: current,
@@ -147,9 +192,60 @@ pub async fn resolve_path(
             }
         }
         let what = if i == last { "item" } else { "folder" };
-        return Err(anyhow!("No such {what} '{comp}' at path: {path}"));
+        return Err(anyhow!("No such {what} '{comp}' at path: {display}"));
     }
     unreachable!()
+}
+
+/// Resolve `//backups/<device>/...rest` (the part after the leading `//`, so
+/// `rest` starts with `backups`) to a Drive item, rooted at the named
+/// device's folder. `//drive/...` is handled here too, as a plain alias for
+/// `root`.
+async fn resolve_namespaced_path(
+    api: &DriveApi,
+    token: &str,
+    root: &str,
+    rest: &str,
+    expect: Expect,
+) -> Result<Resolved> {
+    let comps = components(rest);
+    let display = format!("//{rest}");
+    match comps.first().map(String::as_str) {
+        Some("drive") => walk_components(api, token, root, &comps[1..], expect, &display).await,
+        Some("backups") => {
+            if comps.len() < 2 {
+                return Err(anyhow!("Specify a backup device: //backups/<device>[/path...]"));
+            }
+            if api.is_workspace() {
+                return Err(anyhow!("Backups are personal-account only; not available in an active workspace"));
+            }
+            let devices = fetch_backup_devices(api, token).await?;
+            let device = resolve_backup_device(&devices, &comps[1])?;
+            let device_uuid = str_field(device, "uuid");
+            walk_components(api, token, &device_uuid, &comps[2..], expect, &display).await
+        }
+        _ => Err(anyhow!(
+            "Unknown path escape '{display}': only '//backups/<device>/...' and '//drive/...' are supported"
+        )),
+    }
+}
+
+/// Resolve `path` (relative to `root`) to a Drive item, walking the folder
+/// tree. A leading `//` escapes into an explicit namespace instead — see the
+/// module doc.
+pub async fn resolve_path(
+    api: &DriveApi,
+    token: &str,
+    root: &str,
+    path: &str,
+    expect: Expect,
+) -> Result<Resolved> {
+    if let Some(rest) = path.strip_prefix("//") {
+        return resolve_namespaced_path(api, token, root, rest, expect).await;
+    }
+    let comps = components(path);
+    let display = if path.trim().is_empty() { "/" } else { path };
+    walk_components(api, token, root, &comps, expect, display).await
 }
 
 /// Build a `/a/b` folder path from an ancestors array (target first → root last):
@@ -169,8 +265,40 @@ fn folder_path_from_ancestors(anc: &Value, root: &str) -> String {
     }
 }
 
+/// Given a folder's ancestors array (target first → root last), check
+/// whether a backup device appears in the chain; if so, return the
+/// `//backups/<device>/...` path for the target instead of a root-relative
+/// one. `None` when no device is found (or a workspace is active — backups
+/// are personal-account only) so the caller falls back to
+/// `folder_path_from_ancestors`.
+async fn backups_relative_path(api: &DriveApi, token: &str, anc: &Value) -> Result<Option<String>> {
+    if api.is_workspace() {
+        return Ok(None);
+    }
+    let arr = anc.as_array().cloned().unwrap_or_default();
+    let devices = fetch_backup_devices(api, token).await?;
+    let Some(idx) = arr.iter().position(|e| {
+        let uuid = str_field(e, "uuid");
+        devices.iter().any(|d| str_field(d, "uuid") == uuid)
+    }) else {
+        return Ok(None);
+    };
+    let device_uuid = str_field(&arr[idx], "uuid");
+    let device = devices.iter().find(|d| str_field(d, "uuid") == device_uuid).unwrap();
+    // Entries above the device (target + intermediate ancestors, device excluded), root-first.
+    let mut names: Vec<String> = arr[..idx].iter().map(|e| str_field(e, "plainName")).collect();
+    names.reverse();
+    let mut path = format!("//backups/{}", str_field(device, "plainName"));
+    for n in names {
+        path.push('/');
+        path.push_str(&n);
+    }
+    Ok(Some(path))
+}
+
 /// Reconstruct the full path of an item (file or folder) from its uuid.
-/// Returns `(path, is_folder)`.
+/// Returns `(path, is_folder)`. Prints `//backups/<device>/...` when the
+/// item lives under a backup device instead of the account/workspace root.
 pub async fn path_from_id(
     api: &DriveApi,
     token: &str,
@@ -184,6 +312,9 @@ pub async fn path_from_id(
                 return Ok(("/".to_string(), true));
             }
             let anc = api.get_folder_ancestors(token, id).await?;
+            if let Some(p) = backups_relative_path(api, token, &anc).await? {
+                return Ok((p, true));
+            }
             return Ok((folder_path_from_ancestors(&anc, root), true));
         }
     }
@@ -198,7 +329,10 @@ pub async fn path_from_id(
         "/".to_string()
     } else {
         let anc = api.get_folder_ancestors(token, &folder_uuid).await?;
-        folder_path_from_ancestors(&anc, root)
+        match backups_relative_path(api, token, &anc).await? {
+            Some(p) => p,
+            None => folder_path_from_ancestors(&anc, root),
+        }
     };
     let full = if dir == "/" {
         format!("/{name}")

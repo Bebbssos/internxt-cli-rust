@@ -1,5 +1,6 @@
 mod accounts;
 mod auth;
+mod backups;
 mod commands;
 mod compare;
 mod drive_ops;
@@ -578,6 +579,14 @@ enum Commands {
     /// `compare file` / `compare folder`). New — no official equivalent.
     #[command(subcommand)]
     Compare(CompareCmd),
+    /// Manage backup devices and what's backed up to them (see `backups
+    /// devices list|rename|delete`, `backups list`, `backups download`). New
+    /// — no official equivalent (backups are desktop-app-only there; the
+    /// continuous watch-local-folders-and-upload daemon itself isn't ported,
+    /// only managing devices and browsing/downloading what's already
+    /// backed up).
+    #[command(subcommand)]
+    Backups(BackupsCmd),
     /// Show every command, including hidden compatibility aliases for the
     /// flat/hyphenated names (e.g. `upload-file`).
     HelpAll,
@@ -755,6 +764,113 @@ enum CompareCmd {
     File(CompareFileArgs),
     /// Compare a local folder against a remote Drive folder (recursive).
     Folder(CompareFolderArgs),
+}
+
+#[derive(clap::Args)]
+struct BackupsDevicesListArgs {
+    /// Display additional information (created at, status).
+    #[arg(short, long, default_value_t = false)]
+    extended: bool,
+    /// Include removed devices too (hidden by default).
+    #[arg(long, default_value_t = false)]
+    all: bool,
+}
+
+#[derive(clap::Args)]
+struct BackupsDevicesCreateArgs {
+    /// The name for the new backup device.
+    #[arg(short, long)]
+    name: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct BackupsDevicesRenameArgs {
+    /// The backup device id (uuid) or name (see `backups devices list`).
+    #[arg(value_name = "DEVICE")]
+    device: String,
+    /// The new name for the device.
+    #[arg(short, long)]
+    name: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct BackupsDevicesDeleteArgs {
+    /// The backup device id (uuid) or name (see `backups devices list`).
+    #[arg(value_name = "DEVICE")]
+    device: String,
+    /// Delete without confirmation. Unlike Drive files/folders, backups have
+    /// no trash — this action cannot be undone.
+    #[arg(short, long, default_value_t = false)]
+    force: bool,
+}
+
+#[derive(Subcommand)]
+enum BackupsDevicesCmd {
+    /// List your backup devices.
+    List(BackupsDevicesListArgs),
+    /// Create a backup device (a new device-as-folder registration). Useful
+    /// for scripted/headless uploads that want to show up as a device in the
+    /// desktop/mobile Backups UI without running the desktop app.
+    Create(BackupsDevicesCreateArgs),
+    /// Rename a backup device.
+    Rename(BackupsDevicesRenameArgs),
+    /// Delete a backup device and everything backed up to it. This action cannot be undone.
+    Delete(BackupsDevicesDeleteArgs),
+}
+
+#[derive(clap::Args)]
+struct BackupsListArgs {
+    /// The backup device id (uuid) or name (see `backups devices list`).
+    #[arg(value_name = "DEVICE")]
+    device: String,
+    /// A subfolder path inside the device's backup, e.g. `Documents/notes`. Defaults to the device root.
+    #[arg(short, long)]
+    path: Option<String>,
+    /// Display additional information (modified date, size).
+    #[arg(short, long, default_value_t = false)]
+    extended: bool,
+}
+
+#[derive(clap::Args)]
+struct BackupsDownloadArgs {
+    /// The backup device id (uuid) or name (see `backups devices list`).
+    #[arg(value_name = "DEVICE")]
+    device: String,
+    /// A subfolder path inside the device's backup, e.g. `Documents/notes`. Defaults to the device root.
+    #[arg(short, long)]
+    path: Option<String>,
+    /// Local directory to download into (a subfolder named after the
+    /// device's backup folder, or the last path segment, is created inside
+    /// it). Defaults to the current directory.
+    #[arg(short, long)]
+    directory: Option<String>,
+    /// Overwrite/merge into an already-existing destination folder.
+    #[arg(short, long, default_value_t = false)]
+    overwrite: bool,
+}
+
+#[derive(clap::Args)]
+struct BackupsGetIdArgs {
+    /// The backup device id (uuid) or name (see `backups devices list`).
+    #[arg(value_name = "DEVICE")]
+    device: String,
+    /// A file/subfolder path inside the device's backup, e.g. `Documents/notes`. Defaults to the device root.
+    #[arg(short, long)]
+    path: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum BackupsCmd {
+    /// Manage backup devices (see `backups devices list|rename|delete`).
+    #[command(subcommand)]
+    Devices(BackupsDevicesCmd),
+    /// List what's backed up to a device.
+    List(BackupsListArgs),
+    /// Download everything backed up to a device.
+    Download(BackupsDownloadArgs),
+    /// Print the uuid of a device (or a file/folder inside it) — for
+    /// chaining into other id-based commands, e.g. `mount --folder-uuid`.
+    GetId(BackupsGetIdArgs),
 }
 
 #[derive(clap::Args)]
@@ -1297,6 +1413,16 @@ async fn do_download_folder(args: DownloadFolderArgs) -> Result<()> {
         args.overwrite,
     )
     .await
+}
+
+async fn do_backups_devices_create(args: BackupsDevicesCreateArgs) -> Result<()> {
+    let name = required_or_prompt(args.name, "name", "What is the name of the new device? ")?;
+    backups::devices_create(&name).await
+}
+
+async fn do_backups_devices_rename(args: BackupsDevicesRenameArgs) -> Result<()> {
+    let name = required_or_prompt(args.name, "name", "What is the new name of the device? ")?;
+    backups::devices_rename(&args.device, &name).await
 }
 
 async fn do_compare_file(args: CompareFileArgs) -> Result<()> {
@@ -1920,6 +2046,20 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Compare(cmd) => match cmd {
             CompareCmd::File(args) => do_compare_file(args).await?,
             CompareCmd::Folder(args) => do_compare_folder(args).await?,
+        },
+        Commands::Backups(cmd) => match cmd {
+            BackupsCmd::Devices(dcmd) => match dcmd {
+                BackupsDevicesCmd::List(args) => backups::devices_list(args.extended, args.all).await?,
+                BackupsDevicesCmd::Create(args) => do_backups_devices_create(args).await?,
+                BackupsDevicesCmd::Rename(args) => do_backups_devices_rename(args).await?,
+                BackupsDevicesCmd::Delete(args) => backups::devices_delete(&args.device, args.force).await?,
+            },
+            BackupsCmd::List(args) => backups::list(&args.device, args.path.as_deref(), args.extended).await?,
+            BackupsCmd::Download(args) => {
+                backups::download(&args.device, args.path.as_deref(), args.directory.as_deref(), args.overwrite)
+                    .await?
+            }
+            BackupsCmd::GetId(args) => backups::get_id(&args.device, args.path.as_deref()).await?,
         },
         Commands::HelpAll => print_help_all(),
         #[cfg(feature = "self-update")]
