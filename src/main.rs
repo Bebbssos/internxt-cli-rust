@@ -1,6 +1,7 @@
 mod accounts;
 mod auth;
 mod commands;
+mod compare;
 mod drive_ops;
 #[cfg(feature = "fuse")]
 mod fuse;
@@ -573,6 +574,10 @@ enum Commands {
     /// One-way sync (see `sync up` / `sync down`).
     #[command(subcommand)]
     Sync(SyncCmd),
+    /// Compare a local file/folder against its remote Drive counterpart (see
+    /// `compare file` / `compare folder`). New — no official equivalent.
+    #[command(subcommand)]
+    Compare(CompareCmd),
     /// Show every command, including hidden compatibility aliases for the
     /// flat/hyphenated names (e.g. `upload-file`).
     HelpAll,
@@ -695,6 +700,61 @@ enum DownloadCmd {
     File(DownloadFileArgs),
     /// Download a folder (recursively) from Internxt Drive.
     Folder(DownloadFolderArgs),
+}
+
+#[derive(clap::Args)]
+struct CompareFileArgs {
+    /// Path to the local file to compare.
+    #[arg(short, long)]
+    local: String,
+    /// The uuid of the remote file to compare against.
+    #[arg(short, long)]
+    id: Option<String>,
+    /// The Drive path of the remote file (e.g. `/a/b/file.txt`), alternative to --id.
+    #[arg(short, long)]
+    path: Option<String>,
+    /// Only compare metadata (size, and modification time with
+    /// --check-modified) — never read or stream the file content.
+    #[arg(long, default_value_t = false)]
+    metadata_only: bool,
+    /// Also require the modification time to match (local FS mtime vs remote
+    /// modificationTime, ±2s tolerance). Off by default: content equality
+    /// alone is what "identical" means unless this is set.
+    #[arg(long, default_value_t = false)]
+    check_modified: bool,
+}
+
+#[derive(clap::Args)]
+struct CompareFolderArgs {
+    /// Path to the local folder to compare.
+    #[arg(short, long)]
+    local: String,
+    /// The uuid of the remote folder to compare against. Leave empty for the
+    /// root folder.
+    #[arg(short, long)]
+    id: Option<String>,
+    /// The Drive path of the remote folder (e.g. `/a/b`), alternative to --id.
+    #[arg(short, long)]
+    path: Option<String>,
+    /// Only compare metadata (size, and modification time with
+    /// --check-modified) — never read or stream file content.
+    #[arg(long, default_value_t = false)]
+    metadata_only: bool,
+    /// Also require each file's modification time to match (±2s tolerance).
+    #[arg(long, default_value_t = false)]
+    check_modified: bool,
+    /// Don't stop at the first difference — compare every file/folder and
+    /// list every difference found.
+    #[arg(long, default_value_t = false)]
+    list: bool,
+}
+
+#[derive(Subcommand)]
+enum CompareCmd {
+    /// Compare a local file against a remote Drive file.
+    File(CompareFileArgs),
+    /// Compare a local folder against a remote Drive folder (recursive).
+    Folder(CompareFolderArgs),
 }
 
 #[derive(clap::Args)]
@@ -1235,6 +1295,29 @@ async fn do_download_folder(args: DownloadFolderArgs) -> Result<()> {
         args.path.as_deref(),
         args.directory.as_deref(),
         args.overwrite,
+    )
+    .await
+}
+
+async fn do_compare_file(args: CompareFileArgs) -> Result<()> {
+    compare::compare_file(
+        &args.local,
+        args.id.as_deref(),
+        args.path.as_deref(),
+        args.metadata_only,
+        args.check_modified,
+    )
+    .await
+}
+
+async fn do_compare_folder(args: CompareFolderArgs) -> Result<()> {
+    compare::compare_folder(
+        &args.local,
+        args.id.as_deref(),
+        args.path.as_deref(),
+        args.metadata_only,
+        args.check_modified,
+        args.list,
     )
     .await
 }
@@ -1833,6 +1916,10 @@ async fn run(cli: Cli) -> Result<()> {
                 sync::sync_down(&local, remote.as_deref(), remote_path.as_deref(), delete.as_deref(), dry_run)
                     .await?
             }
+        },
+        Commands::Compare(cmd) => match cmd {
+            CompareCmd::File(args) => do_compare_file(args).await?,
+            CompareCmd::Folder(args) => do_compare_folder(args).await?,
         },
         Commands::HelpAll => print_help_all(),
         #[cfg(feature = "self-update")]

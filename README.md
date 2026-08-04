@@ -206,6 +206,9 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | **[`sync`](#sync-up--sync-down)** | One-way sync | | New — no official equivalent. |
 | &nbsp;&nbsp;[`sync up`](#sync-up--sync-down) | Push: local → remote. | `sync-up` | |
 | &nbsp;&nbsp;[`sync down`](#sync-up--sync-down) | Pull: remote → local. | `sync-down` | |
+| **[`compare`](#compare-file--compare-folder)** | Compare local vs. remote | | New — no official equivalent. |
+| &nbsp;&nbsp;[`compare file`](#compare-file--compare-folder) | Compare a local file against a remote file. | — | |
+| &nbsp;&nbsp;[`compare folder`](#compare-file--compare-folder) | Recursively compare a local folder against a remote folder. | — | |
 | [`serve`](#serve) | Serve Drive over WebDAV/FUSE/SMB/NFS/SFTP (foreground). | — | Needs ≥1 of `webdav`,`fuse`,`smb`,`nfs`,`sftp`. WebDAV mirrors official; rest new. |
 | [`mount`](#mount) | Mount Drive as a local FS via FUSE/WinFSP. | — | New; needs `fuse` (default on). |
 | [`id-from-path`](#id-from-path) | Print the uuid at a Drive path. | `get-id` | New — no official equivalent. |
@@ -707,6 +710,62 @@ JSON output:
   "skipped": 40,
   "failed": 0,
   "actions": [{ "action": "upload", "path": "notes.txt", "ok": true }]
+}
+```
+
+### `compare file` / `compare folder`
+
+New — no official equivalent. Verifies a local file/folder is byte-identical
+to its Drive counterpart, without transferring anything anywhere. Exits
+non-zero (and prints every difference found) when they differ; exits `0` and
+prints `Identical.` when they match.
+
+`compare file` checks size first — a mismatch is reported immediately, with
+no need to read either side. If sizes match, both sides are streamed
+(decrypting the remote file on the fly) and compared byte-for-byte, stopping
+at the first difference and reporting its byte offset.
+
+`compare folder` recursively walks both trees (same walk `sync` uses) and
+diffs file-by-file — missing files/folders on either side count as
+differences too. By default it **stops at the first difference found**
+(file or folder, either side); pass `--list` to keep going and report every
+difference instead.
+
+`--metadata-only` skips content streaming entirely on both commands — only
+size (and modification time, with `--check-modified`) is checked.
+`--check-modified` is independent of content: it's an extra check layered on
+top, so a byte-identical file with a differing modification time (±2s
+tolerance, local FS mtime vs. remote `modificationTime`) still counts as a
+difference.
+
+Flags (`compare file`): `-l/--local <FILE>` (required), `-i/--id <FILE_ID>`,
+`-p/--path <PATH>` (alternative to `--id`; one of the two is required),
+`--metadata-only`, `--check-modified`.
+
+Flags (`compare folder`): `-l/--local <DIR>` (required), `-i/--id <FOLDER_ID>`
+(default: root), `-p/--path <PATH>` (alternative to `--id`),
+`--metadata-only`, `--check-modified`, `--list`.
+
+```sh
+ixr compare file   -l ./report.pdf --path /Documents/report.pdf
+ixr compare file   -l ./report.pdf --path /Documents/report.pdf --metadata-only --check-modified
+ixr compare folder -l ./my-folder -i <folder-uuid>              # stop at first diff
+ixr compare folder -l ./my-folder -i <folder-uuid> --list        # list every diff
+```
+
+JSON output:
+
+```json
+{ "success": true, "identical": true, "differences": [] }
+```
+
+```json
+{
+  "success": false,
+  "identical": false,
+  "differences": [
+    { "type": "file", "path": "notes.txt", "detail": "size differs: local 120 bytes, remote 118 bytes" }
+  ]
 }
 ```
 
