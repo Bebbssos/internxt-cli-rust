@@ -27,8 +27,9 @@ use internxt_core::network::NetworkApi;
 use crate::output;
 
 /// Files whose mtimes differ by more than this many seconds are "changed"
-/// (absorbs FS timestamp granularity between local and remote).
-const MTIME_TOL_SECS: i64 = 2;
+/// (absorbs FS timestamp granularity between local and remote). Also reused by
+/// `compare` for its `--check-modified` tolerance.
+pub(crate) const MTIME_TOL_SECS: i64 = 2;
 const MAX_CONCURRENT_TRANSFERS: usize = 10;
 
 /// What to do with items that exist only on the destination side.
@@ -75,18 +76,22 @@ fn parse_delete(delete: Option<&str>, up: bool) -> Result<DeleteMode> {
 
 // ---- shared tree model ----
 
-struct LocalFile {
-    abs: PathBuf,
-    size: u64,
-    mtime: i64,
+// `LocalFile`/`RemoteFile`, `walk_local` and `build_remote_tree` are also reused
+// by `compare` (folder mode), which needs the exact same local/remote tree
+// walk sync-up/sync-down already do — hence `pub(crate)` rather than private.
+
+pub(crate) struct LocalFile {
+    pub(crate) abs: PathBuf,
+    pub(crate) size: u64,
+    pub(crate) mtime: i64,
 }
 
-struct RemoteFile {
-    uuid: String,
-    size: u64,
-    mtime: i64,
-    file_id: Option<String>,
-    bucket: String,
+pub(crate) struct RemoteFile {
+    pub(crate) uuid: String,
+    pub(crate) size: u64,
+    pub(crate) mtime: i64,
+    pub(crate) file_id: Option<String>,
+    pub(crate) bucket: String,
 }
 
 fn systime_secs(t: SystemTime) -> i64 {
@@ -153,7 +158,7 @@ fn value_size(v: &Value) -> u64 {
 /// `exclude_empty` skips zero-byte files instead of including them (only
 /// meaningful for the upload-direction walk in `sync_up` — Internxt's
 /// free/legacy plans reject empty files server-side with HTTP 402).
-fn walk_local(
+pub(crate) fn walk_local(
     root: &Path,
     current: &Path,
     rel: &str,
@@ -217,7 +222,7 @@ fn page_items(page: &Value, key: &str) -> Vec<Value> {
 
 /// Recursively build the remote tree rooted at `root_uuid`. Returns a
 /// rel-path → RemoteFile map and a rel-path → folder-uuid map (with `""` = root).
-async fn build_remote_tree(
+pub(crate) async fn build_remote_tree(
     api: &DriveApi,
     token: &str,
     root_uuid: &str,
