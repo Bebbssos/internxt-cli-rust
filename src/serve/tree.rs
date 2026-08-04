@@ -11,6 +11,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::cache::FolderCache;
+use crate::paths;
 use internxt_core::api::DriveApi;
 
 /// A resolved Drive file.
@@ -115,6 +116,43 @@ fn page_items(page: &Value, key: &str) -> Vec<Value> {
         .collect()
 }
 
+/// `true` for a `//`/`//backups` sentinel uuid (see `paths`) — a virtual
+/// grouping has no files, and its subfolders come from
+/// `virtual_folder_children`, not a real API call. Also used by every serve
+/// backend to reject a mutation whose parent is virtual (read-only there).
+pub(crate) fn is_virtual(uuid: &str) -> bool {
+    paths::decode_virtual_root(uuid).is_some() || uuid == paths::VIRTUAL_BACKUPS_UUID
+}
+
+/// The synthetic children of a virtual `folder_uuid`, or `None` when it's a
+/// real Drive folder (the common case — every lookup below falls through to
+/// its normal real-API path then). Mirrors `fetch_folders`'s shape so
+/// `list_folders`/`find_folder`/`find_folder_ci` can splice it in ahead of
+/// their real lookup with one check.
+async fn virtual_folder_children(api: &DriveApi, token: &str, folder_uuid: &str) -> Option<Result<Vec<FolderItem>>> {
+    if let Some(real_root) = paths::decode_virtual_root(folder_uuid) {
+        let mut out = vec![FolderItem {
+            uuid: real_root.to_string(),
+            plain_name: "drive".to_string(),
+            updated_at: String::new(),
+        }];
+        if !api.is_workspace() {
+            out.push(FolderItem {
+                uuid: paths::VIRTUAL_BACKUPS_UUID.to_string(),
+                plain_name: "backups".to_string(),
+                updated_at: String::new(),
+            });
+        }
+        return Some(Ok(out));
+    }
+    if folder_uuid == paths::VIRTUAL_BACKUPS_UUID {
+        return Some(paths::fetch_backup_devices(api, token).await.map(|devices| {
+            devices.iter().map(parse_folder).collect()
+        }));
+    }
+    None
+}
+
 /// All EXISTS subfolders of a folder, following pagination, live (no cache
 /// read or write).
 async fn fetch_folders(api: &DriveApi, token: &str, folder_uuid: &str) -> Result<Vec<FolderItem>> {
@@ -141,6 +179,9 @@ pub async fn list_folders(
     folder_uuid: &str,
     cache: &FolderCache,
 ) -> Result<Vec<FolderItem>> {
+    if let Some(res) = virtual_folder_children(api, token, folder_uuid).await {
+        return res;
+    }
     if let Some(hit) = cache.get(folder_uuid) {
         return Ok(hit);
     }
@@ -163,6 +204,9 @@ pub async fn find_folder(
     name: &str,
     cache: &FolderCache,
 ) -> Result<Option<FolderItem>> {
+    if let Some(res) = virtual_folder_children(api, token, parent_uuid).await {
+        return Ok(res?.into_iter().find(|f| f.plain_name == name));
+    }
     if let Some(cached) = cache.get(parent_uuid) {
         if let Some(f) = cached.iter().find(|f| f.plain_name == name) {
             return Ok(Some(f.clone()));
@@ -193,6 +237,9 @@ pub async fn find_folder_ci(
     name: &str,
     cache: &FolderCache,
 ) -> Result<Option<FolderItem>> {
+    if let Some(res) = virtual_folder_children(api, token, parent_uuid).await {
+        return Ok(res?.into_iter().find(|f| f.plain_name.eq_ignore_ascii_case(name)));
+    }
     if let Some(cached) = cache.get(parent_uuid) {
         if let Some(f) = cached.iter().find(|f| f.plain_name.eq_ignore_ascii_case(name)) {
             return Ok(Some(f.clone()));
@@ -208,8 +255,12 @@ pub async fn find_folder_ci(
     Ok(found)
 }
 
-/// All EXISTS subfiles of a folder, following pagination.
+/// All EXISTS subfiles of a folder, following pagination. Always empty for a
+/// virtual (`//`/`//backups`) folder — those only ever have subfolders.
 pub async fn list_files(api: &DriveApi, token: &str, folder_uuid: &str) -> Result<Vec<FileItem>> {
+    if is_virtual(folder_uuid) {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
     let mut offset: u32 = 0;
     loop {
@@ -239,6 +290,9 @@ pub async fn list_files_cached(
     folder_uuid: &str,
     cache: &FolderCache,
 ) -> Result<Vec<FileItem>> {
+    if is_virtual(folder_uuid) {
+        return Ok(Vec::new());
+    }
     if let Some(hit) = cache.get_files(folder_uuid) {
         return Ok(hit);
     }
@@ -259,6 +313,9 @@ pub async fn find_file(
     name: &str,
     cache: &FolderCache,
 ) -> Result<Option<FileItem>> {
+    if is_virtual(parent_uuid) {
+        return Ok(None);
+    }
     if let Some(cached) = cache.get_files(parent_uuid) {
         if let Some(f) = cached.iter().find(|f| f.display_name() == name) {
             return Ok(Some(f.clone()));
@@ -283,6 +340,9 @@ pub async fn find_file_ci(
     name: &str,
     cache: &FolderCache,
 ) -> Result<Option<FileItem>> {
+    if is_virtual(parent_uuid) {
+        return Ok(None);
+    }
     if let Some(cached) = cache.get_files(parent_uuid) {
         if let Some(f) = cached.iter().find(|f| f.display_name().eq_ignore_ascii_case(name)) {
             return Ok(Some(f.clone()));

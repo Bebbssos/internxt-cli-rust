@@ -248,6 +248,147 @@ pub async fn resolve_path(
     walk_components(api, token, root, &comps, expect, display).await
 }
 
+/// Sentinel `uuid` for `//` smuggled through every serve backend's ordinary
+/// `String` uuid field (inode tables, handle maps, ...) so none of them need
+/// a parallel virtual-aware type — only `serve::tree` decodes it, right
+/// before it would otherwise feed the string to a real API call. Encodes the
+/// real account/workspace root uuid so the sentinel alone is enough to
+/// produce a real `drive` child. A leading NUL makes collision with a real
+/// uuid or plainName impossible.
+const VIRTUAL_ROOT_PREFIX: &str = "\0virtual-root:";
+/// Sentinel `uuid` for `//backups` — self-sufficient (its children, backup
+/// devices, are looked up by account, not by anything embedded in the
+/// string), so unlike `VIRTUAL_ROOT_PREFIX` this needs no payload.
+pub const VIRTUAL_BACKUPS_UUID: &str = "\0virtual-backups";
+
+/// Encode `real_root` (the account/workspace root) into a `//`-sentinel uuid.
+pub fn encode_virtual_root(real_root: &str) -> String {
+    format!("{VIRTUAL_ROOT_PREFIX}{real_root}")
+}
+
+/// `Some(real_root)` when `uuid` is a `//`-sentinel from [`encode_virtual_root`].
+pub fn decode_virtual_root(uuid: &str) -> Option<&str> {
+    uuid.strip_prefix(VIRTUAL_ROOT_PREFIX)
+}
+
+/// A synthetic (non-real, no Drive uuid) grouping folder. Only reachable via
+/// [`resolve_path_or_virtual`] — every other path-resolving entry point
+/// (`resolve_path`, `resolve_opt`, ...) keeps hard-erroring on `//` and
+/// `//backups` bare, since move/mkdir/compare/upload-destination/etc. have
+/// nothing sensible to do with a grouping that isn't a real folder.
+#[derive(Clone, Debug)]
+pub enum VirtualNode {
+    /// `//` — children: `drive` (the given root) and, personal accounts
+    /// only, `backups`.
+    Root,
+    /// `//backups` — children: one per backup device.
+    BackupsRoot,
+}
+
+/// Either a real, uuid-backed resolution or a synthetic grouping.
+pub enum PathTarget {
+    Real(Resolved),
+    Virtual(VirtualNode),
+}
+
+/// One child of a [`VirtualNode`]: either a real folder (`uuid` usable
+/// anywhere a Drive folder id is), or another, nested virtual grouping.
+pub enum VirtualEntry {
+    Real { name: String, uuid: String },
+    Nested { name: String, node: VirtualNode },
+}
+
+/// `Some` when `path` is exactly (after trimming) `//` or `//backups` — the
+/// two virtual groupings — decided without any API call. `None` otherwise,
+/// including a real `//backups/<device>` path (that resolves normally).
+pub fn virtual_node_for(path: Option<&str>) -> Option<VirtualNode> {
+    match path.map(str::trim) {
+        Some("//") => Some(VirtualNode::Root),
+        Some("//backups") => Some(VirtualNode::BackupsRoot),
+        _ => None,
+    }
+}
+
+/// List the immediate children of a virtual node — one level, like a normal
+/// folder listing (a `Nested` entry is shown but not expanded; the caller
+/// lists it again to go further, same as any other folder).
+pub async fn virtual_entries(api: &DriveApi, token: &str, root: &str, node: &VirtualNode) -> Result<Vec<VirtualEntry>> {
+    match node {
+        VirtualNode::Root => {
+            let mut out = vec![VirtualEntry::Real { name: "drive".to_string(), uuid: root.to_string() }];
+            if !api.is_workspace() {
+                out.push(VirtualEntry::Nested { name: "backups".to_string(), node: VirtualNode::BackupsRoot });
+            }
+            Ok(out)
+        }
+        VirtualNode::BackupsRoot => {
+            if api.is_workspace() {
+                return Err(anyhow!("Backups are personal-account only; not available in an active workspace"));
+            }
+            let devices = fetch_backup_devices(api, token).await?;
+            Ok(devices
+                .iter()
+                .map(|d| VirtualEntry::Real { name: str_field(d, "plainName"), uuid: str_field(d, "uuid") })
+                .collect())
+        }
+    }
+}
+
+/// Fully flatten a virtual node into `(local-subdir, uuid)` leaf pairs,
+/// recursing through nested virtual groupings — for operations that
+/// materialize a whole tree (download, sync) rather than list one level.
+/// Nesting only ever goes one level deep today (`Root` -> `BackupsRoot`), so
+/// this doesn't need to recurse past a `Nested` entry's own children.
+pub async fn flatten_virtual(api: &DriveApi, token: &str, root: &str, node: &VirtualNode) -> Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    for entry in virtual_entries(api, token, root, node).await? {
+        match entry {
+            VirtualEntry::Real { name, uuid } => out.push((name, uuid)),
+            VirtualEntry::Nested { name, node: nested } => {
+                for inner in virtual_entries(api, token, root, &nested).await? {
+                    if let VirtualEntry::Real { name: inner_name, uuid } = inner {
+                        out.push((format!("{name}/{inner_name}"), uuid));
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Like [`resolve_path`], but a bare `//` or `//backups` resolves to a
+/// [`VirtualNode`] instead of erroring. Only for callers that can sensibly
+/// act on a synthetic grouping (`list`, `download`, `sync down`, `serve`);
+/// everything else should keep using `resolve_path`/`resolve_opt` so it
+/// keeps hard-erroring there.
+pub async fn resolve_path_or_virtual(
+    api: &DriveApi,
+    token: &str,
+    root: &str,
+    path: &str,
+    expect: Expect,
+) -> Result<PathTarget> {
+    if let Some(rest) = path.strip_prefix("//") {
+        let comps = components(rest);
+        if comps.is_empty() {
+            if expect == Expect::File {
+                return Err(anyhow!("'//' is a virtual folder, not a file"));
+            }
+            return Ok(PathTarget::Virtual(VirtualNode::Root));
+        }
+        if comps.len() == 1 && comps[0] == "backups" {
+            if expect == Expect::File {
+                return Err(anyhow!("'//backups' is a virtual folder, not a file"));
+            }
+            if api.is_workspace() {
+                return Err(anyhow!("Backups are personal-account only; not available in an active workspace"));
+            }
+            return Ok(PathTarget::Virtual(VirtualNode::BackupsRoot));
+        }
+    }
+    resolve_path(api, token, root, path, expect).await.map(PathTarget::Real)
+}
+
 /// Build a `/a/b` folder path from an ancestors array (target first → root last):
 /// drop the root entry, take `plainName`s, reverse to root-first order.
 fn folder_path_from_ancestors(anc: &Value, root: &str) -> String {

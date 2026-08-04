@@ -279,9 +279,15 @@ enum Commands {
 
         // ---- shared ----
         /// Drive folder uuid to expose as the root of every backend. Omit for
-        /// the account / workspace root.
+        /// the account / workspace root. Mutually exclusive with --path.
         #[arg(short = 'i', long)]
         folder_uuid: Option<String>,
+        /// Drive path to expose as the root of every backend, alternative to
+        /// --folder-uuid. Also accepts the virtual `//` (drive + backups) and
+        /// `//backups` (backup devices) groupings — read-only: writes under
+        /// either are rejected on every backend.
+        #[arg(short = 'p', long)]
+        path: Option<String>,
         /// Cache folder listings for this many seconds (also the FUSE kernel
         /// attr/entry TTL). Shared by all backends. Matches rclone's own
         /// `--dir-cache-time` default (300s/5min): a short TTL can expire
@@ -454,9 +460,16 @@ enum Commands {
         /// letter like `X:` or a directory on Windows.
         #[arg(value_name = "MOUNTPOINT")]
         mountpoint: String,
-        /// Drive folder uuid to expose as the mount root. Omit for the drive root.
+        /// Drive folder uuid to expose as the mount root. Omit for the drive
+        /// root. Mutually exclusive with --path.
         #[arg(short = 'i', long)]
         folder_uuid: Option<String>,
+        /// Drive path to expose as the mount root, alternative to
+        /// --folder-uuid. Also accepts the virtual `//` (drive + backups) and
+        /// `//backups` (backup devices) groupings — read-only: writes under
+        /// either are rejected.
+        #[arg(short = 'p', long)]
+        path: Option<String>,
         /// Cache folder listings + kernel attributes for this many seconds.
         /// Matches rclone's own `--dir-cache-time` default (300s/5min): a
         /// short TTL can expire mid-traversal on a deep path or a folder
@@ -1415,6 +1428,35 @@ async fn do_download_folder(args: DownloadFolderArgs) -> Result<()> {
     .await
 }
 
+/// Resolve `mount`/`serve`'s `--folder-uuid`/`--path` pair into the single
+/// `ServeConfig::folder_uuid` slot every backend already reads. `--path`
+/// covers real Drive paths (unchanged: `--folder-uuid` is still the faster,
+/// no-lookup option) and the `//`/`//backups` virtual groupings, encoded as
+/// a sentinel string via `paths::encode_virtual_root`/`VIRTUAL_BACKUPS_UUID`
+/// so nothing downstream (any backend's inode/handle table, the shared
+/// `fetch_folder_updated_at`) needs to change — they just carry an opaque
+/// `String` they already carried.
+#[cfg(any(feature = "webdav", feature = "fuse", feature = "smb", feature = "nfs", feature = "sftp"))]
+async fn resolve_serve_root(folder_uuid: Option<String>, path: Option<String>) -> Result<Option<String>> {
+    if folder_uuid.is_some() && path.is_some() {
+        return Err(anyhow::anyhow!("Provide either --folder-uuid or --path, not both"));
+    }
+    let Some(path) = path.filter(|p| !p.trim().is_empty()) else {
+        return Ok(folder_uuid);
+    };
+    let creds = auth::get_auth_details().await?;
+    let api = internxt_core::api::DriveApi::for_credentials(&creds);
+    match paths::resolve_path_or_virtual(&api, &creds.token, creds.root_folder(), &path, paths::Expect::Folder).await? {
+        paths::PathTarget::Real(r) => Ok(Some(r.uuid)),
+        paths::PathTarget::Virtual(paths::VirtualNode::Root) => {
+            Ok(Some(paths::encode_virtual_root(creds.root_folder())))
+        }
+        paths::PathTarget::Virtual(paths::VirtualNode::BackupsRoot) => {
+            Ok(Some(paths::VIRTUAL_BACKUPS_UUID.to_string()))
+        }
+    }
+}
+
 async fn do_backups_devices_create(args: BackupsDevicesCreateArgs) -> Result<()> {
     let name = required_or_prompt(args.name, "name", "What is the name of the new device? ")?;
     backups::devices_create(&name).await
@@ -1725,6 +1767,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Serve {
             protocols,
             folder_uuid,
+            path,
             cache_ttl,
             no_cache,
             recent_window,
@@ -1902,7 +1945,7 @@ async fn run(cli: Cli) -> Result<()> {
 
             let config = serve::run::ServeConfig {
                 protocols,
-                folder_uuid,
+                folder_uuid: resolve_serve_root(folder_uuid, path).await?,
                 cache_ttl,
                 max_concurrent_uploads,
                 upload_limit: limit,
@@ -1923,6 +1966,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Mount {
             mountpoint,
             folder_uuid,
+            path,
             cache_ttl,
             no_cache,
             recent_window,
@@ -1950,7 +1994,7 @@ async fn run(cli: Cli) -> Result<()> {
             };
             let config = serve::run::ServeConfig {
                 protocols: vec![serve::run::Protocol::Fuse],
-                folder_uuid,
+                folder_uuid: resolve_serve_root(folder_uuid, path).await?,
                 cache_ttl,
                 max_concurrent_uploads,
                 upload_limit: limit,

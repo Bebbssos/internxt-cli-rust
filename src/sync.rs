@@ -680,6 +680,22 @@ pub async fn sync_down(
     if root.exists() && !root.is_dir() {
         return Err(anyhow!("Not a directory: {local}"));
     }
+
+    // `//` / `//backups`: mirror each real child into its own local subdir
+    // (`Drive/`, `Backups/<device>/`) via a recursive call per leaf, same
+    // delete/dry-run mode throughout. Depth is always exactly 1 (a leaf's
+    // own `remote_path` is never virtual), boxed only because `async fn`
+    // can't self-recurse unboxed.
+    if let Some(node) = crate::paths::virtual_node_for(remote_path) {
+        let api = DriveApi::for_credentials(&creds);
+        let leaves = crate::paths::flatten_virtual(&api, &creds.token, creds.root_folder(), &node).await?;
+        for (subdir, uuid) in leaves {
+            let local_subdir = root.join(&subdir);
+            Box::pin(sync_down(&local_subdir.display().to_string(), Some(&uuid), None, delete, dry_run)).await?;
+        }
+        return Ok(());
+    }
+
     let remote_uuid = {
         let api = DriveApi::for_credentials(&creds);
         crate::paths::resolve_opt(
@@ -864,6 +880,20 @@ pub async fn download_folder(
 ) -> Result<()> {
     let creds = auth::get_auth_details().await?;
     let api = DriveApi::for_credentials(&creds);
+    let dir = directory.filter(|d| !d.trim().is_empty()).unwrap_or(".");
+
+    // `//` / `//backups`: no single folder to download — fan out into one
+    // `download_one_folder` per real child, each into its own subdir
+    // (`Drive/`, `Backups/<device>/`), reusing the same single-folder path
+    // (and `sync_down`'s tree diff) for each.
+    if let Some(node) = crate::paths::virtual_node_for(path) {
+        let leaves = crate::paths::flatten_virtual(&api, &creds.token, creds.root_folder(), &node).await?;
+        for (subdir, uuid) in leaves {
+            download_one_folder(&uuid, &Path::new(dir).join(&subdir), overwrite).await?;
+        }
+        return Ok(());
+    }
+
     let uuid = crate::paths::resolve_opt(
         &api,
         &creds.token,
@@ -883,9 +913,13 @@ pub async fn download_folder(
         .map(str::to_string)
         .unwrap_or_else(|| uuid.clone());
 
-    let dir = directory.filter(|d| !d.trim().is_empty()).unwrap_or(".");
-    let dest = Path::new(dir).join(&name);
-    let non_empty = std::fs::read_dir(&dest).map(|mut d| d.next().is_some()).unwrap_or(false);
+    download_one_folder(&uuid, &Path::new(dir).join(&name), overwrite).await
+}
+
+/// Download one remote folder (by uuid) into `dest`, refusing to clobber a
+/// non-empty existing directory unless `overwrite` is set.
+async fn download_one_folder(uuid: &str, dest: &Path, overwrite: bool) -> Result<()> {
+    let non_empty = std::fs::read_dir(dest).map(|mut d| d.next().is_some()).unwrap_or(false);
     if non_empty && !overwrite {
         return Err(anyhow!(
             "Folder already exists, use --overwrite to overwrite: {}",
@@ -893,7 +927,7 @@ pub async fn download_folder(
         ));
     }
 
-    sync_down(&dest.display().to_string(), Some(&uuid), None, None, false).await
+    sync_down(&dest.display().to_string(), Some(uuid), None, None, false).await
 }
 
 /// Download + decrypt one remote file to `dest` via a temp sibling + atomic rename.

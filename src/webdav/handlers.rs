@@ -19,6 +19,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use super::resource::{self, DriveItem, FolderItem, Resource};
 use super::xml;
 use super::{log, now_rfc3339, status_response, AppError, Ctx};
+use crate::serve::tree;
 use internxt_core::api::DriveApi;
 
 /// Split a filename into (stem, extension-without-dot).
@@ -369,6 +370,9 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         Some(p) => p,
         None => create_parents(ctx, &api, token, parent_components).await?,
     };
+    if tree::is_virtual(&parent.uuid) {
+        return Err(AppError::forbidden("Cannot write into a virtual (`//`/`//backups`) folder"));
+    }
 
     // WebDAV PUT replaces an existing file; error on a same-named folder.
     let existing = resource::resolve_item(
@@ -559,6 +563,9 @@ pub async fn mkcol(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
         Some(p) => p,
         None => create_parents(ctx, &api, token, parent_components).await?,
     };
+    if tree::is_virtual(&parent.uuid) {
+        return Err(AppError::forbidden("Cannot create a folder in a virtual (`//`/`//backups`) folder"));
+    }
 
     // RFC 4918: MKCOL on an existing resource must fail with 405. Some clients
     // (e.g. QNAP HBS) abort the whole backup job on a 2xx here (matches og).
@@ -620,6 +627,9 @@ async fn delete_or_trash(
     item: &DriveItem,
 ) -> Result<()> {
     let uuid = item.uuid();
+    if tree::is_virtual(uuid) {
+        return Err(anyhow!("Cannot delete a virtual (`//`/`//backups`) folder"));
+    }
     let type_str = if item.is_folder() { "folder" } else { "file" };
     if ctx.config.delete_permanently {
         if item.is_folder() {
@@ -665,6 +675,9 @@ pub async fn mv(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
             resource.url
         ))
     })?;
+    if tree::is_virtual(item.uuid()) {
+        return Err(AppError::forbidden("Cannot move/rename a virtual (`//`/`//backups`) folder"));
+    }
 
     let same_dir = resource.parent_path == dest.parent_path;
 
@@ -686,6 +699,9 @@ pub async fn mv(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
             Some(p) => p,
             None => create_parents(ctx, &api, token, dest_parent_components).await?,
         };
+        if tree::is_virtual(&dest_parent.uuid) {
+            return Err(AppError::forbidden("Cannot move into a virtual (`//`/`//backups`) folder"));
+        }
 
         match &item {
             DriveItem::Folder(f) => {
