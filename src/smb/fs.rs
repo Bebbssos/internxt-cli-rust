@@ -857,7 +857,7 @@ impl ShareBackend for DriveBackend {
             }
             // Missing: create it for create-class dispositions.
             if matches!(opts.intent, OpenIntent::Create | OpenIntent::OpenOrCreate) {
-                if self.inner.read_only {
+                if self.inner.read_only || tree::is_virtual(&parent.uuid) {
                     return Err(SmbError::AccessDenied);
                 }
                 let created = api
@@ -904,7 +904,7 @@ impl ShareBackend for DriveBackend {
                 if found_file.is_some() {
                     return Err(SmbError::Exists);
                 }
-                if self.inner.read_only {
+                if self.inner.read_only || tree::is_virtual(&parent.uuid) {
                     return Err(SmbError::AccessDenied);
                 }
                 self.open_write(&creds, &parent.uuid, &name, None, false).await
@@ -918,7 +918,7 @@ impl ShareBackend for DriveBackend {
                     }
                 }
                 None => {
-                    if self.inner.read_only {
+                    if self.inner.read_only || tree::is_virtual(&parent.uuid) {
                         return Err(SmbError::AccessDenied);
                     }
                     self.open_write(&creds, &parent.uuid, &name, None, false).await
@@ -926,13 +926,13 @@ impl ShareBackend for DriveBackend {
             },
             OpenIntent::Truncate => {
                 let f = found_file.ok_or(SmbError::NotFound)?;
-                if self.inner.read_only {
+                if self.inner.read_only || tree::is_virtual(&parent.uuid) {
                     return Err(SmbError::AccessDenied);
                 }
                 self.open_write(&creds, &parent.uuid, &name, Some(f), true).await
             }
             OpenIntent::OverwriteOrCreate => {
-                if self.inner.read_only {
+                if self.inner.read_only || tree::is_virtual(&parent.uuid) {
                     return Err(SmbError::AccessDenied);
                 }
                 self.open_write(&creds, &parent.uuid, &name, found_file, true).await
@@ -963,6 +963,9 @@ impl ShareBackend for DriveBackend {
         .await
         .map_err(to_smb)?
         .ok_or(SmbError::PathNotFound)?;
+        if tree::is_virtual(&parent.uuid) {
+            return Err(SmbError::AccessDenied);
+        }
 
         if let Some(f) = tree::find_file(&api, &creds.token, &parent.uuid, &name, &self.inner.cache)
             .await
@@ -1037,6 +1040,9 @@ impl ShareBackend for DriveBackend {
         .await
         .map_err(to_smb)?
         .ok_or(SmbError::PathNotFound)?;
+        if tree::is_virtual(&src_parent.uuid) || tree::is_virtual(&dst_parent.uuid) {
+            return Err(SmbError::AccessDenied);
+        }
 
         // Resolve the source item (file first, then folder).
         let src_file = tree::find_file(&api, &creds.token, &src_parent.uuid, &src_name, &self.inner.cache)
