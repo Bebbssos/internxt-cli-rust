@@ -1087,6 +1087,9 @@ impl NFSFileSystem for DriveNfs {
         }
         let name = fname_to_string(filename);
         let dir = self.inner.node(dirid).ok_or(nfsstat3::NFS3ERR_STALE)?;
+        if tree::is_virtual(&dir.uuid) {
+            return Err(nfsstat3::NFS3ERR_ROFS);
+        }
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
 
@@ -1132,6 +1135,9 @@ impl NFSFileSystem for DriveNfs {
         }
         let name = fname_to_string(filename);
         let dir = self.inner.node(dirid).ok_or(nfsstat3::NFS3ERR_STALE)?;
+        if tree::is_virtual(&dir.uuid) {
+            return Err(nfsstat3::NFS3ERR_ROFS);
+        }
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
         if tree::find_file(&api, &creds.token, &dir.uuid, &name, &self.inner.cache)
@@ -1170,6 +1176,9 @@ impl NFSFileSystem for DriveNfs {
         }
         let name = fname_to_string(dirname);
         let dir = self.inner.node(dirid).ok_or(nfsstat3::NFS3ERR_STALE)?;
+        if tree::is_virtual(&dir.uuid) {
+            return Err(nfsstat3::NFS3ERR_ROFS);
+        }
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
         let existing = tree::find_folder(&api, &creds.token, &dir.uuid, &name, &self.inner.cache)
@@ -1212,6 +1221,9 @@ impl NFSFileSystem for DriveNfs {
         }
         let name = fname_to_string(filename);
         let dir = self.inner.node(dirid).ok_or(nfsstat3::NFS3ERR_STALE)?;
+        if tree::is_virtual(&dir.uuid) {
+            return Err(nfsstat3::NFS3ERR_ROFS);
+        }
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
 
@@ -1263,6 +1275,9 @@ impl NFSFileSystem for DriveNfs {
         let dst_name = fname_to_string(to_filename);
         let src_dir = self.inner.node(from_dirid).ok_or(nfsstat3::NFS3ERR_STALE)?;
         let dst_dir = self.inner.node(to_dirid).ok_or(nfsstat3::NFS3ERR_STALE)?;
+        if tree::is_virtual(&src_dir.uuid) || tree::is_virtual(&dst_dir.uuid) {
+            return Err(nfsstat3::NFS3ERR_ROFS);
+        }
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
 

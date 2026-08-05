@@ -128,6 +128,9 @@ impl AppError {
     pub fn payload_too_large(msg: impl Into<String>) -> Self {
         Self::new(StatusCode::PAYLOAD_TOO_LARGE, msg)
     }
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, msg)
+    }
 }
 
 /// Any internal error (network, API, IO) becomes a 500.

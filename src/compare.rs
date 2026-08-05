@@ -332,6 +332,34 @@ pub async fn compare_folder(
     if !md.is_dir() {
         return Err(anyhow!("Not a directory: {local}"));
     }
+
+    // `//` / `//backups`: compare each real child against its own local
+    // subdir (`drive/`, `backups/<device>/`), same fan-out as `sync down`/
+    // `download folder`, then report every leaf's diffs together — a plain
+    // per-leaf `compare_folder` call would `finish()`/exit after the first
+    // leaf instead of covering the whole virtual tree, so the diffing core
+    // is factored out into `diff_one_folder` (no `finish`/exit) instead.
+    if let Some(node) = crate::paths::virtual_node_for(path) {
+        let leaves = crate::paths::flatten_virtual(&api, &creds.token, creds.root_folder(), &node).await?;
+        let mut diffs = Vec::new();
+        for (subdir, uuid) in leaves {
+            let mut sub_diffs =
+                diff_one_folder(&root.join(&subdir), &uuid, metadata_only, check_modified, list_all, &creds, &api)
+                    .await?;
+            // Prefix with the leaf so diffs from different children (e.g.
+            // `drive` vs. a device) stay distinguishable once merged.
+            for d in &mut sub_diffs {
+                d.path = if d.path.is_empty() { subdir.clone() } else { format!("{subdir}/{}", d.path) };
+            }
+            let found = !sub_diffs.is_empty();
+            diffs.extend(sub_diffs);
+            if !list_all && found {
+                break;
+            }
+        }
+        return finish(diffs);
+    }
+
     let remote_uuid = crate::paths::resolve_opt(
         &api,
         &creds.token,
@@ -343,12 +371,29 @@ pub async fn compare_folder(
     .await?
     .unwrap_or_else(|| creds.root_folder().to_string());
 
+    let diffs = diff_one_folder(root, &remote_uuid, metadata_only, check_modified, list_all, &creds, &api).await?;
+    finish(diffs)
+}
+
+/// Diff one local folder against one remote folder, returning every
+/// difference found (or just the first one, when `!list_all`) — the core of
+/// `compare_folder`, minus the `finish`/exit call, so it can be run once per
+/// leaf when comparing against a virtual (`//`/`//backups`) grouping.
+async fn diff_one_folder(
+    root: &Path,
+    remote_uuid: &str,
+    metadata_only: bool,
+    check_modified: bool,
+    list_all: bool,
+    creds: &Credentials,
+    api: &DriveApi,
+) -> Result<Vec<Difference>> {
     let mut local_files: HashMap<String, sync::LocalFile> = HashMap::new();
     let mut local_dirs: Vec<String> = Vec::new();
     sync::walk_local(root, root, "", false, &mut local_files, &mut local_dirs);
 
     output::status("Scanning remote tree...");
-    let (remote_files, remote_dirs) = sync::build_remote_tree(&api, &creds.token, &remote_uuid).await?;
+    let (remote_files, remote_dirs) = sync::build_remote_tree(api, &creds.token, remote_uuid).await?;
 
     let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
     let mut diffs: Vec<Difference> = Vec::new();
@@ -370,7 +415,7 @@ pub async fn compare_folder(
                 detail: "folder exists locally but not on Drive".to_string(),
             });
             if !list_all {
-                return finish(diffs);
+                return Ok(diffs);
             }
         } else if in_remote && !in_local {
             diffs.push(Difference {
@@ -379,7 +424,7 @@ pub async fn compare_folder(
                 detail: "folder exists on Drive but not locally".to_string(),
             });
             if !list_all {
-                return finish(diffs);
+                return Ok(diffs);
             }
         }
     }
@@ -397,7 +442,7 @@ pub async fn compare_folder(
                     detail: "file exists locally but not on Drive".to_string(),
                 });
                 if !list_all {
-                    return finish(diffs);
+                    return Ok(diffs);
                 }
             }
             (None, Some(_)) => {
@@ -407,7 +452,7 @@ pub async fn compare_folder(
                     detail: "file exists on Drive but not locally".to_string(),
                 });
                 if !list_all {
-                    return finish(diffs);
+                    return Ok(diffs);
                 }
             }
             (Some(lf), Some(rf)) => {
@@ -424,7 +469,7 @@ pub async fn compare_folder(
                     None
                 };
                 let reasons =
-                    compare_one_file(lf, rf, metadata_only, check_modified, &net, &creds, pb.as_ref())
+                    compare_one_file(lf, rf, metadata_only, check_modified, &net, creds, pb.as_ref())
                         .await?;
                 if let Some(pb) = &pb {
                     pb.finish_and_clear();
@@ -434,7 +479,7 @@ pub async fn compare_folder(
                         diffs.push(Difference { kind: "file", path: rel.clone(), detail });
                     }
                     if !list_all {
-                        return finish(diffs);
+                        return Ok(diffs);
                     }
                 }
             }
@@ -442,5 +487,5 @@ pub async fn compare_folder(
         }
     }
 
-    finish(diffs)
+    Ok(diffs)
 }

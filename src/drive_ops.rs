@@ -277,6 +277,15 @@ pub async fn usage() -> Result<()> {
 pub async fn list(id: Option<&str>, path: Option<&str>, extended: bool) -> Result<()> {
     let creds = auth::get_auth_details().await?;
     let api = DriveApi::for_credentials(&creds);
+
+    // `//` and `//backups` are virtual groupings (no real uuid) — checked
+    // as a plain string match before the real resolver runs, so every other
+    // `--path` still goes through the unchanged `resolve_opt` below.
+    if let Some(node) = paths::virtual_node_for(path) {
+        let entries = paths::virtual_entries(&api, &creds.token, creds.root_folder(), &node).await?;
+        return render_virtual_list(&entries, extended);
+    }
+
     let resolved =
         paths::resolve_opt(&api, &creds.token, creds.root_folder(), id, path, Expect::Folder).await?;
     let folder_uuid = fallback_root(resolved.as_deref(), creds.root_folder());
@@ -353,6 +362,46 @@ async fn collect_all(
 }
 
 /// Render a list/trash-list table for the given folders + files.
+/// Render a virtual grouping's children (`//`, `//backups`) — same shape as
+/// `render_items`, but entries come from `paths::VirtualEntry`, not the API
+/// directly, and a nested grouping has no uuid to show.
+fn render_virtual_list(entries: &[paths::VirtualEntry], extended: bool) -> Result<()> {
+    if output::is_json() {
+        let list: Vec<Value> = entries
+            .iter()
+            .map(|e| match e {
+                paths::VirtualEntry::Real { name, uuid } => {
+                    json!({ "type": "folder", "name": name, "id": uuid })
+                }
+                paths::VirtualEntry::Nested { name, .. } => {
+                    json!({ "type": "folder", "name": name, "id": null, "virtual": true })
+                }
+            })
+            .collect();
+        output::emit("", json!({ "success": true, "list": list }));
+        return Ok(());
+    }
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for e in entries {
+        let (name, id) = match e {
+            paths::VirtualEntry::Real { name, uuid } => (name.clone(), uuid.clone()),
+            paths::VirtualEntry::Nested { name, .. } => (name.clone(), "-".to_string()),
+        };
+        let mut row = vec!["folder".to_string(), name, id];
+        if extended {
+            row.push("-".to_string());
+            row.push("-".to_string());
+            row.push("-".to_string());
+        }
+        rows.push(row);
+    }
+    let headers: Vec<&str> =
+        if extended { vec!["Type", "Name", "Id", "Created", "Modified", "Size"] } else { vec!["Type", "Name", "Id"] };
+    print_table(&headers, &rows);
+    Ok(())
+}
+
 fn render_items(folders: &[Value], files: &[Value], extended: bool) {
     let mut rows: Vec<Vec<String>> = Vec::new();
     for f in folders {

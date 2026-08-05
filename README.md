@@ -26,6 +26,8 @@ CLI front-end built on top of it.
 - [Install](#install) · [Build](#build) · [Features](#features)
 - [FUSE/WinFSP mount support](#fusewinfsp-mount-support)
 - [Global flags](#global-flags)
+- [Path syntax](#path-syntax) — `//drive`, `//backups/<device>`, and the
+  virtual `//` / `//backups` groupings
 - [Commands](#commands) — the full command table
 - [Command reference](#command-reference) — per-command flags and JSON output
 - [Upload size limit](#upload-size-limit)
@@ -154,6 +156,33 @@ IDs are Drive UUIDs. Most commands that take an id also accept a `--path`
 both. Where a destination/parent folder id is optional, leaving it empty
 targets your root folder (or workspace root, if a workspace is active).
 
+## Path syntax
+
+A normal Drive path looks like `/Documents/report.pdf` (the leading `/`
+is optional — `Documents/report.pdf` means the same thing).
+
+A path starting with `//` is a special root with two entries: `drive` (your
+normal Drive root) and `backups` (your [backup devices](#backups-devices-list)).
+Walk into either like any other folder:
+
+- `//drive/Documents/report.pdf` — same as `/Documents/report.pdf`.
+- `//backups/<device>/Documents/report.pdf` — walks into a specific backup
+  device's folder tree. `<device>` matches by uuid first, then
+  case-insensitively by name. `id-from-path`/`path-from-id` (`get-id`/
+  `get-path`) understand this in both directions.
+
+`//` and `//backups` **on their own** (no further path) are virtual,
+**read-only** groupings with no real Drive id — `//` lists `drive`/`backups`,
+`//backups` lists your devices. Supported by [`list`](#list),
+[`download folder`](#download-folder),
+[`compare folder`](#compare-file--compare-folder),
+[`sync down`](#sync-up--sync-down), [`mount`](#mount), and
+[`serve`](#serve), fanning out into one subfolder per real child (`drive/`,
+`backups/<device>/`). Anything that writes (`move`, `create folder`,
+`sync up`, an upload destination, …) errors on them — there's no real
+folder to write to. A real folder reached *through* one, e.g.
+`//backups/<device>/Documents`, is a normal, fully writable Drive folder.
+
 ## Commands
 
 The **space-separated** form (`ixr upload file`) is the primary syntax. Every
@@ -209,6 +238,14 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | **[`compare`](#compare-file--compare-folder)** | Compare local vs. remote | | New — no official equivalent. |
 | &nbsp;&nbsp;[`compare file`](#compare-file--compare-folder) | Compare a local file against a remote file. | — | |
 | &nbsp;&nbsp;[`compare folder`](#compare-file--compare-folder) | Recursively compare a local folder against a remote folder. | — | |
+| **[`backups`](#backups-devices-list)** | Manage backup devices; browse/download what's backed up | | New — no official equivalent (backups are desktop-app-only there). |
+| &nbsp;&nbsp;[`backups devices list`](#backups-devices-list) | List your backup devices. | — | |
+| &nbsp;&nbsp;[`backups devices create`](#backups-devices-create) | Create a backup device. | — | |
+| &nbsp;&nbsp;[`backups devices rename`](#backups-devices-rename) | Rename a backup device. | — | |
+| &nbsp;&nbsp;[`backups devices delete`](#backups-devices-delete) | Delete a backup device and everything backed up to it. | — | **Cannot be undone** — backups have no trash. |
+| &nbsp;&nbsp;[`backups list`](#backups-list--backups-download--backups-get-id) | List what's backed up to a device (or a subfolder inside it). | — | |
+| &nbsp;&nbsp;[`backups download`](#backups-list--backups-download--backups-get-id) | Download everything backed up to a device (or a subfolder). | — | |
+| &nbsp;&nbsp;[`backups get-id`](#backups-list--backups-download--backups-get-id) | Print the uuid of a device or an item inside it. | — | |
 | [`serve`](#serve) | Serve Drive over WebDAV/FUSE/SMB/NFS/SFTP (foreground). | — | Needs ≥1 of `webdav`,`fuse`,`smb`,`nfs`,`sftp`. WebDAV mirrors official; rest new. |
 | [`mount`](#mount) | Mount Drive as a local FS via FUSE/WinFSP. | — | New; needs `fuse` (default on). |
 | [`id-from-path`](#id-from-path) | Print the uuid at a Drive path. | `get-id` | New — no official equivalent. |
@@ -729,7 +766,11 @@ at the first difference and reporting its byte offset.
 diffs file-by-file — missing files/folders on either side count as
 differences too. By default it **stops at the first difference found**
 (file or folder, either side); pass `--list` to keep going and report every
-difference instead.
+difference instead. `--path` also accepts the virtual `//`/`//backups`
+[groupings](#path-syntax) — each real child is compared against its own
+local subfolder (`drive/`, `backups/<device>/`), with diffs from every
+child reported together (`compare file` doesn't accept them: there's no
+single file to compare a grouping against).
 
 `--metadata-only` skips content streaming entirely on both commands — only
 size (and modification time, with `--check-modified`) is checked.
@@ -769,6 +810,104 @@ JSON output:
 }
 ```
 
+### `backups devices list`
+
+New — no official equivalent (backups are a desktop-app-only feature there;
+the desktop app represents each backed-up device as a special Drive folder —
+"device as folder" — and `ixr` ports device management plus browsing/
+downloading what's already backed up, not the continuous watch-local-
+folders-and-upload daemon itself, which has no background-service model in
+a CLI). Lists your backup devices.
+
+Flags: `-e/--extended` (created-at + active/removed status in the
+human-readable view), `--all` (include removed devices too, hidden by
+default).
+
+```sh
+ixr backups devices list
+ixr backups devices list --all --json
+```
+
+JSON output: `{ "success": true, "list": { "devices": [...] } }` (always the
+full device objects, regardless of `--extended`).
+
+### `backups devices create`
+
+New — no official equivalent. Registers a new backup device (a
+`POST /backup/deviceAsFolder` call — the same one the desktop app makes the
+first time it configures backups on a machine). Useful for a headless/
+scripted `ixr` upload that wants to show up as a device in the desktop/
+mobile Backups UI without ever running the desktop app: create the device
+once, then `upload folder`/`sync up` into it like any other Drive folder.
+
+Flags: `-n/--name <NAME>` (required — prompts if omitted, unless
+`--json`/`-x`).
+
+```sh
+ixr backups devices create -n "CI Runner"
+```
+
+JSON output: `{ "success": true, "device": <created device> }`.
+
+### `backups devices rename`
+
+New — no official equivalent. Renames a backup device.
+
+Flags: `<DEVICE>` (positional — id or name, see
+[`backups devices list`](#backups-devices-list)), `-n/--name <NAME>`
+(required — prompts if omitted, unless `--json`/`-x`).
+
+```sh
+ixr backups devices rename "My-Laptop" -n "Work-Laptop"
+```
+
+JSON output: `{ "success": true, "device": <updated device> }`.
+
+### `backups devices delete`
+
+New — no official equivalent. Deletes a backup device and everything backed
+up to it — **cannot be undone** (unlike Drive files/folders, backups have no
+trash to recover from). Prompts for confirmation unless `--force` (required
+in `--json`/non-interactive mode).
+
+Flags: `<DEVICE>` (positional — id or name), `-f/--force`.
+
+```sh
+ixr backups devices delete "Old-Laptop" --force
+```
+
+JSON output: `{ "success": true, "message": "Backup device '...' deleted." }`.
+
+### `backups list` / `backups download` / `backups get-id`
+
+New — no official equivalent. Thin, device-scoped wrappers around
+[`list`](#list) / [`download folder`](#download-folder) /
+[`id-from-path`](#id-from-path): `<DEVICE>` (positional — id or name, see
+[`backups devices list`](#backups-devices-list)) resolves to the device's
+Drive folder, and `-p/--path <PATH>` (optional on all three) walks a
+subfolder inside it — same effect as
+[`//backups/<device>/<path>`](#path-syntax) on the equivalent generic
+command, just without needing the device's uuid in hand first.
+
+Flags (`backups list`): `-p/--path <PATH>`, `-e/--extended`.
+
+Flags (`backups download`): `-p/--path <PATH>`, `-d/--directory <DIR>`
+(default: current dir), `-o/--overwrite`.
+
+Flags (`backups get-id`): `-p/--path <PATH>`.
+
+```sh
+ixr backups list "My-Laptop"                          # device root
+ixr backups list "My-Laptop" -p Documents/Reports -e
+ixr backups download "My-Laptop" -d ./restored
+ixr backups get-id "My-Laptop" -p Documents            # -> a uuid, for scripting
+ixr mount ~/laptop-backup --folder-uuid $(ixr backups get-id "My-Laptop")
+```
+
+JSON output: `backups list` → same shape as [`list`](#list); `backups
+download` → same shape as [`sync down`](#sync-up--sync-down)'s result
+object; `backups get-id` → `{ "success": true, "uuid": "...", "isFolder": ..., "type": "file"|"folder" }`.
+
 ### `serve`
 
 Runs one or more Drive backends in the **foreground** until Ctrl-C. Pass a
@@ -783,7 +922,13 @@ command instead. **FUSE, SMB, NFS and SFTP have no official equivalent** — the
 official CLI only serves WebDAV. `smb`, `nfs` and `sftp` are experimental and
 off by default (build with `--features smb`/`nfs`/`sftp`).
 
-Shared flags (bare): `-i/--folder-uuid <UUID>` (root to expose), `-d
+Shared flags (bare): `-i/--folder-uuid <UUID>` (root to expose; mutually
+exclusive with `-p/--path`), `-p/--path <PATH>` (root to expose, as a
+[Drive path](#path-syntax) instead of a uuid — also accepts the virtual `//`
+and `//backups` groupings, exposed **read-only** across every backend: `mkdir`/
+write/rename/delete anywhere directly under `//` or `//backups` is rejected,
+while a real folder reached *through* one, e.g. `//backups/My-Laptop/Documents`,
+is a normal, fully writable Drive folder), `-d
 /--delete-permanently` (hard-delete instead of trash), `--read-only`,
 `-v/--verbose` (log every per-op request across all backends), `--spool`
 (spool uploads to a temp file before uploading; FUSE always spools),
@@ -825,6 +970,7 @@ ixr serve fuse --fuse-mountpoint ~/drive
 ixr serve smb --smb-password secret                           # needs --features smb
 ixr serve webdav,fuse --fuse-mountpoint ~/drive                # both at once, shared cache/creds
 ixr serve webdav --read-only -i <folder-uuid>                  # read-only, rooted at a subfolder
+ixr serve webdav,fuse --fuse-mountpoint ~/all -p '//'           # browse Drive + all backup devices at once
 ```
 
 WebDAV supported methods: `OPTIONS`, `PROPFIND`, `GET`/`HEAD` (with `Range`),
@@ -854,16 +1000,21 @@ New — no official equivalent (the official CLI has no filesystem-mount mode).
 A thin wrapper over `serve fuse` where the shared flags use their bare names
 (no `fuse-` prefix).
 
-Flags: `-i/--folder-uuid <UUID>`, `--read-only`, `-d/--delete-permanently`,
-`--spool-dir <DIR>`, `--max-concurrent-uploads <N>`, `--cache-ttl <SECS>` /
-`--no-cache`, `--recent-window <BYTES>` (see [`serve`](#serve) above),
-`--allow-other` (Unix only — no WinFSP equivalent), `-v/--verbose`, plus the
-[upload-limit flags](#upload-size-limit).
+Flags: `-i/--folder-uuid <UUID>` (mutually exclusive with `-p/--path`),
+`-p/--path <PATH>` (root to mount, as a [Drive path](#path-syntax) instead
+of a uuid — also accepts the virtual `//`/`//backups` groupings, mounted
+**read-only**; see [`serve`](#serve) above for the exact rule), `--read-only`,
+`-d/--delete-permanently`, `--spool-dir <DIR>`, `--max-concurrent-uploads
+<N>`, `--cache-ttl <SECS>` / `--no-cache`, `--recent-window <BYTES>` (see
+[`serve`](#serve) above), `--allow-other` (Unix only — no WinFSP
+equivalent), `-v/--verbose`, plus the [upload-limit flags](#upload-size-limit).
 
 ```sh
 mkdir -p ~/drive && ixr mount ~/drive              # Ctrl-C to unmount (Unix)
 ixr mount X: --read-only                           # drive letter (Windows)
 ixr mount ~/drive -i <folder-uuid>                 # mount a subfolder as root
+ixr mount ~/backups -p '//backups'                 # browse every backup device at once
+ixr mount ~/laptop -p '//backups/My-Laptop'         # mount just one device
 ```
 
 See [FUSE/WinFSP mount support](#fusewinfsp-mount-support) for what each
@@ -874,12 +1025,15 @@ no partial-update API), replacing the old Drive entry.
 ### `id-from-path`
 
 Alias: `get-id`. New — no official equivalent. Prints the
-uuid of the Drive file/folder at a given path.
+uuid of the Drive file/folder at a given path. Understands the full
+[path syntax](#path-syntax), including `//backups/<device>/...` (the virtual
+bare `//`/`//backups` groupings excepted — those have no id of their own).
 
 Flags: `-p/--path <PATH>` (required).
 
 ```sh
 ixr id-from-path -p /Documents/report.pdf
+ixr id-from-path -p //backups/My-Laptop/Documents/report.pdf
 ```
 
 JSON output: `{ "success": true, "uuid": "...", "isFolder": false, "type": "file" }`.
@@ -887,7 +1041,9 @@ JSON output: `{ "success": true, "uuid": "...", "isFolder": false, "type": "file
 ### `path-from-id`
 
 Alias: `get-path`. New — no official equivalent. Prints the
-full Drive path of a file/folder given its uuid.
+full Drive path of a file/folder given its uuid. Prints
+`//backups/<device>/...` (see [path syntax](#path-syntax)) instead of a
+misleading root-relative path for anything living inside a backup device.
 
 Flags: `-i/--id <UUID>` (required).
 
@@ -1098,7 +1254,8 @@ Known differences:
   `accounts switch`, `download-folder`, `delete-file`/`delete-folder` (the
   official CLI has `delete permanently file|folder` but no plain trash-alias
   `delete file|folder`), `sync-up`, `sync-down`, `id-from-path`, `path-from-id`,
-  the `thumbnail` command family, `mount`, and the `fuse`/`smb`/`nfs`/`sftp`
+  the `thumbnail` command family, the `backups` command family (backups are a
+  desktop-app-only feature there), `mount`, and the `fuse`/`smb`/`nfs`/`sftp`
   `serve` backends (the official CLI only serves WebDAV, and only supports one
   logged-in account). See the [command reference](#command-reference) above
   for details on each.

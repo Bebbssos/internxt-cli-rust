@@ -1306,6 +1306,10 @@ impl Filesystem for InxtFs {
                 reply.error(Errno::ENOENT);
                 return;
             };
+            if tree::is_virtual(&pnode.uuid) {
+                reply.error(Errno::EROFS);
+                return;
+            }
             let creds = inner.creds();
             let (plain, ftype) = split_name(&name);
             let temp = temp_path(inner.config.spool_dir.as_deref());
@@ -1392,6 +1396,10 @@ impl Filesystem for InxtFs {
                 reply.error(Errno::ENOENT);
                 return;
             };
+            if tree::is_virtual(&pnode.uuid) {
+                reply.error(Errno::EROFS);
+                return;
+            }
             let creds = inner.creds();
             let api = DriveApi::for_credentials(&creds);
             // Reject if a folder of that name already exists.
@@ -1451,6 +1459,10 @@ impl Filesystem for InxtFs {
                 reply.error(Errno::ENOENT);
                 return;
             };
+            if tree::is_virtual(&pnode.uuid) {
+                reply.error(Errno::EROFS);
+                return;
+            }
             let creds = inner.creds();
             let api = DriveApi::for_credentials(&creds);
             let Some(f) = (match tree::find_file(&api, &creds.token, &pnode.uuid, &name, &inner.cache).await {
@@ -1504,6 +1516,10 @@ impl Filesystem for InxtFs {
                 reply.error(Errno::ENOENT);
                 return;
             };
+            if tree::is_virtual(&pnode.uuid) {
+                reply.error(Errno::EROFS);
+                return;
+            }
             let creds = inner.creds();
             let api = DriveApi::for_credentials(&creds);
             let Some(f) = (match tree::find_folder(&api, &creds.token, &pnode.uuid, &name, &inner.cache).await {
@@ -1571,6 +1587,10 @@ impl Filesystem for InxtFs {
                 reply.error(Errno::ENOENT);
                 return;
             };
+            if tree::is_virtual(&pnode.uuid) || tree::is_virtual(&np.uuid) {
+                reply.error(Errno::EROFS);
+                return;
+            }
             let creds = inner.creds();
             let api = DriveApi::for_credentials(&creds);
 

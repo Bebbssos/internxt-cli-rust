@@ -7,6 +7,15 @@
 //!
 //! Only *live* (non-trashed) items are reachable by path — the walk uses the
 //! same paginated `subfolders`/`subfiles` listings the rest of the CLI uses.
+//!
+//! A leading `//` escapes into an explicit namespace instead of the given
+//! root: `//backups/<device>/...` walks a backup device's folder (personal
+//! account only — see `backups.rs`) and `//drive/...` is an explicit alias
+//! for the default `/...` walk from the given root (mostly for symmetry with
+//! `//backups/`). A single leading `/` (or none) always means the given
+//! root, same as before. The reverse direction (`path_from_id`) prints
+//! `//backups/<device>/...` for anything found to live under a device, and
+//! plain `/...` otherwise — `//drive/` is input-only sugar, never emitted.
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -44,6 +53,40 @@ fn file_display_name(v: &Value) -> String {
         plain
     } else {
         format!("{plain}.{ftype}")
+    }
+}
+
+/// GET /backup/deviceAsFolder — the account's backup devices (personal only;
+/// callers must check `api.is_workspace()` first). Shared by the `//backups/`
+/// path escape here and by `backups.rs`'s own device commands.
+pub(crate) async fn fetch_backup_devices(api: &DriveApi, token: &str) -> Result<Vec<Value>> {
+    let resp = api.get_backup_devices(token).await?;
+    Ok(resp.as_array().cloned().unwrap_or_default())
+}
+
+/// Resolve a user-supplied device (uuid or name) against `devices`. Exact
+/// uuid match wins; otherwise a case-insensitive exact match on `plainName`
+/// (erroring on ambiguity).
+pub(crate) fn resolve_backup_device<'a>(devices: &'a [Value], needle: &str) -> Result<&'a Value> {
+    if let Some(d) = devices.iter().find(|d| str_field(d, "uuid") == needle) {
+        return Ok(d);
+    }
+    let matches: Vec<&Value> = devices
+        .iter()
+        .filter(|d| str_field(d, "plainName").eq_ignore_ascii_case(needle))
+        .collect();
+    match matches.len() {
+        0 => {
+            let available: Vec<String> = devices.iter().map(|d| str_field(d, "plainName")).collect();
+            Err(anyhow!(
+                "No backup device found matching '{needle}'. Available devices: {}",
+                if available.is_empty() { "(none)".to_string() } else { available.join(", ") }
+            ))
+        }
+        1 => Ok(matches[0]),
+        _ => Err(anyhow!(
+            "Multiple backup devices are named '{needle}'; use its id (from `backups devices list`) instead."
+        )),
     }
 }
 
@@ -100,18 +143,20 @@ pub struct Resolved {
     pub is_folder: bool,
 }
 
-/// Resolve `path` (relative to `root`) to a Drive item, walking the folder tree.
-pub async fn resolve_path(
+/// Walk pre-split `comps` from `root`. Shared by the default `/...` walk and
+/// the `//backups/<device>/...` walk (rooted at the device instead of the
+/// account/workspace root) — `display` is only used to phrase error messages.
+async fn walk_components(
     api: &DriveApi,
     token: &str,
     root: &str,
-    path: &str,
+    comps: &[String],
     expect: Expect,
+    display: &str,
 ) -> Result<Resolved> {
-    let comps = components(path);
     if comps.is_empty() {
         if expect == Expect::File {
-            return Err(anyhow!("Path '/' is the root folder, not a file"));
+            return Err(anyhow!("Path '{display}' is a folder, not a file"));
         }
         return Ok(Resolved {
             uuid: root.to_string(),
@@ -127,7 +172,7 @@ pub async fn resolve_path(
             current = str_field(f, "uuid");
             if i == last {
                 if expect == Expect::File {
-                    return Err(anyhow!("'{path}' is a folder, not a file"));
+                    return Err(anyhow!("'{display}' is a folder, not a file"));
                 }
                 return Ok(Resolved {
                     uuid: current,
@@ -147,9 +192,201 @@ pub async fn resolve_path(
             }
         }
         let what = if i == last { "item" } else { "folder" };
-        return Err(anyhow!("No such {what} '{comp}' at path: {path}"));
+        return Err(anyhow!("No such {what} '{comp}' at path: {display}"));
     }
     unreachable!()
+}
+
+/// Resolve `//backups/<device>/...rest` (the part after the leading `//`, so
+/// `rest` starts with `backups`) to a Drive item, rooted at the named
+/// device's folder. `//drive/...` is handled here too, as a plain alias for
+/// `root`.
+async fn resolve_namespaced_path(
+    api: &DriveApi,
+    token: &str,
+    root: &str,
+    rest: &str,
+    expect: Expect,
+) -> Result<Resolved> {
+    let comps = components(rest);
+    let display = format!("//{rest}");
+    match comps.first().map(String::as_str) {
+        Some("drive") => walk_components(api, token, root, &comps[1..], expect, &display).await,
+        Some("backups") => {
+            if comps.len() < 2 {
+                return Err(anyhow!("Specify a backup device: //backups/<device>[/path...]"));
+            }
+            if api.is_workspace() {
+                return Err(anyhow!("Backups are personal-account only; not available in an active workspace"));
+            }
+            let devices = fetch_backup_devices(api, token).await?;
+            let device = resolve_backup_device(&devices, &comps[1])?;
+            let device_uuid = str_field(device, "uuid");
+            walk_components(api, token, &device_uuid, &comps[2..], expect, &display).await
+        }
+        _ => Err(anyhow!(
+            "Unknown path escape '{display}': only '//backups/<device>/...' and '//drive/...' are supported"
+        )),
+    }
+}
+
+/// Resolve `path` (relative to `root`) to a Drive item, walking the folder
+/// tree. A leading `//` escapes into an explicit namespace instead — see the
+/// module doc.
+pub async fn resolve_path(
+    api: &DriveApi,
+    token: &str,
+    root: &str,
+    path: &str,
+    expect: Expect,
+) -> Result<Resolved> {
+    if let Some(rest) = path.strip_prefix("//") {
+        return resolve_namespaced_path(api, token, root, rest, expect).await;
+    }
+    let comps = components(path);
+    let display = if path.trim().is_empty() { "/" } else { path };
+    walk_components(api, token, root, &comps, expect, display).await
+}
+
+/// Sentinel `uuid` for `//` smuggled through every serve backend's ordinary
+/// `String` uuid field (inode tables, handle maps, ...) so none of them need
+/// a parallel virtual-aware type — only `serve::tree` decodes it, right
+/// before it would otherwise feed the string to a real API call. Encodes the
+/// real account/workspace root uuid so the sentinel alone is enough to
+/// produce a real `drive` child. A leading NUL makes collision with a real
+/// uuid or plainName impossible.
+const VIRTUAL_ROOT_PREFIX: &str = "\0virtual-root:";
+/// Sentinel `uuid` for `//backups` — self-sufficient (its children, backup
+/// devices, are looked up by account, not by anything embedded in the
+/// string), so unlike `VIRTUAL_ROOT_PREFIX` this needs no payload.
+pub const VIRTUAL_BACKUPS_UUID: &str = "\0virtual-backups";
+
+/// Encode `real_root` (the account/workspace root) into a `//`-sentinel uuid.
+pub fn encode_virtual_root(real_root: &str) -> String {
+    format!("{VIRTUAL_ROOT_PREFIX}{real_root}")
+}
+
+/// `Some(real_root)` when `uuid` is a `//`-sentinel from [`encode_virtual_root`].
+pub fn decode_virtual_root(uuid: &str) -> Option<&str> {
+    uuid.strip_prefix(VIRTUAL_ROOT_PREFIX)
+}
+
+/// A synthetic (non-real, no Drive uuid) grouping folder. Only reachable via
+/// [`resolve_path_or_virtual`] — every other path-resolving entry point
+/// (`resolve_path`, `resolve_opt`, ...) keeps hard-erroring on `//` and
+/// `//backups` bare, since move/mkdir/compare/upload-destination/etc. have
+/// nothing sensible to do with a grouping that isn't a real folder.
+#[derive(Clone, Debug)]
+pub enum VirtualNode {
+    /// `//` — children: `drive` (the given root) and, personal accounts
+    /// only, `backups`.
+    Root,
+    /// `//backups` — children: one per backup device.
+    BackupsRoot,
+}
+
+/// Either a real, uuid-backed resolution or a synthetic grouping.
+pub enum PathTarget {
+    Real(Resolved),
+    Virtual(VirtualNode),
+}
+
+/// One child of a [`VirtualNode`]: either a real folder (`uuid` usable
+/// anywhere a Drive folder id is), or another, nested virtual grouping.
+pub enum VirtualEntry {
+    Real { name: String, uuid: String },
+    Nested { name: String, node: VirtualNode },
+}
+
+/// `Some` when `path` is exactly (after trimming) `//` or `//backups` — the
+/// two virtual groupings — decided without any API call. `None` otherwise,
+/// including a real `//backups/<device>` path (that resolves normally).
+pub fn virtual_node_for(path: Option<&str>) -> Option<VirtualNode> {
+    match path.map(str::trim) {
+        Some("//") => Some(VirtualNode::Root),
+        Some("//backups") => Some(VirtualNode::BackupsRoot),
+        _ => None,
+    }
+}
+
+/// List the immediate children of a virtual node — one level, like a normal
+/// folder listing (a `Nested` entry is shown but not expanded; the caller
+/// lists it again to go further, same as any other folder).
+pub async fn virtual_entries(api: &DriveApi, token: &str, root: &str, node: &VirtualNode) -> Result<Vec<VirtualEntry>> {
+    match node {
+        VirtualNode::Root => {
+            let mut out = vec![VirtualEntry::Real { name: "drive".to_string(), uuid: root.to_string() }];
+            if !api.is_workspace() {
+                out.push(VirtualEntry::Nested { name: "backups".to_string(), node: VirtualNode::BackupsRoot });
+            }
+            Ok(out)
+        }
+        VirtualNode::BackupsRoot => {
+            if api.is_workspace() {
+                return Err(anyhow!("Backups are personal-account only; not available in an active workspace"));
+            }
+            let devices = fetch_backup_devices(api, token).await?;
+            Ok(devices
+                .iter()
+                .map(|d| VirtualEntry::Real { name: str_field(d, "plainName"), uuid: str_field(d, "uuid") })
+                .collect())
+        }
+    }
+}
+
+/// Fully flatten a virtual node into `(local-subdir, uuid)` leaf pairs,
+/// recursing through nested virtual groupings — for operations that
+/// materialize a whole tree (download, sync) rather than list one level.
+/// Nesting only ever goes one level deep today (`Root` -> `BackupsRoot`), so
+/// this doesn't need to recurse past a `Nested` entry's own children.
+pub async fn flatten_virtual(api: &DriveApi, token: &str, root: &str, node: &VirtualNode) -> Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    for entry in virtual_entries(api, token, root, node).await? {
+        match entry {
+            VirtualEntry::Real { name, uuid } => out.push((name, uuid)),
+            VirtualEntry::Nested { name, node: nested } => {
+                for inner in virtual_entries(api, token, root, &nested).await? {
+                    if let VirtualEntry::Real { name: inner_name, uuid } = inner {
+                        out.push((format!("{name}/{inner_name}"), uuid));
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Like [`resolve_path`], but a bare `//` or `//backups` resolves to a
+/// [`VirtualNode`] instead of erroring. Only for callers that can sensibly
+/// act on a synthetic grouping (`list`, `download`, `sync down`, `serve`);
+/// everything else should keep using `resolve_path`/`resolve_opt` so it
+/// keeps hard-erroring there.
+pub async fn resolve_path_or_virtual(
+    api: &DriveApi,
+    token: &str,
+    root: &str,
+    path: &str,
+    expect: Expect,
+) -> Result<PathTarget> {
+    if let Some(rest) = path.strip_prefix("//") {
+        let comps = components(rest);
+        if comps.is_empty() {
+            if expect == Expect::File {
+                return Err(anyhow!("'//' is a virtual folder, not a file"));
+            }
+            return Ok(PathTarget::Virtual(VirtualNode::Root));
+        }
+        if comps.len() == 1 && comps[0] == "backups" {
+            if expect == Expect::File {
+                return Err(anyhow!("'//backups' is a virtual folder, not a file"));
+            }
+            if api.is_workspace() {
+                return Err(anyhow!("Backups are personal-account only; not available in an active workspace"));
+            }
+            return Ok(PathTarget::Virtual(VirtualNode::BackupsRoot));
+        }
+    }
+    resolve_path(api, token, root, path, expect).await.map(PathTarget::Real)
 }
 
 /// Build a `/a/b` folder path from an ancestors array (target first → root last):
@@ -169,8 +406,40 @@ fn folder_path_from_ancestors(anc: &Value, root: &str) -> String {
     }
 }
 
+/// Given a folder's ancestors array (target first → root last), check
+/// whether a backup device appears in the chain; if so, return the
+/// `//backups/<device>/...` path for the target instead of a root-relative
+/// one. `None` when no device is found (or a workspace is active — backups
+/// are personal-account only) so the caller falls back to
+/// `folder_path_from_ancestors`.
+async fn backups_relative_path(api: &DriveApi, token: &str, anc: &Value) -> Result<Option<String>> {
+    if api.is_workspace() {
+        return Ok(None);
+    }
+    let arr = anc.as_array().cloned().unwrap_or_default();
+    let devices = fetch_backup_devices(api, token).await?;
+    let Some(idx) = arr.iter().position(|e| {
+        let uuid = str_field(e, "uuid");
+        devices.iter().any(|d| str_field(d, "uuid") == uuid)
+    }) else {
+        return Ok(None);
+    };
+    let device_uuid = str_field(&arr[idx], "uuid");
+    let device = devices.iter().find(|d| str_field(d, "uuid") == device_uuid).unwrap();
+    // Entries above the device (target + intermediate ancestors, device excluded), root-first.
+    let mut names: Vec<String> = arr[..idx].iter().map(|e| str_field(e, "plainName")).collect();
+    names.reverse();
+    let mut path = format!("//backups/{}", str_field(device, "plainName"));
+    for n in names {
+        path.push('/');
+        path.push_str(&n);
+    }
+    Ok(Some(path))
+}
+
 /// Reconstruct the full path of an item (file or folder) from its uuid.
-/// Returns `(path, is_folder)`.
+/// Returns `(path, is_folder)`. Prints `//backups/<device>/...` when the
+/// item lives under a backup device instead of the account/workspace root.
 pub async fn path_from_id(
     api: &DriveApi,
     token: &str,
@@ -184,6 +453,9 @@ pub async fn path_from_id(
                 return Ok(("/".to_string(), true));
             }
             let anc = api.get_folder_ancestors(token, id).await?;
+            if let Some(p) = backups_relative_path(api, token, &anc).await? {
+                return Ok((p, true));
+            }
             return Ok((folder_path_from_ancestors(&anc, root), true));
         }
     }
@@ -198,7 +470,10 @@ pub async fn path_from_id(
         "/".to_string()
     } else {
         let anc = api.get_folder_ancestors(token, &folder_uuid).await?;
-        folder_path_from_ancestors(&anc, root)
+        match backups_relative_path(api, token, &anc).await? {
+            Some(p) => p,
+            None => folder_path_from_ancestors(&anc, root),
+        }
     };
     let full = if dir == "/" {
         format!("/{name}")

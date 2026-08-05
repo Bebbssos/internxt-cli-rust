@@ -873,6 +873,9 @@ impl russh_sftp::server::Handler for SftpSession {
 
         let handle = if want_write {
             self.ro()?;
+            if tree::is_virtual(&parent.uuid) {
+                return Err(StatusCode::PermissionDenied);
+            }
             if pflags.contains(OpenFlags::EXCLUDE) && existing.is_some() {
                 return Err(StatusCode::Failure);
             }
@@ -992,6 +995,9 @@ impl russh_sftp::server::Handler for SftpSession {
         let (parent_comps, name) = comps.split_at(comps.len() - 1);
         let name = &name[0];
         let parent = self.inner.resolve_dir(parent_comps).await?;
+        if tree::is_virtual(&parent.uuid) {
+            return Err(StatusCode::PermissionDenied);
+        }
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
         let existing = tree::find_folder(&api, &creds.token, &parent.uuid, name, &self.inner.cache)
@@ -1017,6 +1023,9 @@ impl russh_sftp::server::Handler for SftpSession {
         let (parent_comps, name) = comps.split_at(comps.len() - 1);
         let name = &name[0];
         let parent = self.inner.resolve_dir(parent_comps).await?;
+        if tree::is_virtual(&parent.uuid) {
+            return Err(StatusCode::PermissionDenied);
+        }
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
         let f = tree::find_folder(&api, &creds.token, &parent.uuid, name, &self.inner.cache)
@@ -1045,6 +1054,9 @@ impl russh_sftp::server::Handler for SftpSession {
         let (parent_comps, name) = comps.split_at(comps.len() - 1);
         let name = &name[0];
         let parent = self.inner.resolve_dir(parent_comps).await?;
+        if tree::is_virtual(&parent.uuid) {
+            return Err(StatusCode::PermissionDenied);
+        }
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
         let f = tree::find_file(&api, &creds.token, &parent.uuid, name, &self.inner.cache)
@@ -1081,6 +1093,9 @@ impl russh_sftp::server::Handler for SftpSession {
         let dst_name = dst_name[0].clone();
         let src_parent = self.inner.resolve_dir(src_parent_c).await?;
         let dst_parent = self.inner.resolve_dir(dst_parent_c).await?;
+        if tree::is_virtual(&src_parent.uuid) || tree::is_virtual(&dst_parent.uuid) {
+            return Err(StatusCode::PermissionDenied);
+        }
         let creds = self.inner.creds();
         let api = DriveApi::for_credentials(&creds);
 

@@ -1,5 +1,6 @@
 mod accounts;
 mod auth;
+mod backups;
 mod commands;
 mod compare;
 mod drive_ops;
@@ -278,9 +279,15 @@ enum Commands {
 
         // ---- shared ----
         /// Drive folder uuid to expose as the root of every backend. Omit for
-        /// the account / workspace root.
+        /// the account / workspace root. Mutually exclusive with --path.
         #[arg(short = 'i', long)]
         folder_uuid: Option<String>,
+        /// Drive path to expose as the root of every backend, alternative to
+        /// --folder-uuid. Also accepts the virtual `//` (drive + backups) and
+        /// `//backups` (backup devices) groupings — read-only: writes under
+        /// either are rejected on every backend.
+        #[arg(short = 'p', long)]
+        path: Option<String>,
         /// Cache folder listings for this many seconds (also the FUSE kernel
         /// attr/entry TTL). Shared by all backends. Matches rclone's own
         /// `--dir-cache-time` default (300s/5min): a short TTL can expire
@@ -453,9 +460,16 @@ enum Commands {
         /// letter like `X:` or a directory on Windows.
         #[arg(value_name = "MOUNTPOINT")]
         mountpoint: String,
-        /// Drive folder uuid to expose as the mount root. Omit for the drive root.
+        /// Drive folder uuid to expose as the mount root. Omit for the drive
+        /// root. Mutually exclusive with --path.
         #[arg(short = 'i', long)]
         folder_uuid: Option<String>,
+        /// Drive path to expose as the mount root, alternative to
+        /// --folder-uuid. Also accepts the virtual `//` (drive + backups) and
+        /// `//backups` (backup devices) groupings — read-only: writes under
+        /// either are rejected.
+        #[arg(short = 'p', long)]
+        path: Option<String>,
         /// Cache folder listings + kernel attributes for this many seconds.
         /// Matches rclone's own `--dir-cache-time` default (300s/5min): a
         /// short TTL can expire mid-traversal on a deep path or a folder
@@ -578,6 +592,14 @@ enum Commands {
     /// `compare file` / `compare folder`). New — no official equivalent.
     #[command(subcommand)]
     Compare(CompareCmd),
+    /// Manage backup devices and what's backed up to them (see `backups
+    /// devices list|rename|delete`, `backups list`, `backups download`). New
+    /// — no official equivalent (backups are desktop-app-only there; the
+    /// continuous watch-local-folders-and-upload daemon itself isn't ported,
+    /// only managing devices and browsing/downloading what's already
+    /// backed up).
+    #[command(subcommand)]
+    Backups(BackupsCmd),
     /// Show every command, including hidden compatibility aliases for the
     /// flat/hyphenated names (e.g. `upload-file`).
     HelpAll,
@@ -755,6 +777,113 @@ enum CompareCmd {
     File(CompareFileArgs),
     /// Compare a local folder against a remote Drive folder (recursive).
     Folder(CompareFolderArgs),
+}
+
+#[derive(clap::Args)]
+struct BackupsDevicesListArgs {
+    /// Display additional information (created at, status).
+    #[arg(short, long, default_value_t = false)]
+    extended: bool,
+    /// Include removed devices too (hidden by default).
+    #[arg(long, default_value_t = false)]
+    all: bool,
+}
+
+#[derive(clap::Args)]
+struct BackupsDevicesCreateArgs {
+    /// The name for the new backup device.
+    #[arg(short, long)]
+    name: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct BackupsDevicesRenameArgs {
+    /// The backup device id (uuid) or name (see `backups devices list`).
+    #[arg(value_name = "DEVICE")]
+    device: String,
+    /// The new name for the device.
+    #[arg(short, long)]
+    name: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct BackupsDevicesDeleteArgs {
+    /// The backup device id (uuid) or name (see `backups devices list`).
+    #[arg(value_name = "DEVICE")]
+    device: String,
+    /// Delete without confirmation. Unlike Drive files/folders, backups have
+    /// no trash — this action cannot be undone.
+    #[arg(short, long, default_value_t = false)]
+    force: bool,
+}
+
+#[derive(Subcommand)]
+enum BackupsDevicesCmd {
+    /// List your backup devices.
+    List(BackupsDevicesListArgs),
+    /// Create a backup device (a new device-as-folder registration). Useful
+    /// for scripted/headless uploads that want to show up as a device in the
+    /// desktop/mobile Backups UI without running the desktop app.
+    Create(BackupsDevicesCreateArgs),
+    /// Rename a backup device.
+    Rename(BackupsDevicesRenameArgs),
+    /// Delete a backup device and everything backed up to it. This action cannot be undone.
+    Delete(BackupsDevicesDeleteArgs),
+}
+
+#[derive(clap::Args)]
+struct BackupsListArgs {
+    /// The backup device id (uuid) or name (see `backups devices list`).
+    #[arg(value_name = "DEVICE")]
+    device: String,
+    /// A subfolder path inside the device's backup, e.g. `Documents/notes`. Defaults to the device root.
+    #[arg(short, long)]
+    path: Option<String>,
+    /// Display additional information (modified date, size).
+    #[arg(short, long, default_value_t = false)]
+    extended: bool,
+}
+
+#[derive(clap::Args)]
+struct BackupsDownloadArgs {
+    /// The backup device id (uuid) or name (see `backups devices list`).
+    #[arg(value_name = "DEVICE")]
+    device: String,
+    /// A subfolder path inside the device's backup, e.g. `Documents/notes`. Defaults to the device root.
+    #[arg(short, long)]
+    path: Option<String>,
+    /// Local directory to download into (a subfolder named after the
+    /// device's backup folder, or the last path segment, is created inside
+    /// it). Defaults to the current directory.
+    #[arg(short, long)]
+    directory: Option<String>,
+    /// Overwrite/merge into an already-existing destination folder.
+    #[arg(short, long, default_value_t = false)]
+    overwrite: bool,
+}
+
+#[derive(clap::Args)]
+struct BackupsGetIdArgs {
+    /// The backup device id (uuid) or name (see `backups devices list`).
+    #[arg(value_name = "DEVICE")]
+    device: String,
+    /// A file/subfolder path inside the device's backup, e.g. `Documents/notes`. Defaults to the device root.
+    #[arg(short, long)]
+    path: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum BackupsCmd {
+    /// Manage backup devices (see `backups devices list|rename|delete`).
+    #[command(subcommand)]
+    Devices(BackupsDevicesCmd),
+    /// List what's backed up to a device.
+    List(BackupsListArgs),
+    /// Download everything backed up to a device.
+    Download(BackupsDownloadArgs),
+    /// Print the uuid of a device (or a file/folder inside it) — for
+    /// chaining into other id-based commands, e.g. `mount --folder-uuid`.
+    GetId(BackupsGetIdArgs),
 }
 
 #[derive(clap::Args)]
@@ -1299,6 +1428,45 @@ async fn do_download_folder(args: DownloadFolderArgs) -> Result<()> {
     .await
 }
 
+/// Resolve `mount`/`serve`'s `--folder-uuid`/`--path` pair into the single
+/// `ServeConfig::folder_uuid` slot every backend already reads. `--path`
+/// covers real Drive paths (unchanged: `--folder-uuid` is still the faster,
+/// no-lookup option) and the `//`/`//backups` virtual groupings, encoded as
+/// a sentinel string via `paths::encode_virtual_root`/`VIRTUAL_BACKUPS_UUID`
+/// so nothing downstream (any backend's inode/handle table, the shared
+/// `fetch_folder_updated_at`) needs to change — they just carry an opaque
+/// `String` they already carried.
+#[cfg(any(feature = "webdav", feature = "fuse", feature = "smb", feature = "nfs", feature = "sftp"))]
+async fn resolve_serve_root(folder_uuid: Option<String>, path: Option<String>) -> Result<Option<String>> {
+    if folder_uuid.is_some() && path.is_some() {
+        return Err(anyhow::anyhow!("Provide either --folder-uuid or --path, not both"));
+    }
+    let Some(path) = path.filter(|p| !p.trim().is_empty()) else {
+        return Ok(folder_uuid);
+    };
+    let creds = auth::get_auth_details().await?;
+    let api = internxt_core::api::DriveApi::for_credentials(&creds);
+    match paths::resolve_path_or_virtual(&api, &creds.token, creds.root_folder(), &path, paths::Expect::Folder).await? {
+        paths::PathTarget::Real(r) => Ok(Some(r.uuid)),
+        paths::PathTarget::Virtual(paths::VirtualNode::Root) => {
+            Ok(Some(paths::encode_virtual_root(creds.root_folder())))
+        }
+        paths::PathTarget::Virtual(paths::VirtualNode::BackupsRoot) => {
+            Ok(Some(paths::VIRTUAL_BACKUPS_UUID.to_string()))
+        }
+    }
+}
+
+async fn do_backups_devices_create(args: BackupsDevicesCreateArgs) -> Result<()> {
+    let name = required_or_prompt(args.name, "name", "What is the name of the new device? ")?;
+    backups::devices_create(&name).await
+}
+
+async fn do_backups_devices_rename(args: BackupsDevicesRenameArgs) -> Result<()> {
+    let name = required_or_prompt(args.name, "name", "What is the new name of the device? ")?;
+    backups::devices_rename(&args.device, &name).await
+}
+
 async fn do_compare_file(args: CompareFileArgs) -> Result<()> {
     compare::compare_file(
         &args.local,
@@ -1599,6 +1767,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Serve {
             protocols,
             folder_uuid,
+            path,
             cache_ttl,
             no_cache,
             recent_window,
@@ -1776,7 +1945,7 @@ async fn run(cli: Cli) -> Result<()> {
 
             let config = serve::run::ServeConfig {
                 protocols,
-                folder_uuid,
+                folder_uuid: resolve_serve_root(folder_uuid, path).await?,
                 cache_ttl,
                 max_concurrent_uploads,
                 upload_limit: limit,
@@ -1797,6 +1966,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Mount {
             mountpoint,
             folder_uuid,
+            path,
             cache_ttl,
             no_cache,
             recent_window,
@@ -1824,7 +1994,7 @@ async fn run(cli: Cli) -> Result<()> {
             };
             let config = serve::run::ServeConfig {
                 protocols: vec![serve::run::Protocol::Fuse],
-                folder_uuid,
+                folder_uuid: resolve_serve_root(folder_uuid, path).await?,
                 cache_ttl,
                 max_concurrent_uploads,
                 upload_limit: limit,
@@ -1920,6 +2090,20 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Compare(cmd) => match cmd {
             CompareCmd::File(args) => do_compare_file(args).await?,
             CompareCmd::Folder(args) => do_compare_folder(args).await?,
+        },
+        Commands::Backups(cmd) => match cmd {
+            BackupsCmd::Devices(dcmd) => match dcmd {
+                BackupsDevicesCmd::List(args) => backups::devices_list(args.extended, args.all).await?,
+                BackupsDevicesCmd::Create(args) => do_backups_devices_create(args).await?,
+                BackupsDevicesCmd::Rename(args) => do_backups_devices_rename(args).await?,
+                BackupsDevicesCmd::Delete(args) => backups::devices_delete(&args.device, args.force).await?,
+            },
+            BackupsCmd::List(args) => backups::list(&args.device, args.path.as_deref(), args.extended).await?,
+            BackupsCmd::Download(args) => {
+                backups::download(&args.device, args.path.as_deref(), args.directory.as_deref(), args.overwrite)
+                    .await?
+            }
+            BackupsCmd::GetId(args) => backups::get_id(&args.device, args.path.as_deref()).await?,
         },
         Commands::HelpAll => print_help_all(),
         #[cfg(feature = "self-update")]
