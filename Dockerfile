@@ -88,8 +88,8 @@ RUN if [ "$VERSION" != "dev" ]; then \
 # Kyber-hybrid workspaces that SSO can't anyway, see CLAUDE.md); dotenv and
 # self-update are pointless when the image itself is the update/config unit
 # (docker pull / -e / --env-file replace both). webdav(-tls) + smb + nfs +
-# sftp are all pure-Rust and cross-compile cleanly. Adjust to taste.
-ARG CLI_FEATURES="webdav,webdav-tls,smb,nfs,sftp"
+# sftp + vpn are all pure-Rust and cross-compile cleanly. Adjust to taste.
+ARG CLI_FEATURES="webdav,webdav-tls,smb,nfs,sftp,vpn"
 
 RUN set -eux; \
     mkdir -p /out; \
@@ -138,8 +138,9 @@ COPY --from=builder /out/ixr-${TARGETARCH}${TARGETVARIANT} /usr/local/bin/ixr
 WORKDIR /root
 VOLUME ["/root/.ixr"]
 
-# webdav, smb, nfs, sftp default ports (see `ixr serve --help`)
-EXPOSE 3005 4445 12049 2022
+# webdav, smb, nfs, sftp default ports (see `ixr serve --help`), plus
+# vpn's default local proxy ports (see `ixr vpn proxy --help`)
+EXPOSE 3005 4445 12049 2022 1080 1081
 
 ENTRYPOINT ["ixr"]
 CMD ["--help"]

@@ -14,7 +14,7 @@ Unlike the official Node CLI's image (a WebDAV-only entrypoint script), this
 one just ships the `ixr` binary — the entrypoint is `ixr` itself, so any
 subcommand works: `docker run ghcr.io/bebbssos/ixr <command>`.
 
-**Feature set**: built with `webdav,webdav-tls,smb,nfs,sftp` — everything
+**Feature set**: built with `webdav,webdav-tls,smb,nfs,sftp,vpn` — everything
 except `sso` (no browser in a headless container; use `IXR_USER`/
 `IXR_PASSWORD` below instead), `fuse` (a container-local FUSE mount can't be
 seen from the host, and there's no musl cross story for `libfuse` — see

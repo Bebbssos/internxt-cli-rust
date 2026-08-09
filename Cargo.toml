@@ -70,11 +70,16 @@ sftp = ["dep:russh", "dep:russh-sftp"]
 # every standalone-binary target; AUR's ixr-bin reuses that same binary, so
 # it has it too. Docker builds its own binary and leaves it off.
 self-update = ["dep:self_update", "dep:semver"]
+# VPN proxy mode (`internxt vpn locations` / `internxt vpn proxy`). Off by
+# default. Talks to Internxt's shared proxy over plain TCP (confirmed
+# against the live endpoint: it's an unencrypted HTTP CONNECT proxy, no TLS
+# hop) — no extra TLS-stack deps needed beyond what's already unconditional.
+vpn = ["internxt-core/vpn"]
 
 [dependencies]
 # Core engine, split into its own repo (github.com/Bebbssos/internxt-core-rust),
 # published to crates.io.
-internxt-core = "0.1.4"
+internxt-core = "0.1.5"
 
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

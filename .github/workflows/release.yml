@@ -63,18 +63,18 @@ jobs:
           # build time).
           quick='{"include":[
             {"name":"x86_64-unknown-linux-gnu","targets":"x86_64-unknown-linux-gnu","os":"ubuntu-latest","features":"--all-features"},
-            {"name":"macos","targets":"x86_64-apple-darwin","os":"macos-latest","macfuse":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update,termimage"},
-            {"name":"x86_64-pc-windows-msvc","targets":"x86_64-pc-windows-msvc","os":"windows-latest","winfsp":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update"}
+            {"name":"macos","targets":"x86_64-apple-darwin","os":"macos-latest","macfuse":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,vpn,dotenv,self-update,termimage"},
+            {"name":"x86_64-pc-windows-msvc","targets":"x86_64-pc-windows-msvc","os":"windows-latest","winfsp":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,vpn,dotenv,self-update"}
           ]}'
           full='{"include":[
             {"name":"x86_64-unknown-linux-gnu","targets":"x86_64-unknown-linux-gnu","os":"ubuntu-latest","features":"--all-features"},
             {"name":"aarch64-unknown-linux-gnu","targets":"aarch64-unknown-linux-gnu","os":"ubuntu-24.04-arm","features":"--all-features"},
-            {"name":"i686-unknown-linux-musl","targets":"i686-unknown-linux-musl","os":"ubuntu-latest","cross":"zig","features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update,termimage"},
-            {"name":"armv7-unknown-linux-musleabihf","targets":"armv7-unknown-linux-musleabihf","os":"ubuntu-latest","cross":"zig","features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update,termimage"},
-            {"name":"arm-unknown-linux-musleabihf","targets":"arm-unknown-linux-musleabihf","os":"ubuntu-latest","cross":"zig","features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update,termimage"},
-            {"name":"macos","targets":"aarch64-apple-darwin,x86_64-apple-darwin","os":"macos-latest","macfuse":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update,termimage"},
-            {"name":"x86_64-pc-windows-msvc","targets":"x86_64-pc-windows-msvc","os":"windows-latest","winfsp":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update"},
-            {"name":"aarch64-pc-windows-msvc","targets":"aarch64-pc-windows-msvc","os":"windows-11-arm","winfsp":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update"}
+            {"name":"i686-unknown-linux-musl","targets":"i686-unknown-linux-musl","os":"ubuntu-latest","cross":"zig","features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,vpn,dotenv,self-update,termimage"},
+            {"name":"armv7-unknown-linux-musleabihf","targets":"armv7-unknown-linux-musleabihf","os":"ubuntu-latest","cross":"zig","features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,vpn,dotenv,self-update,termimage"},
+            {"name":"arm-unknown-linux-musleabihf","targets":"arm-unknown-linux-musleabihf","os":"ubuntu-latest","cross":"zig","features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,vpn,dotenv,self-update,termimage"},
+            {"name":"macos","targets":"aarch64-apple-darwin,x86_64-apple-darwin","os":"macos-latest","macfuse":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,vpn,dotenv,self-update,termimage"},
+            {"name":"x86_64-pc-windows-msvc","targets":"x86_64-pc-windows-msvc","os":"windows-latest","winfsp":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,vpn,dotenv,self-update"},
+            {"name":"aarch64-pc-windows-msvc","targets":"aarch64-pc-windows-msvc","os":"windows-11-arm","winfsp":true,"features":"--no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,vpn,dotenv,self-update"}
           ]}'
           if [[ "${{ github.ref_name }}" == *-* ]]; then
             echo "matrix=$(echo "$quick" | jq -c .)" >> "$GITHUB_OUTPUT"
@@ -224,7 +224,7 @@ jobs:
           run: |
             . "$HOME/.cargo/env"
             cargo build --release --locked -p internxt-cli \
-              --no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,dotenv,self-update,termimage
+              --no-default-features --features sso,webdav,webdav-tls,fuse,smb,nfs,sftp,vpn,dotenv,self-update,termimage
             mkdir -p out
             cp target/release/ixr out/ixr
 

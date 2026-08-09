@@ -13,6 +13,7 @@ mod output;
 mod paths;
 #[cfg(any(feature = "webdav", feature = "fuse", feature = "smb", feature = "nfs", feature = "sftp"))]
 mod serve;
+pub(crate) mod session_creds;
 #[cfg(feature = "sftp")]
 mod sftp;
 #[cfg(feature = "self-update")]
@@ -24,6 +25,8 @@ mod sso;
 mod sync;
 mod thumbnail_ops;
 mod upload_limit;
+#[cfg(feature = "vpn")]
+mod vpn;
 #[cfg(feature = "webdav")]
 mod webdav;
 mod workspaces;
@@ -600,6 +603,13 @@ enum Commands {
     /// backed up).
     #[command(subcommand)]
     Backups(BackupsCmd),
+    /// Internxt VPN: list available locations, or run a local proxy that
+    /// tunnels through it (see `vpn locations`, `vpn proxy`). New — no
+    /// official CLI equivalent (the VPN otherwise ships as a browser
+    /// extension only).
+    #[cfg(feature = "vpn")]
+    #[command(subcommand)]
+    Vpn(VpnCmd),
     /// Show every command, including hidden compatibility aliases for the
     /// flat/hyphenated names (e.g. `upload-file`).
     HelpAll,
@@ -884,6 +894,50 @@ enum BackupsCmd {
     /// Print the uuid of a device (or a file/folder inside it) — for
     /// chaining into other id-based commands, e.g. `mount --folder-uuid`.
     GetId(BackupsGetIdArgs),
+}
+
+#[cfg(feature = "vpn")]
+#[derive(clap::Args)]
+struct VpnProxyArgs {
+    /// Comma-separated local listeners to run (known: https, socks5), e.g.
+    /// `vpn proxy https` or `vpn proxy https,socks5`.
+    #[arg(value_name = "PROTOCOLS")]
+    protocols: String,
+    /// VPN location to use (see `vpn locations` for what your plan allows).
+    #[arg(short = 'l', long, default_value = "FR")]
+    location: String,
+    /// HTTP(S): host to bind.
+    #[arg(long, default_value = "127.0.0.1")]
+    https_host: String,
+    /// HTTP(S): port to listen on.
+    #[arg(long, default_value_t = 1080)]
+    https_port: u16,
+    /// SOCKS5: host to bind.
+    #[arg(long, default_value = "127.0.0.1")]
+    socks5_host: String,
+    /// SOCKS5: port to listen on.
+    #[arg(long, default_value_t = 1081)]
+    socks5_port: u16,
+    /// Verbose: log every accepted connection's destination (never payload
+    /// bytes).
+    #[arg(short = 'v', long, default_value_t = false)]
+    verbose: bool,
+}
+
+#[cfg(feature = "vpn")]
+#[derive(Subcommand)]
+enum VpnCmd {
+    /// List VPN locations available on your current plan.
+    Locations,
+    /// Run a local HTTP(S) and/or SOCKS5 proxy that tunnels through the
+    /// Internxt VPN (runs until Ctrl-C).
+    ///
+    /// This is a *proxy*, not a full VPN tunnel — only traffic explicitly
+    /// pointed at the local listener is routed through it (e.g. via
+    /// `HTTPS_PROXY`/`ALL_PROXY`, a browser's proxy setting, or an app's
+    /// `--proxy` flag). It does not change your system's default routing,
+    /// and it never touches UDP.
+    Proxy(VpnProxyArgs),
 }
 
 #[derive(clap::Args)]
@@ -2104,6 +2158,22 @@ async fn run(cli: Cli) -> Result<()> {
                     .await?
             }
             BackupsCmd::GetId(args) => backups::get_id(&args.device, args.path.as_deref()).await?,
+        },
+        #[cfg(feature = "vpn")]
+        Commands::Vpn(cmd) => match cmd {
+            VpnCmd::Locations => vpn::locations().await?,
+            VpnCmd::Proxy(args) => {
+                vpn::proxy(
+                    &args.protocols,
+                    &args.location,
+                    &args.https_host,
+                    args.https_port,
+                    &args.socks5_host,
+                    args.socks5_port,
+                    args.verbose,
+                )
+                .await?
+            }
         },
         Commands::HelpAll => print_help_all(),
         #[cfg(feature = "self-update")]

@@ -1,9 +1,10 @@
-//! Shared, refreshable credentials holder for long-running serve backends.
+//! Shared, refreshable credentials holder for long-running foreground
+//! commands (`serve`/`mount`, `vpn proxy`).
 //!
-//! A `mount` / `serve` process can outlive its session token, so both backends
-//! keep credentials behind a lock that a background task swaps in-place after a
-//! periodic `get_auth_details` refresh. Each request/op takes a cheap `Arc`
-//! snapshot (`get()`) at its start, so a mid-op refresh stays consistent.
+//! Any of these can outlive its session token, so they keep credentials
+//! behind a lock that a background task swaps in-place after a periodic
+//! `get_auth_details` refresh. Each request/op takes a cheap `Arc` snapshot
+//! (`get()`) at its start, so a mid-op refresh stays consistent.
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
