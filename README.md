@@ -3,6 +3,10 @@
 A Rust port of Internxt's official CLI, aiming to be a fast, low-memory, single
 static binary with fully streaming transfers.
 
+Also includes a client for **Internxt VPN** — `vpn locations` / `vpn proxy`
+(a local HTTP(S)/SOCKS5 proxy, not a full tunnel). No official CLI
+equivalent; see [`vpn proxy`](#vpn-proxy).
+
 **Works on any account type, including Free.** The official CLI refuses to
 run unless your plan has server-side CLI access (bundled with Ultimate);
 `ixr` skips that check.
@@ -47,7 +51,7 @@ CLI front-end built on top of it.
   [default feature set](#features) (SSO, WebDAV over HTTP, FUSE) —
   the prebuilt binaries above ship with almost every feature on, so to match
   them pass `--features` explicitly, e.g. `cargo install internxt-cli --features
-  webdav-tls,smb,nfs,sftp,termimage,self-update`. See [Features](#features) for
+  webdav-tls,smb,nfs,sftp,vpn,termimage,self-update`. See [Features](#features) for
   the full flag list. `self-update` is deliberately never a default — see its
   entry in [Features](#features) for why.
 - **AUR** (Arch Linux): `ixr-bin`, e.g. `yay -S ixr-bin`.
@@ -64,8 +68,8 @@ CLI front-end built on top of it.
   | FreeBSD | [x86_64](https://github.com/Bebbssos/internxt-cli-rust/releases/latest/download/ixr-x86_64-unknown-freebsd.tar.gz) |
 
   These links always resolve to the latest stable release. Every build ships
-  with the full feature set (SSO, WebDAV+TLS, SMB/NFS/SFTP servers, self-update,
-  in-terminal thumbnails, FUSE/WinFSP mount) except: Windows drops in-terminal
+  with the full feature set (SSO, WebDAV+TLS, SMB/NFS/SFTP servers, VPN
+  proxy, self-update, in-terminal thumbnails, FUSE/WinFSP mount) except: Windows drops in-terminal
   thumbnails (no Kitty/iTerm2 graphics protocol on Windows). See
   [FUSE/mount support](#fusewinfsp-mount-support) for the full build/runtime
   matrix — mount still needs the OS driver package installed locally to
@@ -113,6 +117,7 @@ binary small and dependency-light. `default = ["sso", "webdav", "fuse",
 | `smb` | off | `serve smb` — SMB2/3 share | Experimental. All platforms. Built on a fork of the `smb-server` crate. |
 | `nfs` | off | `serve nfs` — NFSv3 export | Experimental. All platforms. |
 | `sftp` | off | `serve sftp` — SFTP over SSH | Experimental. All platforms. Pulls in `russh` + `russh-sftp`. |
+| `vpn` | off | `vpn locations`, `vpn proxy` — a local HTTP(S)/SOCKS5 proxy through the Internxt VPN | New — no official equivalent (ships as a browser extension only). No extra deps. See [`vpn proxy`](#vpn-proxy) for what this is (and isn't). |
 | `termimage` | off | `thumbnail display` — inline terminal image rendering | Pulls in `viuer` + `image`. Kitty/iTerm2 graphics protocol, with a Unicode half-block fallback. |
 | `self-update` | off | `ixr update` — replace the running binary with the latest GitHub release | Off by default — a self-built binary should update by rebuilding. The GitHub release workflow turns it on for every standalone-binary target; AUR's `ixr-bin` reuses that binary so it has it too, while Docker builds its own binary without it. Pulls in `self_update` + `semver`. |
 
@@ -248,6 +253,9 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | &nbsp;&nbsp;[`backups get-id`](#backups-list--backups-download--backups-get-id) | Print the uuid of a device or an item inside it. | — | |
 | [`serve`](#serve) | Serve Drive over WebDAV/FUSE/SMB/NFS/SFTP (foreground). | — | Needs ≥1 of `webdav`,`fuse`,`smb`,`nfs`,`sftp`. WebDAV mirrors official; rest new. |
 | [`mount`](#mount) | Mount Drive as a local FS via FUSE/WinFSP. | — | New; needs `fuse` (default on). |
+| **[`vpn`](#vpn-locations)** | Internxt VPN: locations, local proxy | | New — no official equivalent (ships as a browser extension only). Needs `vpn` (off by default in source builds, on in Docker/prebuilt binaries). |
+| &nbsp;&nbsp;[`vpn locations`](#vpn-locations) | List VPN locations available on your plan. | — | |
+| &nbsp;&nbsp;[`vpn proxy`](#vpn-proxy) | Run a local HTTP(S)/SOCKS5 proxy through the VPN (foreground). | — | Not a full tunnel — see below. |
 | [`id-from-path`](#id-from-path) | Print the uuid at a Drive path. | `get-id` | New — no official equivalent. |
 | [`path-from-id`](#path-from-id) | Print the Drive path of a uuid. | `get-path` | New — no official equivalent. |
 | **[`thumbnail`](#thumbnail)** | Manage a file's thumbnail | `thumbnails` | New — official auto-generates only. |
@@ -1022,6 +1030,93 @@ platform needs to build and run this. Reads stream and decrypt lazily; writes
 buffer to a temp file and upload in full when the file is closed (Internxt has
 no partial-update API), replacing the old Drive entry.
 
+### `vpn locations`
+
+New — no official equivalent (the VPN otherwise ships as a browser extension
+only). Needs the `vpn` feature (off by default in source builds; on in the
+Docker image and prebuilt release binaries). Lists the VPN locations your
+plan can use, server-enforced — not hardcoded here, so a plan change on
+Internxt's side doesn't need a client update.
+
+No flags.
+
+```sh
+ixr vpn locations
+```
+
+```
+Code  Location
+----  --------------
+FR    France
+DE    Germany
+PL    Poland
+CA    Canada
+UK    United Kingdom
+```
+
+JSON output: `{ "success": true, "list": { "locations": [{ "code": "FR", "label": "France" }, ...] } }`.
+A location code this build doesn't have a name for yet shows up with
+`"label": null` (`-` in the table) rather than being dropped.
+
+### `vpn proxy`
+
+New — no official equivalent. Runs a local proxy that tunnels through the
+Internxt VPN, in the **foreground** until Ctrl-C — same run-until-interrupted
+model as [`serve`](#serve).
+
+**This is a proxy, not a full VPN tunnel.** Only traffic explicitly pointed
+at the local listener is routed through it (`HTTPS_PROXY`/`ALL_PROXY`, a
+browser's proxy setting, an app's `--proxy` flag, …) — it doesn't touch your
+system's default routing, and it never carries UDP (no DNS-over-UDP,
+QUIC/HTTP3, games, VoIP — the upstream proxy is CONNECT-only).
+
+On the wire, Internxt runs one shared proxy server for every location — the
+location is selected per-connection via the Proxy-Authorization *username*,
+not by connecting to a different host. The password is your existing Drive
+session token, the same one every other `ixr` command already uses — no
+separate VPN login. The proxy hop itself is **plain, unencrypted HTTP**, not
+TLS. See `internxt-core`'s `vpn` module and
+`config::vpn_api_url`/`vpn_proxy_host`/`vpn_proxy_port` (all three
+env-overridable, same as every other endpoint — see
+[Configuration](#configuration)) if any of this ever drifts.
+
+Pass a comma-separated list of local listeners to run — `https`, `socks5`,
+or both at once (same mechanism as `serve`'s protocol list; both share the
+one upstream connection scheme, just a different local wire format).
+`socks5` never resolves DNS locally — domain targets are forwarded to the
+proxy as-is, so resolution happens server-side (the "h" in socks5h, always
+on).
+
+Flags: `<PROTOCOLS>` (positional, required — `https`, `socks5`, or
+`https,socks5`), `-l/--location <CODE>` (default `FR` — see
+[`vpn locations`](#vpn-locations) for what your plan allows; an unrecognized
+code is still accepted and used as-is, not rejected client-side — the server
+is the real authority), `--https-host`/`--https-port` (default
+`127.0.0.1`/`1080`), `--socks5-host`/`--socks5-port` (default
+`127.0.0.1`/`1081`), `-v/--verbose` (log every accepted connection's
+destination — never payload bytes).
+
+At startup, a best-effort check against `vpn locations` warns (doesn't
+block) if `--location` isn't on your plan, so a typo shows up immediately
+instead of as a wall of per-connection failures. Per-connection failures
+(wrong/unauthorized location, upstream refusal, a malformed request) are
+always logged regardless of `-v` — only the noisy per-connection *access*
+log (`-v`'s "CONNECT host:port" lines) is gated on it. A connection that
+closes without sending anything at all (a browser speculatively
+opening/abandoning a connection, a health check, connection-pool probes —
+routine, not an error) is never logged either way.
+
+```sh
+ixr vpn proxy https                                   # 127.0.0.1:1080, location FR
+ixr vpn proxy https,socks5 -l DE                       # both listeners, Germany
+ixr vpn proxy socks5 --socks5-port 9050 -v             # verbose access log
+HTTPS_PROXY=http://127.0.0.1:1080 curl https://ifconfig.me
+curl --socks5-hostname 127.0.0.1:1081 https://ifconfig.me
+```
+
+`vpn proxy` runs until interrupted — there's no terminal JSON result object;
+`--json` mainly suppresses the startup banner.
+
 ### `id-from-path`
 
 Alias: `get-id`. New — no official equivalent. Prints the
@@ -1143,7 +1238,8 @@ server limit still fails server-side even with the local check disabled.
 API endpoints and app constants default to the public Internxt values (defined in the
 `internxt-core` crate's `config` module) and can be overridden via environment
 variables of the same name (`DRIVE_NEW_API_URL`, `NETWORK_URL`,
-`PAYMENTS_API_URL`, etc).
+`PAYMENTS_API_URL`, etc). This includes `VPN_API_URL`, `VPN_PROXY_HOST` and
+`VPN_PROXY_PORT` (needs the `vpn` feature) — see [`vpn proxy`](#vpn-proxy).
 
 Credentials are stored AES-encrypted at `~/.ixr/credentials` — its own
 directory, separate from the official CLI's `~/.internxt-cli`. The file holds
@@ -1255,10 +1351,11 @@ Known differences:
   official CLI has `delete permanently file|folder` but no plain trash-alias
   `delete file|folder`), `sync-up`, `sync-down`, `id-from-path`, `path-from-id`,
   the `thumbnail` command family, the `backups` command family (backups are a
-  desktop-app-only feature there), `mount`, and the `fuse`/`smb`/`nfs`/`sftp`
+  desktop-app-only feature there), `mount`, the `fuse`/`smb`/`nfs`/`sftp`
   `serve` backends (the official CLI only serves WebDAV, and only supports one
-  logged-in account). See the [command reference](#command-reference) above
-  for details on each.
+  logged-in account), and the `vpn` command family (the VPN otherwise ships
+  as a browser extension only). See the [command reference](#command-reference)
+  above for details on each.
 
 ## License
 
