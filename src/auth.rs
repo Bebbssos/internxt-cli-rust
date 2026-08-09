@@ -280,7 +280,8 @@ pub async fn get_auth_details() -> Result<Credentials> {
     let (mut creds, changed) = internxt_core::auth::refresh_credentials(creds, |m| {
         crate::output::status(&format!("warning: {m}"))
     })
-    .await?;
+    .await
+    .map_err(|e| anyhow!("{e} Run `ixr login` again."))?;
     if changed && !no_persist {
         save_account_credentials_only(&creds)?;
     }

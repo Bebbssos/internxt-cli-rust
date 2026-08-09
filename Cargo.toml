@@ -79,7 +79,7 @@ vpn = ["internxt-core/vpn"]
 [dependencies]
 # Core engine, split into its own repo (github.com/Bebbssos/internxt-core-rust),
 # published to crates.io.
-internxt-core = "0.1.5"
+internxt-core = "0.1.6"
 
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

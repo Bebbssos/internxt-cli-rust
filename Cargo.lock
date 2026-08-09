@@ -2503,9 +2503,9 @@ dependencies = [
 
 [[package]]
 name = "internxt-core"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "483ee05454420093691d6cb07f52c844251bc2fc36012734f6fd7cc35e39db03"
+checksum = "78def3dc9080a3404011ae257365db767573541805beef42614fb6042d67c4df"
 dependencies = [
  "aes 0.9.1",
  "aes-gcm 0.11.0",
