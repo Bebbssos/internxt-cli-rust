@@ -630,6 +630,15 @@ enum Commands {
         /// considered.
         #[arg(long, default_value_t = false)]
         pre_release: bool,
+        /// Only consider releases within the current minor version (patch
+        /// bumps only, e.g. 0.2.0 -> 0.2.1). By default the true latest
+        /// release is targeted regardless of how big the jump is.
+        #[arg(long, default_value_t = false, conflicts_with = "version")]
+        patch_only: bool,
+        /// Install this exact version instead of the latest (accepts with or
+        /// without a leading `v`). Can also downgrade.
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
     },
 }
 
@@ -2177,7 +2186,9 @@ async fn run(cli: Cli) -> Result<()> {
         },
         Commands::HelpAll => print_help_all(),
         #[cfg(feature = "self-update")]
-        Commands::Update { check, yes, pre_release } => self_update_cmd::run(check, yes, pre_release).await?,
+        Commands::Update { check, yes, pre_release, patch_only, version } => {
+            self_update_cmd::run(check, yes, pre_release, patch_only, version).await?
+        }
     }
     Ok(())
 }

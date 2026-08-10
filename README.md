@@ -1194,17 +1194,26 @@ manager or a rebuild instead, since this would fight them for ownership of
 the file. Docker isn't affected either way — its image is built without the
 feature.
 
-Only stable releases are considered by default; prerelease tags (e.g.
-`v0.2.0-rc.1`) are skipped unless `--pre-release` is given.
+By default, targets the true latest release regardless of how big the
+version jump is (e.g. `0.2.0` -> `0.3.0` in one hop). Only stable releases
+are considered unless `--pre-release` is given; prerelease tags (e.g.
+`v0.2.0-rc.1`) are skipped otherwise. `--check` and the actual install
+always agree on which version is targeted.
 
 Flags: `--check` (report whether a newer release exists, without installing
 it), `-y/--yes` (skip the confirmation prompt — required under `--json` or
-`--non-interactive`), `--pre-release` (consider prerelease tags too).
+`--non-interactive`), `--pre-release` (consider prerelease tags too),
+`--patch-only` (restrict to the current minor version — patch bumps only,
+e.g. `0.2.0` -> `0.2.1` but not `0.3.0`; conflicts with `--version`),
+`--version <VER>` (install this exact version instead of the latest — can
+also downgrade; conflicts with `--patch-only`).
 
 ```sh
 ixr update --check
 ixr update -y
 ixr update --pre-release -y
+ixr update --patch-only -y      # stay within the current minor version
+ixr update --version 0.2.0 -y   # install (or downgrade to) an exact version
 ```
 
 ## Upload size limit
