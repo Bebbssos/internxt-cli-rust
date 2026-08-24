@@ -805,15 +805,43 @@ impl Inner {
         };
         let now = now_rfc3339();
         let file_uuid = match existing {
-            // Replace an existing Drive entry in place (keeps uuid/name/folder).
+            // Replace an existing Drive entry in place (keeps uuid/name/folder),
+            // except when truncating to zero bytes — see the uuid note below.
             Some(uuid) => {
-                if let Err(e) = api.replace_file(token, &uuid, &file_id, size).await {
-                    wb.log_flush_failure(&format!("[nfs] replace_file failed: {e:#}"));
-                    return;
+                let replaced = match api
+                    .replace_file_or_recreate(
+                        token,
+                        &uuid,
+                        &file_id,
+                        size,
+                        &wb.plain,
+                        &wb.ftype,
+                        &wb.parent_uuid,
+                        &wb.bucket,
+                        &now,
+                        &now,
+                    )
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        wb.log_flush_failure(&format!("[nfs] replace failed: {e:#}"));
+                        return;
+                    }
+                };
+                // Truncating to zero bytes can't go through PUT /files/{uuid}
+                // (the API 500s on an empty fileId), so core falls back to
+                // trash-then-create, which mints a new uuid. Adopt it here —
+                // unlike the other backends this one keeps `existing_uuid`
+                // across flushes, so a stale uuid would make the next flush
+                // replace a trashed entry.
+                if replaced.uuid != uuid {
+                    *wb.existing_uuid.lock().unwrap() = Some(replaced.uuid.clone());
+                    self.set_node_uuid(wb.fileid, &replaced.uuid);
                 }
                 // Cached listing would otherwise keep serving the old size.
                 self.cache.invalidate(&wb.parent_uuid);
-                uuid
+                replaced.uuid
             }
             // First flush of a new file: create the entry now (with content), then
             // remember its uuid so subsequent flushes replace instead of re-create.

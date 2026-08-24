@@ -422,11 +422,24 @@ impl WriteState {
         };
         let now = now_rfc3339();
         // Replace an existing entry in place (keeps uuid/name/folder, swaps
-        // fileId+size) — createFileEntry would 409 on the duplicate name.
+        // fileId+size) — createFileEntry would 409 on the duplicate name. The
+        // zero-byte case can't be replaced in place (the API 500s on an empty
+        // fileId), so core recreates the entry there and hands back a new uuid.
         let old = self.existing_uuid.lock().unwrap().take();
         let file_uuid = match old {
             Some(old_uuid) => api
-                .replace_file(token, &old_uuid, &file_id, size)
+                .replace_file_or_recreate(
+                    token,
+                    &old_uuid,
+                    &file_id,
+                    size,
+                    &self.plain,
+                    &self.ftype,
+                    &self.parent_uuid,
+                    &self.bucket,
+                    &now,
+                    &now,
+                )
                 .await
                 .map_err(to_smb)?
                 .uuid,

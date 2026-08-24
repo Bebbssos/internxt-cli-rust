@@ -428,7 +428,18 @@ impl WriteState {
         let old = self.existing_uuid.lock().unwrap().take();
         let file_uuid = match old {
             Some(old_uuid) => api
-                .replace_file(token, &old_uuid, &file_id, size)
+                .replace_file_or_recreate(
+                    token,
+                    &old_uuid,
+                    &file_id,
+                    size,
+                    &self.plain,
+                    &self.ftype,
+                    &self.parent_uuid,
+                    &self.bucket,
+                    &now,
+                    &now,
+                )
                 .await
                 .map_err(to_status)?
                 .uuid,

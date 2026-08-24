@@ -385,7 +385,8 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
     )
     .await?;
     // For a same-named existing file, replace its content in place (PUT
-    // /files/{uuid}) once the upload succeeds, instead of trashing the old
+    // /files/{uuid}) once the upload succeeds (except for a zero-byte body,
+    // which the API refuses to replace in place), instead of trashing the old
     // entry up front — see the atomic-replace comment in fuse/fs.rs
     // (finalize_write) for why: delete-then-create leaves a window where a
     // failed upload or create_file_entry call loses the file permanently.
@@ -470,7 +471,12 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
 
     let now = now_rfc3339();
     let result_uuid = match &replace_uuid {
-        Some(old_uuid) => api.replace_file(token, old_uuid, &file_id, size).await?.uuid,
+        Some(old_uuid) => api
+            .replace_file_or_recreate(
+                token, old_uuid, &file_id, size, &plain, &ftype, &parent.uuid, &bucket, &now, &now,
+            )
+            .await?
+            .uuid,
         None => {
             api.create_file_entry(
                 token,
