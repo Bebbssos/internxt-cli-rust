@@ -805,7 +805,8 @@ impl Inner {
         };
         let now = now_rfc3339();
         let file_uuid = match existing {
-            // Replace an existing Drive entry in place (keeps uuid/name/folder).
+            // Replace an existing Drive entry in place (keeps uuid/name/folder),
+            // except when truncating to zero bytes — see the uuid note below.
             Some(uuid) => {
                 let replaced = match api
                     .replace_file_or_recreate(
@@ -824,7 +825,7 @@ impl Inner {
                 {
                     Ok(v) => v,
                     Err(e) => {
-                        wb.log_flush_failure(&format!("[nfs] replace_file failed: {e:#}"));
+                        wb.log_flush_failure(&format!("[nfs] replace failed: {e:#}"));
                         return;
                     }
                 };

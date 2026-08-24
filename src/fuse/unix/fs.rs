@@ -691,6 +691,9 @@ impl Inner {
         // place (PUT /files/{uuid}) — keeps the same uuid/name/folder and swaps
         // fileId+size. createFileEntry would 409 ("File already exists") on the
         // duplicate name, so replace instead of the old create-then-trash dance.
+        // Truncating to zero bytes is the exception: the API 500s on an empty
+        // fileId, so core recreates the entry and returns a new uuid, which the
+        // node adopts below like any other result.
         let old = wh.existing_uuid.lock().unwrap().take();
         let result_uuid = match old {
             Some(old_uuid) => api
