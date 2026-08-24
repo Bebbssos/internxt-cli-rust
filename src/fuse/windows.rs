@@ -582,7 +582,13 @@ impl Inner {
             }
         };
         let result_uuid = match old_uuid {
-            Some(uuid) => api.replace_file(token, &uuid, &file_id, size).await?.uuid,
+            Some(uuid) => api
+                .replace_file_or_recreate(
+                    token, &uuid, &file_id, size, &plain, &ftype, &parent_uuid, &ws.bucket, &now,
+                    &now,
+                )
+                .await?
+                .uuid,
             None => {
                 api.create_file_entry(
                     token, &plain, &ftype, size, &parent_uuid, &file_id, &ws.bucket, &now, &now,
