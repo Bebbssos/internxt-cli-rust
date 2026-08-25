@@ -585,7 +585,9 @@ enum Commands {
     /// Delete a file or folder (see `delete file|folder`, `delete permanently file|folder`).
     #[command(subcommand)]
     Delete(DeleteCmd),
-    /// Manage workspaces (see `workspaces list|use|unset`).
+    /// Manage workspaces (see `workspaces list|use|unset`, and the read-only
+    /// admin views `workspaces info|members|teams|usage|invitations`, which have
+    /// no official equivalent).
     #[command(subcommand)]
     Workspaces(WorkspacesCmd),
     /// One-way sync (see `sync up` / `sync down`).
@@ -1193,12 +1195,33 @@ struct WorkspacesListArgs {
 
 #[derive(clap::Args)]
 struct WorkspacesUseArgs {
-    /// The workspace id to activate. Use `workspaces-list` to view ids.
+    /// The workspace to activate: its id, its name, or the number of its row in
+    /// `workspaces list`.
     #[arg(short = 'i', long, conflicts_with = "personal")]
     id: Option<String>,
     /// Switch back to your personal drive space (unset the active workspace).
     #[arg(short, long, default_value_t = false)]
     personal: bool,
+}
+
+/// The workspace an admin view reads, shared by `info`/`members`/`teams`/`usage`.
+#[derive(clap::Args)]
+struct WorkspaceTargetArgs {
+    /// The workspace to inspect: its id, its name, or the number of its row in
+    /// `workspaces list`. Defaults to the active workspace.
+    #[arg(value_name = "WORKSPACE")]
+    workspace: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct WorkspacesInvitationsArgs {
+    /// Maximum number of invitations to return. The server rejects anything
+    /// above 25.
+    #[arg(short, long, default_value_t = 25, value_parser = clap::value_parser!(u32).range(1..=25))]
+    limit: u32,
+    /// Number of invitations to skip (for paging).
+    #[arg(short, long, default_value_t = 0)]
+    offset: u32,
 }
 
 #[derive(Subcommand)]
@@ -1221,6 +1244,19 @@ enum WorkspacesCmd {
     Use(WorkspacesUseArgs),
     /// Unset the active workspace (operate within your personal drive space).
     Unset,
+    /// Show a workspace's details, and any workspace still awaiting setup.
+    /// New — no official equivalent.
+    Info(WorkspaceTargetArgs),
+    /// List a workspace's members. New — no official equivalent.
+    Members(WorkspaceTargetArgs),
+    /// List a workspace's teams. New — no official equivalent.
+    Teams(WorkspaceTargetArgs),
+    /// Show a workspace's space usage, and your own share of it.
+    /// New — no official equivalent.
+    Usage(WorkspaceTargetArgs),
+    /// List workspace invitations awaiting your response.
+    /// New — no official equivalent.
+    Invitations(WorkspacesInvitationsArgs),
 }
 
 #[derive(Subcommand)]
@@ -2117,6 +2153,13 @@ async fn run(cli: Cli) -> Result<()> {
             WorkspacesCmd::List(args) => do_workspaces_list(args).await?,
             WorkspacesCmd::Use(args) => do_workspaces_use(args).await?,
             WorkspacesCmd::Unset => workspaces::unset().await?,
+            WorkspacesCmd::Info(args) => workspaces::info(args.workspace.as_deref()).await?,
+            WorkspacesCmd::Members(args) => workspaces::members(args.workspace.as_deref()).await?,
+            WorkspacesCmd::Teams(args) => workspaces::teams(args.workspace.as_deref()).await?,
+            WorkspacesCmd::Usage(args) => workspaces::usage(args.workspace.as_deref()).await?,
+            WorkspacesCmd::Invitations(args) => {
+                workspaces::invitations(args.limit, args.offset).await?
+            }
         },
         Commands::Sync(cmd) => match cmd {
             SyncCmd::Up {
