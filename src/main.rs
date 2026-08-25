@@ -11,6 +11,7 @@ mod net_client;
 mod nfs;
 mod output;
 mod paths;
+mod recents;
 #[cfg(any(feature = "webdav", feature = "fuse", feature = "smb", feature = "nfs", feature = "sftp"))]
 mod serve;
 pub(crate) mod session_creds;
@@ -184,6 +185,21 @@ enum Commands {
         /// Display additional information (modified date, size).
         #[arg(short, long, default_value_t = false)]
         extended: bool,
+    },
+    /// List the most recently modified files across the whole account.
+    ///
+    /// New — no official equivalent (drive-web has a "Recents" view; the
+    /// official CLI doesn't expose it).
+    #[command(alias = "recent")]
+    Recents {
+        /// How many files to list (1-1000, newest first).
+        #[arg(
+            short,
+            long,
+            default_value_t = recents::DEFAULT_LIMIT,
+            value_parser = clap::value_parser!(u32).range(1..=recents::MAX_LIMIT as i64),
+        )]
+        limit: u32,
     },
     /// Create a folder in your Internxt Drive.
     #[command(hide = true)]
@@ -1739,6 +1755,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::List { id, path, extended } => {
             drive_ops::list(id.as_deref(), path.as_deref(), extended).await?
         }
+        Commands::Recents { limit } => recents::recents(limit).await?,
         Commands::CreateFolder(args) => do_create_folder(args).await?,
         Commands::MoveFile(args) => do_move_file(args).await?,
         Commands::MoveFolder(args) => do_move_folder(args).await?,
