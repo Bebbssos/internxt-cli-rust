@@ -117,10 +117,6 @@ public keys, workspace admin, sharings). The engine side is done and the `dev`
 branch tracks core's git `main`; what follows is the CLI-side surface that uses
 them. One PR each, all based on `dev`.
 
-- **Path lookup** - `paths::resolve_path` walks one listing per path component;
-  `GET /files|folders/meta?path=` resolves the whole path in one request. Fast
-  path for plain paths from the account/workspace root, keeping the walk for
-  `//backups/...`, `//drive/...` and non-root roots.
 - **`versions`** - list / restore / delete file versions
   (`/files/{uuid}/versions`), plus the plan's versioning policy from
   `/files/limits` in `usage`.

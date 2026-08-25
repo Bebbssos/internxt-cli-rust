@@ -127,10 +127,11 @@ pub async fn devices_delete(device: &str, force: bool) -> Result<()> {
 }
 
 /// Resolve a device plus an optional subpath inside it (file or folder),
-/// treating the device's Drive folder as the root for that path (same
-/// `resolve_path` used for ordinary Drive paths, just rooted at the device
-/// instead of the account/workspace root). `path: None` resolves to the
-/// device root itself.
+/// treating the device's Drive folder as the root for that path (same walk
+/// used for ordinary Drive paths, just rooted at the device instead of the
+/// account/workspace root — hence `resolve_path_in_subtree` rather than
+/// `resolve_path`, whose one-request `?path=` shortcut only ever resolves
+/// from the account root). `path: None` resolves to the device root itself.
 async fn resolve_device_subpath(
     api: &DriveApi,
     token: &str,
@@ -140,7 +141,7 @@ async fn resolve_device_subpath(
 ) -> Result<paths::Resolved> {
     match path {
         None => Ok(paths::Resolved { uuid: device_uuid.to_string(), is_folder: true }),
-        Some(p) => paths::resolve_path(api, token, device_uuid, p, expect).await,
+        Some(p) => paths::resolve_path_in_subtree(api, token, device_uuid, p, expect).await,
     }
 }
 
