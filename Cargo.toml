@@ -78,7 +78,9 @@ vpn = ["internxt-core/vpn"]
 
 [dependencies]
 # Core engine, split into its own repo (github.com/Bebbssos/internxt-core-rust),
-# published to crates.io.
+# published to crates.io. On `dev` this is overridden to core's git `main` (see
+# the `[patch.crates-io]` at the end of this file) so unreleased engine changes
+# can be used here before they are cut as a release.
 internxt-core = "0.1.8"
 
 tokio = { version = "1", features = ["full"] }
@@ -170,3 +172,10 @@ winfsp_wrs_build = { version = "0.4.1", optional = true }
 [profile.release]
 opt-level = 3
 lto = true
+
+# `dev` only: build against core's git `main` instead of the published crate, so
+# engine work can land here without waiting for a crates.io release. Drop this
+# section (and bump the version requirement above) when cutting a release —
+# a published crate must never depend on a git source.
+[patch.crates-io]
+internxt-core = { git = "https://github.com/Bebbssos/internxt-core-rust", branch = "main" }

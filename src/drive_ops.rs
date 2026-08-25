@@ -227,6 +227,10 @@ pub async fn usage() -> Result<()> {
     } else {
         human_file_size(space_limit as f64)
     };
+    // `get_file_limits` hands back the whole `/files/limits` record (versioning
+    // policy, photos access); the only piece this view reports is the per-file
+    // upload cap, which is `None` when the plan sets none.
+    let upload_limit = upload_limit.max_upload_file_size;
     let upload_str = match upload_limit {
         Some(b) => human_file_size(b as f64),
         None => "Unlimited".to_string(),

@@ -106,9 +106,10 @@ pub async fn generate(id: Option<&str>, path: Option<&str>) -> Result<()> {
     let file_type = meta.file_type.clone().unwrap_or_default();
     let size = meta.size.0;
     if !internxt_core::thumbnail::is_image_thumbnailable(&file_type, size) {
+        // The rule itself lives in core, so this message can't drift from it.
         return Err(anyhow!(
-            "Not a thumbnailable image (type '{file_type}', {size} bytes). \
-             Supported: jpg/png/webp/gif/tiff up to 500MB."
+            "Not a thumbnailable image (type '{file_type}', {size} bytes). Supported: {}.",
+            internxt_core::thumbnail::thumbnailable_summary()
         ));
     }
     let file_id = meta

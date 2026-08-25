@@ -77,8 +77,8 @@ pub async fn resolve(args: &UploadLimitArgs, creds: &Credentials) -> Result<Uplo
     }
     // No override: use the plan's cap (no local default — unlimited if unset).
     let api = DriveApi::for_credentials(creds);
-    let limit = api.get_file_limits(&creds.token).await?;
-    Ok(UploadLimit(limit))
+    let limits = api.get_file_limits(&creds.token).await?;
+    Ok(UploadLimit(limits.max_upload_file_size))
 }
 
 fn is_disable_word(s: &str) -> bool {
