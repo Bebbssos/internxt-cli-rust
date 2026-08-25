@@ -261,6 +261,13 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | &nbsp;&nbsp;[`backups list`](#backups-list--backups-download--backups-get-id) | List what's backed up to a device (or a subfolder inside it). | — | |
 | &nbsp;&nbsp;[`backups download`](#backups-list--backups-download--backups-get-id) | Download everything backed up to a device (or a subfolder). | — | |
 | &nbsp;&nbsp;[`backups get-id`](#backups-list--backups-download--backups-get-id) | Print the uuid of a device or an item inside it. | — | |
+| **[`shared`](#shared-list)** | Inspect and revoke sharing | | New — no official equivalent (sharing is web-app-only there). Read-only apart from `revoke`; **creating** a share isn't supported yet. |
+| &nbsp;&nbsp;[`shared list`](#shared-list) | List shared items — both directions, or one with `--by-me`/`--with-me`. | — | |
+| &nbsp;&nbsp;[`shared info`](#shared-info) | Show how one file/folder is shared, and who's invited. | — | |
+| &nbsp;&nbsp;[`shared invites`](#shared-invites) | List the sharing invitations waiting for you. | — | |
+| &nbsp;&nbsp;[`shared roles`](#shared-roles--shared-domains) | List the roles a share recipient can be given. | — | |
+| &nbsp;&nbsp;[`shared domains`](#shared-roles--shared-domains) | List the domains public share links are served from. | — | |
+| &nbsp;&nbsp;[`shared revoke`](#shared-revoke) | Stop sharing a file or folder. | — | |
 | [`serve`](#serve) | Serve Drive over WebDAV/FUSE/SMB/NFS/SFTP (foreground). | — | Needs ≥1 of `webdav`,`fuse`,`smb`,`nfs`,`sftp`. WebDAV mirrors official; rest new. |
 | [`mount`](#mount) | Mount Drive as a local FS via FUSE/WinFSP. | — | New; needs `fuse` (default on). |
 | **[`vpn`](#vpn-locations)** | Internxt VPN: locations, local proxy | | New — no official equivalent (ships as a browser extension only). Needs `vpn` (off by default in source builds, on in Docker/prebuilt binaries). |
@@ -1194,6 +1201,135 @@ JSON output: `backups list` → same shape as [`list`](#list); `backups
 download` → same shape as [`sync down`](#sync-up--sync-down)'s result
 object; `backups get-id` → `{ "success": true, "uuid": "...", "isFolder": ..., "type": "file"|"folder" }`.
 
+### `shared list`
+
+New — no official CLI equivalent (sharing lives in the web app, so the
+semantics here follow drive-web). Lists what is shared. With no direction flag
+it makes the same two calls drive-web's "Shared" view makes
+(`/sharings/folders` + `/sharings/files`), which return everything visible to
+you — items you shared out *and* items shared with you, told apart by the
+owner column. `--with-me` / `--by-me` switch to the two directional endpoints,
+which the API only provides for **folders**.
+
+**Creating** a share is not supported: it wraps the item's key for the
+recipient's public key (or for a link password), and the engine crate doesn't
+implement that wrapping yet. Everything under `shared` is read-only except
+[`shared revoke`](#shared-revoke).
+
+Flags: `--with-me`, `--by-me` (mutually exclusive), `--page <N>` (0-based,
+default 0), `--per-page <N>` (default 50), `--order-by <FIELD:DIRECTION>`
+(default `createdAt:DESC`; og's sdk documents `createdAt` and `views`, `ASC`
+or `DESC` — ignored by the directional listings, whose endpoints don't take
+it), `-e/--extended` (adds the uuid column).
+
+```sh
+ixr shared list
+ixr shared list --with-me -e
+ixr shared list --page 1 --per-page 20 --order-by createdAt:ASC --json
+```
+
+An account with nothing shared prints `No shared items found.` (or
+`No folders shared with you.` / `No folders shared by you.`).
+
+JSON output:
+`{ "success": true, "list": { "folders": <response>, "files": <response> } }`
+— each value is the server's reply passed through verbatim. `list.files` is
+absent for the directional listings, which have no file half.
+
+### `shared info`
+
+New — no official CLI equivalent. Shows how one file or folder is shared, and
+who has been invited to it (`/sharings/{type}/{id}/info`, `.../type` and
+`.../invites` in one go).
+
+Flags: `<ITEM>` (positional — a Drive path like `/Docs/report.pdf`, or a
+uuid; a value shaped exactly like a uuid is taken as one, so write it as a
+path if a Drive item is genuinely named that way), `-t/--type file|folder`
+(only saves the extra metadata lookup that works this out when `<ITEM>` is a
+uuid).
+
+```sh
+ixr shared info /Docs/report.pdf
+ixr shared info 11111111-2222-3333-4444-555555555555 -t folder
+```
+
+An item that isn't shared prints `Shared: no` — the API reports that as a 404
+on the sharing endpoints, which is a normal answer here, not an error. A
+shared one looks like this (invented data):
+
+```
+Item:        /Photos/Trip (folder)
+Uuid:        11111111-2222-3333-4444-555555555555
+Shared:      yes
+Sharing:     public
+Password:    no
+Invitations: 1
+
+Shared with          Role    Invited
+-------------------  ------  ------------------------
+someone@example.com  READER  1 January, 2026 at 12:00
+```
+
+JSON output: `{ "success": true, "item": { "uuid": "...", "type":
+"file"|"folder", "shared": true|false }, "info": <response|null>,
+"sharingType": <response|null>, "invites": <response> }` — the three
+server replies verbatim, `null` where the item isn't shared.
+
+### `shared invites`
+
+New — no official CLI equivalent. Lists the sharing invitations waiting for
+*you* (`/sharings/invites`), as opposed to the per-item invitations
+[`shared info`](#shared-info) shows. Accepting or declining one isn't
+implemented.
+
+Flags: `--limit <N>` (default 25 — the endpoint only accepts 1-25),
+`--offset <N>` (default 0).
+
+```sh
+ixr shared invites --limit 10 --json
+```
+
+JSON output: `{ "success": true, "list": { "invites": <response> } }`.
+
+### `shared roles` / `shared domains`
+
+New — no official CLI equivalent. `shared roles` lists the roles a share
+recipient can be given (the human table also uses them to turn the role ids
+in the invitation listings into names); `shared domains` lists the domains
+public share links are served from. Neither takes any flags.
+
+```sh
+ixr shared roles
+ixr shared domains --json
+```
+
+JSON output: `{ "success": true, "list": { "roles": [ { "id": "...", "name":
+"...", "createdAt": "...", "updatedAt": "..." } ] } }` — rebuilt from the
+typed values the engine crate parses, with the wire field names — and
+`{ "success": true, "list": { "domains": ["https://example.invalid", ...] } }`.
+
+### `shared revoke`
+
+New — no official CLI equivalent. Stops sharing a file or folder
+(`DELETE /sharings/{type}/{id}`), removing the public link and every
+invitation to it.
+
+Flags: `<ITEM>` (positional — path or uuid, as in
+[`shared info`](#shared-info)), `-t/--type file|folder`.
+
+```sh
+ixr shared revoke /Docs/report.pdf
+ixr shared revoke 11111111-2222-3333-4444-555555555555 --json
+```
+
+The API call itself is idempotent — revoking something that isn't shared
+succeeds instead of failing — so `ixr` checks first and says which of the two
+happened rather than implying a share was removed when there was none:
+`<item> is not shared; nothing to revoke.`
+
+JSON output: `{ "success": true, "revoked": true|false, "item": { "uuid":
+"...", "type": "file"|"folder", "shared": false }, "message": "..." }`.
+
 ### `serve`
 
 Runs one or more Drive backends in the **foreground** until Ctrl-C. Pass a
@@ -1724,7 +1860,9 @@ Known differences:
   `delete file|folder`), `tree`, `sync-up`, `sync-down`, `id-from-path`, `path-from-id`,
   the `thumbnail` command family, the `versions` command family (file version
   history is a drive-web feature there), the `backups` command family (backups are a
-  desktop-app-only feature there), the read-only workspace admin views
+  desktop-app-only feature there), the `shared` command family (sharing is
+  web-app-only there; `ixr` covers the read side plus revoking, not creating
+  a share), the read-only workspace admin views
   `workspaces info|members|teams|usage|invitations` (the official CLI stops at
   `workspaces list|use|unset`; these exist only in the web app), `mount`, the
   `fuse`/`smb`/`nfs`/`sftp`
