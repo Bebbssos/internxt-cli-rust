@@ -109,6 +109,33 @@ diff upstream against them to find changes worth pulling in.
 - SDK-style request retry layer (node `SdkManager` maxRetries: 3).
 - Local drive cache (node uses better-sqlite3 / typeorm `internxt-cli-drive.db`).
 
+## CLI surface for the new core endpoints (planned)
+
+`internxt-core` gained a batch of Drive endpoints (core PRs #10-#17: path lookup,
+typed file limits, file versions, folder tree/stats/duplicate checks, recents,
+public keys, workspace admin, sharings). The engine side is done and the `dev`
+branch tracks core's git `main`; what follows is the CLI-side surface that uses
+them. One PR each, all based on `dev`.
+
+- **Path lookup** - `paths::resolve_path` walks one listing per path component;
+  `GET /files|folders/meta?path=` resolves the whole path in one request. Fast
+  path for plain paths from the account/workspace root, keeping the walk for
+  `//backups/...`, `//drive/...` and non-root roots.
+- **`versions`** - list / restore / delete file versions
+  (`/files/{uuid}/versions`), plus the plan's versioning policy from
+  `/files/limits` in `usage`.
+- **`tree`** - print a folder subtree in one request (`/folders/{uuid}/tree`),
+  with counts and sizes from `/folders/{uuid}/stats`.
+- **Recursive-walk perf** - `sync`, `compare folder` and `download folder`
+  paginate subfolders/subfiles folder by folder; the tree endpoint returns the
+  whole subtree in one call.
+- **`recents`** - recently modified files (`/files/recents`).
+- **`shared`** - list shared-by-me / shared-with-me items, sharing roles and
+  invites, and revoke a share. Creating a share stays out for now: it needs the
+  key wrapping core doesn't implement yet.
+- **`workspaces` admin** - members, teams, usage and pending invitations for a
+  workspace.
+
 ## Beyond-og feature ideas (not in the official CLI)
 
 - sync-down `--delete=trash` → OS trash (needs a cross-platform trash lib; currently errors).
