@@ -25,6 +25,7 @@ mod smb;
 mod sso;
 mod sync;
 mod thumbnail_ops;
+mod tree;
 mod upload_limit;
 mod versions;
 #[cfg(feature = "vpn")]
@@ -201,6 +202,34 @@ enum Commands {
             value_parser = clap::value_parser!(u32).range(1..=recents::MAX_LIMIT as i64),
         )]
         limit: u32,
+    },
+    /// Print a folder's whole subtree as an indented tree.
+    ///
+    /// The entire subtree arrives in a single request, unlike `list`, which
+    /// pages through one folder at a time. New — no official equivalent.
+    Tree {
+        /// The folder to print: a Drive path (e.g. `/Documents/Reports`) or a
+        /// folder id (uuid). Defaults to the root folder. A uuid-shaped value
+        /// is taken as an id — write a leading `/` to force a path.
+        #[arg(value_name = "FOLDER")]
+        folder: Option<String>,
+        /// Only print this many levels below the starting folder. Purely a
+        /// display filter: the whole subtree is fetched either way, so this
+        /// saves output, not requests.
+        #[arg(short, long, value_name = "N")]
+        depth: Option<u32>,
+        /// Print folders only, leaving files out of the tree (they still
+        /// count towards the totals).
+        #[arg(long, default_value_t = false)]
+        folders_only: bool,
+        /// Display additional information (each file's size).
+        #[arg(short, long, default_value_t = false)]
+        extended: bool,
+        /// Also query the folder-stats endpoint (one extra request) and print
+        /// its file count and total size next to the tree's own, flagging any
+        /// disagreement. The stats endpoint estimates for large folders.
+        #[arg(long, default_value_t = false)]
+        stats: bool,
     },
     /// Create a folder in your Internxt Drive.
     #[command(hide = true)]
@@ -1833,6 +1862,9 @@ async fn run(cli: Cli) -> Result<()> {
             drive_ops::list(id.as_deref(), path.as_deref(), extended).await?
         }
         Commands::Recents { limit } => recents::recents(limit).await?,
+        Commands::Tree { folder, depth, folders_only, extended, stats } => {
+            tree::tree(folder.as_deref(), depth, folders_only, extended, stats).await?
+        }
         Commands::CreateFolder(args) => do_create_folder(args).await?,
         Commands::MoveFile(args) => do_move_file(args).await?,
         Commands::MoveFolder(args) => do_move_folder(args).await?,

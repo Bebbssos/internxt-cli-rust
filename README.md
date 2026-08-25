@@ -211,6 +211,7 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | [`usage`](#usage) | Plan, used space, upload limit. | `account`, `account-info` | New — no official equivalent. |
 | [`list`](#list) | List a folder's contents. | — | |
 | [`recents`](#recents) | Most recently modified files, account-wide. | `recent` | New — no official equivalent (drive-web has a "Recents" view). |
+| [`tree`](#tree) | Print a folder's whole subtree, indented. | — | New — no official equivalent. One request for the whole subtree. |
 | **[`create`](#create-folder)** | Create a folder | | |
 | &nbsp;&nbsp;[`create folder`](#create-folder) | Create a folder. | `create-folder` | |
 | **[`upload`](#upload-file)** | Upload a file or folder | | |
@@ -526,6 +527,64 @@ non-empty list answers it for free; only an empty list costs the extra
 `/users/me/upload-status` request. Inside a workspace the field is `null` and
 the plain `No recent files.` wording is used: that endpoint is personal-account
 only, so an empty workspace listing says nothing about it.
+### `tree`
+
+Prints a folder's whole subtree as an indented tree. Unlike [`list`](#list),
+which pages through one folder at a time, the entire subtree — nested folders
+and their files, however deep — arrives in a **single request**.
+
+Argument: `[FOLDER]` — a Drive path (`/Documents/Reports`) or a folder id
+(uuid); defaults to the root folder. A uuid-shaped value is taken as an id, so
+write a leading `/` if a folder is literally named like a uuid. The `//drive`
+and `//backups/<device>` [path escapes](#path-syntax) work here too; the bare
+`//` and `//backups` groupings don't — they aren't folders, so they have no
+subtree of their own.
+
+Flags: `-d/--depth <N>` (print only N levels below the starting folder),
+`--folders-only` (leave files out of the tree; they still count towards the
+totals), `-e/--extended` (append each file's size), `--stats` (see below).
+
+`--depth` is purely a display filter: the whole subtree is fetched either way,
+so it saves output, not requests. A folder whose contents are cut off shows
+what's hidden in brackets.
+
+```sh
+ixr tree                                     # the whole account root — but see "Large subtrees"
+ixr tree /Documents/Reports
+ixr tree /Documents --depth 2 --folders-only
+ixr tree <folder-uuid> --stats --json
+```
+
+```
+/Documents
+├── Reports
+│   ├── 2024
+│   │   └── summary.pdf
+│   └── draft.md
+├── archive.zip
+└── notes.txt
+
+2 folders, 4 files, 5.1 MB
+```
+
+The totals always cover the whole subtree, whatever `--depth` and
+`--folders-only` leave on screen. They're computed from the tree that was
+already fetched, so they're exact and cost nothing extra. `--stats` adds one
+request to the folder-stats endpoint and prints its file count and total size
+too; that endpoint estimates for large folders (marked `(estimate)`), and when
+the two sources disagree the difference is printed rather than hidden.
+
+**Large subtrees:** the server builds the whole response eagerly and gives up
+on very big ones — an upstream error or a timeout, not a short answer. The
+root folder of a large account is a realistic example. When that happens,
+start from a subfolder, or use `list` to walk a level at a time.
+
+JSON output: `{ "success": true, "root": "<folder>", "tree": { "uuid", "name",
+"type": "folder", "folders": [...], "files": [{ "uuid", "name", "plainName",
+"type", "size" }] }, "totals": { "folders", "files", "size" } }`, plus
+`"stats"` with `--stats`. `--depth` and `--folders-only` filter the JSON the
+same way they filter the text, and a folder cut off by `--depth` carries
+`"truncated": true` in place of its children.
 
 ### `create folder`
 
@@ -1662,7 +1721,7 @@ Known differences:
 - **New, with no official equivalent:** `usage`, `login-sso`, `accounts list`,
   `accounts switch`, `recents`, `download-folder`, `delete-file`/`delete-folder` (the
   official CLI has `delete permanently file|folder` but no plain trash-alias
-  `delete file|folder`), `sync-up`, `sync-down`, `id-from-path`, `path-from-id`,
+  `delete file|folder`), `tree`, `sync-up`, `sync-down`, `id-from-path`, `path-from-id`,
   the `thumbnail` command family, the `versions` command family (file version
   history is a drive-web feature there), the `backups` command family (backups are a
   desktop-app-only feature there), the read-only workspace admin views
