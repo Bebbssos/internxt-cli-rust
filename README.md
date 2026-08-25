@@ -272,6 +272,10 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | &nbsp;&nbsp;[`thumbnail upload`](#thumbnail) | Upload a custom thumbnail image. | — | |
 | &nbsp;&nbsp;[`thumbnail download`](#thumbnail) | Download the current thumbnail. | — | |
 | &nbsp;&nbsp;[`thumbnail display`](#thumbnail) | Render inline in the terminal. | — | Needs `termimage` (default off). |
+| **[`versions`](#versions)** | Browse a file's version history | `version` | New — no official equivalent (drive-web feature). |
+| &nbsp;&nbsp;[`versions list`](#versions) | List a file's stored versions. | — | |
+| &nbsp;&nbsp;[`versions restore`](#versions) | Make a stored version the current content. | — | **Cannot be undone** — drops newer versions. |
+| &nbsp;&nbsp;[`versions delete`](#versions) | Permanently delete one stored version. | — | **Cannot be undone.** |
 | [`update`](#update) | Update the running binary to the latest GitHub release. | — | New — no official equivalent. Standalone-binary installs only; needs `self-update` (off by default, on in the prebuilt release binaries). |
 
 ## Command reference
@@ -401,7 +405,14 @@ Used:               3.89 TB / 10 TB (38.9%)
   Backups:          0 B
 Space limit:        10 TB
 Upload file limit:  10 GB
+File versioning:    Enabled (up to 10 versions per file, files up to 25 MB, kept 15 days)
 ```
+
+`File versioning` is the plan's entitlement, as reported by `/files/limits` —
+the policy [`versions`](#versions) works within. Plans without it read
+`Not available on this plan`. Each cap is dropped from the line (and reported
+as `null` in JSON) when the backend doesn't state it, so a plan that only says
+"enabled" prints just `Enabled`.
 
 The plan name reads `Tier (Type)` (e.g. `Pro (Subscription)`), collapsing to
 one value when they agree. Legacy lifetime accounts show `Free (Lifetime)` —
@@ -424,7 +435,13 @@ JSON output:
     "spaceLimit": 1000000000000,
     "spaceLimitInfinite": false,
     "usedPercent": 12.3,
-    "uploadFileLimit": 10737418240
+    "uploadFileLimit": 10737418240,
+    "versioning": {
+      "enabled": true,
+      "maxVersions": 10,
+      "maxFileSize": 26214400,
+      "retentionDays": 15
+    }
   }
 }
 ```
@@ -1384,6 +1401,91 @@ ixr thumbnail display -p /Photos/cat.jpg          # needs --features termimage
 Automatic thumbnailing (on `upload-file`, `upload-folder`, and any `serve`
 backend write) can be disabled everywhere with `IXR_THUMBNAILS=0`.
 
+### `versions`
+
+Alias: `version`. New — the official CLI has no versions command at all;
+version history is a drive-web feature, and these are the same
+`/files/{uuid}/versions` endpoints its "Version history" sidebar uses.
+
+Every subcommand takes the file as a single positional argument, which may be
+either a **Drive path** or a **uuid** — a 36-character 8-4-4-4-12 hex string is
+read as a uuid, anything else is resolved as a path (including the `//drive` /
+`//backups/<device>` [escapes](#path-syntax)).
+
+- **`versions list <FILE>`** — the file's stored versions, newest first, as a
+  table of version id, size, modified/created/expiry dates and status. Prints
+  `No versions stored for this file.` when there are none, which is the normal
+  answer for most files (see below).
+- **`versions restore <FILE> <VERSION_ID>`** — make that version the file's
+  current content. The file keeps its uuid, so links and paths to it stay
+  valid. **Cannot be undone**, and versions newer than the restored one are
+  dropped — download them first if you want to keep them.
+- **`versions delete <FILE> <VERSION_ID>`** — permanently delete one stored
+  version. The file's current content is untouched. **Cannot be undone.**
+
+```sh
+ixr versions list /Reports/quarterly.pdf
+ixr versions list 00000000-0000-0000-0000-000000000000 --json
+ixr versions restore /Reports/quarterly.pdf <version-id>
+ixr versions delete /Reports/quarterly.pdf <version-id>
+```
+
+**What creates a version.** Nothing in this CLI (or in any official Internxt
+client) asks for one — versions are minted server-side, which is why drive-web
+calls them "autosave versions". Two conditions have to hold before one appears:
+
+1. **The plan must allow versioning.** [`usage`](#usage) reports this as
+   `File versioning`, along with how many versions are kept per file, the
+   largest file eligible, and how long a version is retained before the
+   retention policy drops it.
+2. **The file's extension must be one the backend versions.** drive-web only
+   offers the sidebar for `pdf`, `docx`, `xlsx` and `csv`, and the backend
+   agrees: replacing the content of a `.pdf` produces a version, while
+   replacing an otherwise identical `.txt` produces none.
+
+With both satisfied, a version is created when a file's **content is replaced
+in place** — what every [`serve`](#serve) backend does on a write to an
+existing file (`PUT`, or a write through the mount). Uploading a *new* file
+creates no version, and neither does renaming, moving, or trashing one.
+
+Outside those conditions `versions list` is simply empty. That's the expected
+result, not an error — so it says so in words rather than printing an empty
+table.
+
+JSON output of `versions list`:
+
+```json
+{
+  "success": true,
+  "list": {
+    "file": "00000000-0000-0000-0000-000000000000",
+    "versions": [
+      {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "fileId": "00000000-0000-0000-0000-000000000000",
+        "networkFileId": "0123456789abcdef01234567",
+        "size": 20480,
+        "status": "EXISTS",
+        "modificationTime": "2025-01-02T10:00:00.000Z",
+        "createdAt": "2025-01-02T10:05:00.000Z",
+        "updatedAt": "2025-01-02T10:05:00.000Z",
+        "expiresAt": "2025-01-17T10:05:00.000Z"
+      }
+    ]
+  }
+}
+```
+
+`restore` emits `{ "success": true, "message": "Version restored", "file": {
+"uuid": ..., "name": ..., "type": ..., "size": ..., "fileId": ... },
+"versionId": ... }`; `delete` emits `{ "success": true, "message": "Version
+deleted", "file": "<file uuid>", "versionId": ... }`.
+
+There is no `versions download`: a version's bytes live in the network under
+its own `networkFileId`, in the same bucket as the file, and nothing in the
+CLI exposes a bucket-level fetch by network id yet. Restoring a version and
+downloading the file is the way to get old content back for now.
+
 ### `update`
 
 New — no official equivalent. Needs the `self-update` feature (off by
@@ -1561,7 +1663,8 @@ Known differences:
   `accounts switch`, `recents`, `download-folder`, `delete-file`/`delete-folder` (the
   official CLI has `delete permanently file|folder` but no plain trash-alias
   `delete file|folder`), `sync-up`, `sync-down`, `id-from-path`, `path-from-id`,
-  the `thumbnail` command family, the `backups` command family (backups are a
+  the `thumbnail` command family, the `versions` command family (file version
+  history is a drive-web feature there), the `backups` command family (backups are a
   desktop-app-only feature there), the read-only workspace admin views
   `workspaces info|members|teams|usage|invitations` (the official CLI stops at
   `workspaces list|use|unset`; these exist only in the web app), `mount`, the

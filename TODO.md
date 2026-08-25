@@ -117,9 +117,6 @@ public keys, workspace admin, sharings). The engine side is done and the `dev`
 branch tracks core's git `main`; what follows is the CLI-side surface that uses
 them. One PR each, all based on `dev`.
 
-- **`versions`** - list / restore / delete file versions
-  (`/files/{uuid}/versions`), plus the plan's versioning policy from
-  `/files/limits` in `usage`.
 - **`tree`** - print a folder subtree in one request (`/folders/{uuid}/tree`),
   with counts and sizes from `/folders/{uuid}/stats`.
 - **Recursive-walk perf** - `sync`, `compare folder` and `download folder`

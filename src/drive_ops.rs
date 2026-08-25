@@ -211,7 +211,7 @@ pub async fn usage() -> Result<()> {
     );
     let usage = usage?;
     let space_limit = space_limit?;
-    let upload_limit = upload_limit?;
+    let file_limits = upload_limit?;
     let tier_label = tier.ok().flatten();
     let sub_type = subscription.ok().flatten();
     let plan = resolve_plan(tier_label.clone(), sub_type.clone());
@@ -227,13 +227,41 @@ pub async fn usage() -> Result<()> {
     } else {
         human_file_size(space_limit as f64)
     };
-    // `get_file_limits` hands back the whole `/files/limits` record (versioning
-    // policy, photos access); the only piece this view reports is the per-file
-    // upload cap, which is `None` when the plan sets none.
-    let upload_limit = upload_limit.max_upload_file_size;
+    // `get_file_limits` hands back the whole `/files/limits` record; this view
+    // reports the per-file upload cap (`None` when the plan sets none) and the
+    // versioning policy `ixr versions` depends on. Photos access is left out —
+    // nothing in the CLI touches Photos.
+    let upload_limit = file_limits.max_upload_file_size;
     let upload_str = match upload_limit {
         Some(b) => human_file_size(b as f64),
         None => "Unlimited".to_string(),
+    };
+    let versioning = &file_limits.versioning;
+    // Every numeric versioning field defaults to 0 when the backend omits it,
+    // which is indistinguishable from a real 0 and meaningless either way — so
+    // treat 0 as "not stated" and simply leave that detail out.
+    let some_if_set = |n: u64| (n != 0).then_some(n);
+    let max_versions = some_if_set(versioning.max_versions as u64);
+    let version_max_size = some_if_set(versioning.max_file_size);
+    let retention_days = some_if_set(versioning.retention_days as u64);
+    let versioning_str = if versioning.enabled {
+        let mut details = Vec::new();
+        if let Some(n) = max_versions {
+            details.push(format!("up to {n} versions per file"));
+        }
+        if let Some(b) = version_max_size {
+            details.push(format!("files up to {}", human_file_size(b as f64)));
+        }
+        if let Some(d) = retention_days {
+            details.push(format!("kept {d} days"));
+        }
+        if details.is_empty() {
+            "Enabled".to_string()
+        } else {
+            format!("Enabled ({})", details.join(", "))
+        }
+    } else {
+        "Not available on this plan".to_string()
     };
     let plan_str = plan.clone().unwrap_or_else(|| "unknown".to_string());
 
@@ -253,7 +281,8 @@ pub async fn usage() -> Result<()> {
                Drive:            {}\n  \
                Backups:          {}\n\
              Space limit:        {limit_str}\n\
-             Upload file limit:  {upload_str}",
+             Upload file limit:  {upload_str}\n\
+             File versioning:    {versioning_str}",
             human_file_size(usage.drive as f64),
             human_file_size(usage.backups as f64),
         ),
@@ -270,6 +299,12 @@ pub async fn usage() -> Result<()> {
                 "spaceLimitInfinite": space_infinite,
                 "usedPercent": used_percent,
                 "uploadFileLimit": upload_limit,
+                "versioning": {
+                    "enabled": versioning.enabled,
+                    "maxVersions": max_versions,
+                    "maxFileSize": version_max_size,
+                    "retentionDays": retention_days,
+                },
             }
         }),
     );
