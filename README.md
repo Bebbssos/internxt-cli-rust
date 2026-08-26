@@ -704,7 +704,9 @@ under the hood).
 Flags: `-i/--id <FOLDER_ID>`, `-p/--path <PATH>` (alternative to `--id`),
 `-d/--directory <DIR>` (default: current dir — a subfolder named after the
 Drive folder is created inside it), `-o/--overwrite` (merge into an
-already-existing, non-empty destination folder).
+already-existing, non-empty destination folder). It enumerates the remote
+folder the way [`sync`](#sync-up--sync-down) does, `IXR_FOLDER_TREE=0`
+included.
 
 ```sh
 ixr download-folder -i <folder-uuid> -d ./out
@@ -1029,6 +1031,19 @@ If `failed` is non-zero (for any reason, not just empty files), the command
 exits non-zero — check the `actions` list (or the non-JSON status lines) for
 which paths failed and why.
 
+**How the remote side is enumerated.** Before transferring anything, both
+directions build an inventory of the remote folder. The folder structure comes
+from a single subtree request when the server can answer one (the same endpoint
+[`tree`](#tree) uses); the files in each folder are then listed a folder at a
+time, several in parallel. Large subtrees are built server-side and time out
+there, so the size is checked first and anything too big — plus any failure —
+falls back to listing every folder one by one, sequentially, as before. Either
+way the resulting inventory is the same, including trashed items, which both
+paths leave out. Set `IXR_FOLDER_TREE=0` (also `false`/`no`/`off`) to force the
+folder-by-folder listing everywhere it's used: `sync up`, `sync down`,
+[`download folder`](#download-folder) and
+[`compare folder`](#compare-file--compare-folder).
+
 JSON output:
 
 ```json
@@ -1055,7 +1070,8 @@ no need to read either side. If sizes match, both sides are streamed
 (decrypting the remote file on the fly) and compared byte-for-byte, stopping
 at the first difference and reporting its byte offset.
 
-`compare folder` recursively walks both trees (same walk `sync` uses) and
+`compare folder` recursively enumerates both trees (the remote side exactly as
+[`sync`](#sync-up--sync-down) does, `IXR_FOLDER_TREE=0` included) and
 diffs file-by-file — missing files/folders on either side count as
 differences too. By default it **stops at the first difference found**
 (file or folder, either side); pass `--list` to keep going and report every
@@ -1748,6 +1764,13 @@ API endpoints and app constants default to the public Internxt values (defined i
 variables of the same name (`DRIVE_NEW_API_URL`, `NETWORK_URL`,
 `PAYMENTS_API_URL`, etc). This includes `VPN_API_URL`, `VPN_PROXY_HOST` and
 `VPN_PROXY_PORT` (needs the `vpn` feature) — see [`vpn proxy`](#vpn-proxy).
+
+Two `IXR_*` switches turn off behaviour that is otherwise automatic:
+`IXR_THUMBNAILS=0` disables thumbnail generation on every upload path (see
+[`thumbnail`](#thumbnail)), and `IXR_FOLDER_TREE=0` forces the
+folder-by-folder listing when a command enumerates a remote subtree (see
+[`sync up` / `sync down`](#sync-up--sync-down)). Both also accept
+`false`/`no`/`off`.
 
 Credentials are stored AES-encrypted at `~/.ixr/credentials` — its own
 directory, separate from the official CLI's `~/.internxt-cli`. The file holds

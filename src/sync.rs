@@ -22,7 +22,7 @@ use internxt_core::api::DriveApi;
 use crate::auth;
 use internxt_core::transfer::{create_folder_with_retry, upload_file_to_network};
 use internxt_core::crypto::{self, Ctr};
-use internxt_core::models::Credentials;
+use internxt_core::models::{Credentials, FolderTree};
 use internxt_core::network::NetworkApi;
 use crate::output;
 
@@ -31,6 +31,10 @@ use crate::output;
 /// `compare` for its `--check-modified` tolerance.
 pub(crate) const MTIME_TOL_SECS: i64 = 2;
 const MAX_CONCURRENT_TRANSFERS: usize = 10;
+/// How many folder-content listings the tree fast path keeps in flight while
+/// filling in file records. Deliberately below `MAX_CONCURRENT_TRANSFERS`:
+/// these are metadata requests to the drive API, not transfers.
+const MAX_CONCURRENT_LISTINGS: usize = 8;
 
 /// What to do with items that exist only on the destination side.
 #[derive(Clone, Copy, PartialEq)]
@@ -220,9 +224,176 @@ fn page_items(page: &Value, key: &str) -> Vec<Value> {
         .collect()
 }
 
-/// Recursively build the remote tree rooted at `root_uuid`. Returns a
-/// rel-path → RemoteFile map and a rel-path → folder-uuid map (with `""` = root).
+/// Whether the one-request folder-tree lookup may be used (default on). Set
+/// `IXR_FOLDER_TREE` to `0`/`false`/`no`/`off` (case-insensitive) to force the
+/// per-folder walk everywhere the remote inventory is built (`sync up`,
+/// `sync down`, `download folder`, `compare folder`). Same spelling as core's
+/// `IXR_THUMBNAILS` kill switch.
+fn folder_tree_enabled() -> bool {
+    match std::env::var("IXR_FOLDER_TREE") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
+/// Read one folder's files (paginated), as (rel path, record) pairs.
+///
+/// The single place file records are decoded, shared by both inventory paths —
+/// so a file looks exactly the same whether the folder was discovered by the
+/// walk or by the tree endpoint.
+async fn collect_folder_files(
+    api: &DriveApi,
+    token: &str,
+    rel: &str,
+    uuid: &str,
+) -> Result<Vec<(String, RemoteFile)>> {
+    let mut files: Vec<(String, RemoteFile)> = Vec::new();
+    let mut offset = 0u32;
+    loop {
+        let page = api.get_folder_subfiles(token, uuid, offset).await?;
+        let items = page_items(&page, "files");
+        let got = items.len() as u32;
+        for it in &items {
+            let plain = it.get("plainName").and_then(|s| s.as_str()).unwrap_or("");
+            let ftype = it.get("type").and_then(|s| s.as_str()).unwrap_or("");
+            let fuuid = it.get("uuid").and_then(|s| s.as_str()).unwrap_or("");
+            if fuuid.is_empty() {
+                continue;
+            }
+            let name = if ftype.is_empty() {
+                plain.to_string()
+            } else {
+                format!("{plain}.{ftype}")
+            };
+            let crel = join_rel(rel, &name);
+            let mtime = it
+                .get("modificationTime")
+                .and_then(|s| s.as_str())
+                .or_else(|| it.get("updatedAt").and_then(|s| s.as_str()))
+                .map(rfc3339_secs)
+                .unwrap_or(0);
+            files.push((
+                crel,
+                RemoteFile {
+                    uuid: fuuid.to_string(),
+                    size: it.get("size").map(value_size).unwrap_or(0),
+                    mtime,
+                    file_id: it
+                        .get("fileId")
+                        .and_then(|s| s.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string()),
+                    bucket: it.get("bucket").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                },
+            ));
+        }
+        if got < 50 {
+            break;
+        }
+        offset += got;
+    }
+    Ok(files)
+}
+
+/// Flatten a `/folders/{uuid}/tree` response into the rel-path → uuid map, with
+/// `""` = the requested root. Trashed/removed nodes are dropped explicitly:
+/// the live endpoint already omits them (verified against a trashed file, a
+/// trashed empty folder and a trashed folder holding a live file — none of them
+/// appeared), but the walk filters on `status` too, so this keeps the two
+/// paths identical even if the backend ever starts including them.
+fn flatten_tree(node: &FolderTree, rel: &str, dirs: &mut HashMap<String, String>) {
+    for child in &node.children {
+        let status = child.status.as_deref().unwrap_or("");
+        if !(status.is_empty() || status == "EXISTS") {
+            continue;
+        }
+        let name = child.plain_name.as_deref().unwrap_or("");
+        if name.is_empty() || child.uuid.is_empty() {
+            continue;
+        }
+        let crel = join_rel(rel, name);
+        flatten_tree(child, &crel, dirs);
+        dirs.insert(crel, child.uuid.clone());
+    }
+}
+
+/// Folder structure in a single request, or `None` to use the walk.
+///
+/// `GET /folders/{uuid}/tree` returns the whole subtree at once, but the
+/// backend builds it eagerly and gives up on large ones: a subtree of several
+/// thousand files answered HTTP 520/524 (an upstream timeout, not an error
+/// body) on most attempts and took ~100s on the rest, while a few-dozen-file
+/// folder came back in ~2s. So the size is gauged first with the cheap
+/// `/stats` call and the tree is only attempted when the backend reports an
+/// *exact* file count — its own signal that the subtree is small enough to
+/// enumerate. Anything bigger, or any failure, falls back to the walk.
+async fn remote_dirs_from_tree(
+    api: &DriveApi,
+    token: &str,
+    root_uuid: &str,
+) -> Option<HashMap<String, String>> {
+    if !folder_tree_enabled() {
+        return None;
+    }
+    match api.get_folder_stats(token, root_uuid).await {
+        Ok(stats) if stats.is_file_count_exact => {}
+        _ => return None,
+    }
+    match api.get_folder_tree(token, root_uuid).await {
+        Ok(tree) => {
+            let mut dirs = HashMap::new();
+            dirs.insert(String::new(), root_uuid.to_string());
+            flatten_tree(&tree, "", &mut dirs);
+            Some(dirs)
+        }
+        Err(e) => {
+            output::status(&format!("Folder tree lookup failed ({e}); listing folder by folder"));
+            None
+        }
+    }
+}
+
+/// Build the remote inventory rooted at `root_uuid`. Returns a rel-path →
+/// RemoteFile map and a rel-path → folder-uuid map (with `""` = root).
+///
+/// Two ways to get there, same result: the folder structure comes from one
+/// `/folders/{uuid}/tree` request when that's available (see
+/// [`remote_dirs_from_tree`]), otherwise from the folder-by-folder walk. File
+/// records always come from the folder-content listing either way — the tree
+/// response carries them too, but core's `DriveFileData` doesn't expose their
+/// timestamps, and `modificationTime` is what change detection runs on.
 pub(crate) async fn build_remote_tree(
+    api: &DriveApi,
+    token: &str,
+    root_uuid: &str,
+) -> Result<(HashMap<String, RemoteFile>, HashMap<String, String>)> {
+    let Some(dirs) = remote_dirs_from_tree(api, token, root_uuid).await else {
+        return build_remote_tree_walk(api, token, root_uuid).await;
+    };
+    // Knowing every folder up front is what lets these overlap: the walk can
+    // only ask for a folder's files after the listing that discovered it came
+    // back, so it stays strictly sequential.
+    let mut files: HashMap<String, RemoteFile> = HashMap::new();
+    {
+        let mut listings = futures_util::stream::iter(
+            dirs.iter().map(|(rel, uuid)| collect_folder_files(api, token, rel, uuid)),
+        )
+        .buffer_unordered(MAX_CONCURRENT_LISTINGS);
+        while let Some(batch) = listings.next().await {
+            files.extend(batch?);
+        }
+    }
+    Ok((files, dirs))
+}
+
+/// The folder-by-folder walk: one paginated subfolder listing plus one
+/// paginated subfile listing per folder. Kept as the fallback for everything
+/// the tree endpoint can't serve — large subtrees, upstream failures, and
+/// `IXR_FOLDER_TREE=0`.
+async fn build_remote_tree_walk(
     api: &DriveApi,
     token: &str,
     root_uuid: &str,
@@ -255,50 +426,7 @@ pub(crate) async fn build_remote_tree(
             offset += got;
         }
         // Subfiles (paginated).
-        let mut offset = 0u32;
-        loop {
-            let page = api.get_folder_subfiles(token, &uuid, offset).await?;
-            let items = page_items(&page, "files");
-            let got = items.len() as u32;
-            for it in &items {
-                let plain = it.get("plainName").and_then(|s| s.as_str()).unwrap_or("");
-                let ftype = it.get("type").and_then(|s| s.as_str()).unwrap_or("");
-                let fuuid = it.get("uuid").and_then(|s| s.as_str()).unwrap_or("");
-                if fuuid.is_empty() {
-                    continue;
-                }
-                let name = if ftype.is_empty() {
-                    plain.to_string()
-                } else {
-                    format!("{plain}.{ftype}")
-                };
-                let crel = join_rel(&rel, &name);
-                let mtime = it
-                    .get("modificationTime")
-                    .and_then(|s| s.as_str())
-                    .or_else(|| it.get("updatedAt").and_then(|s| s.as_str()))
-                    .map(rfc3339_secs)
-                    .unwrap_or(0);
-                files.insert(
-                    crel,
-                    RemoteFile {
-                        uuid: fuuid.to_string(),
-                        size: it.get("size").map(value_size).unwrap_or(0),
-                        mtime,
-                        file_id: it
-                            .get("fileId")
-                            .and_then(|s| s.as_str())
-                            .filter(|s| !s.is_empty())
-                            .map(|s| s.to_string()),
-                        bucket: it.get("bucket").and_then(|s| s.as_str()).unwrap_or("").to_string(),
-                    },
-                );
-            }
-            if got < 50 {
-                break;
-            }
-            offset += got;
-        }
+        files.extend(collect_folder_files(api, token, &rel, &uuid).await?);
     }
     Ok((files, dirs))
 }
@@ -1087,5 +1215,96 @@ mod tests {
         let actions = s.actions.lock().unwrap();
         let lines = failed_lines(&actions);
         assert_eq!(lines, vec!["  upload mystery.bin: unknown error".to_string()]);
+    }
+
+    // The tree fast path's structure half. What the live endpoint answers is
+    // covered by the shapes below: nesting, and the trashed nodes the walk
+    // filters out with the same `status` rule.
+
+    fn tree_of(v: Value) -> FolderTree {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn flatten_tree_keys_every_descendant_by_rel_path() {
+        let tree = tree_of(json!({
+            "uuid": "root-uuid",
+            "plainName": "root",
+            "status": "EXISTS",
+            "children": [{
+                "uuid": "a-uuid",
+                "plainName": "a",
+                "status": "EXISTS",
+                "children": [{
+                    "uuid": "b-uuid",
+                    "plainName": "b",
+                    // No status at all: kept, like an entry a listing returns
+                    // without one (workspace results may omit it).
+                    "children": []
+                }]
+            }]
+        }));
+        let mut dirs = HashMap::new();
+        dirs.insert(String::new(), "root-uuid".to_string());
+        flatten_tree(&tree, "", &mut dirs);
+
+        assert_eq!(dirs.len(), 3);
+        assert_eq!(dirs[""], "root-uuid");
+        assert_eq!(dirs["a"], "a-uuid");
+        assert_eq!(dirs["a/b"], "b-uuid");
+    }
+
+    #[test]
+    fn flatten_tree_drops_trashed_folders_and_their_subtrees() {
+        // Belt and braces: the live endpoint already leaves trashed nodes out
+        // (checked against a trashed folder holding a live file), so this
+        // guards the case where it stops doing that — a folder that reappeared
+        // in the inventory would make `sync down --delete` treat everything
+        // under it as remote-only.
+        let tree = tree_of(json!({
+            "uuid": "root-uuid",
+            "status": "EXISTS",
+            "children": [
+                {
+                    "uuid": "trashed-uuid",
+                    "plainName": "trashed",
+                    "status": "TRASHED",
+                    "children": [{
+                        "uuid": "under-trashed-uuid",
+                        "plainName": "still-here",
+                        "status": "EXISTS",
+                        "children": []
+                    }]
+                },
+                { "uuid": "live-uuid", "plainName": "live", "status": "EXISTS", "children": [] },
+                // No usable name to key a rel path on.
+                { "uuid": "nameless-uuid", "plainName": "", "status": "EXISTS", "children": [] }
+            ]
+        }));
+        let mut dirs = HashMap::new();
+        dirs.insert(String::new(), "root-uuid".to_string());
+        flatten_tree(&tree, "", &mut dirs);
+
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs.contains_key("live"));
+        assert!(!dirs.contains_key("trashed"));
+        assert!(!dirs.contains_key("trashed/still-here"));
+    }
+
+    #[test]
+    fn folder_tree_switch_defaults_on_and_takes_the_usual_off_words() {
+        // SAFETY: `IXR_FOLDER_TREE` is read here and nowhere else in the test
+        // binary, so no concurrently-running test can observe the change.
+        // (`auth::ENV_LOCK` exists for the `HOME`-rewriting tests, which do
+        // collide with each other; it's an async mutex, and this test is sync.)
+        unsafe { std::env::remove_var("IXR_FOLDER_TREE") };
+        assert!(folder_tree_enabled());
+        for off in ["0", "false", "no", "OFF", " off "] {
+            unsafe { std::env::set_var("IXR_FOLDER_TREE", off) };
+            assert!(!folder_tree_enabled(), "{off} should disable the tree lookup");
+        }
+        unsafe { std::env::set_var("IXR_FOLDER_TREE", "1") };
+        assert!(folder_tree_enabled());
+        unsafe { std::env::remove_var("IXR_FOLDER_TREE") };
     }
 }
