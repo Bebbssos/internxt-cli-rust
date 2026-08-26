@@ -52,7 +52,13 @@ diff upstream against them to find changes worth pulling in.
   Serve backends (WebDAV/FUSE/SMB/NFS/SFTP) also upload thumbnails on write (og only
   does WebDAV; the rest are our backends). `IXR_THUMBNAILS=0` disables everywhere.
 - Retry with backoff on transient failures (`uploadFileWithRetry`, MAX_RETRIES/DELAYS_MS).
-- Upload size limit check (node enforces a per-file limit; see CLI README "40GB").
+- Name-collision pre-flight on upload. `upload-file`/`upload-folder` and the serve
+  backends learn about a same-named remote item from the listing they already do (or
+  from `create_folder`'s "already exists" error). Core has
+  `check_duplicate_files`/`check_duplicate_folders` (`POST
+  /folders/content/{uuid}/{files,folders}/existence`) which answers with the colliding
+  records directly — one request, no listing, and it hands back what to replace. Unused
+  by the CLI so far.
 - HMAC on upload (sdk now stores hmac on upload — see sdk commit; node inxt-js
   passes `hmac: undefined`, so we skip it. Revisit if server starts requiring it.)
 
@@ -127,11 +133,18 @@ them. One PR each, all based on `dev`.
   becomes a single request. Note the endpoint's ceiling: a subtree of several
   thousand files fails upstream (HTTP 520/524), which is why the walk stays as
   the fallback.
+- **`du`** - `/folders/{uuid}/stats` returns a subtree's file count and total
+  size server-side (core `get_folder_stats`, already used as the tree fast
+  path's size gate and by `tree --stats`). No command exposes it on its own;
+  `ixr du <FOLDER>` would be one request where measuring a subtree otherwise
+  means walking it. Mind the `isFileCountExact`/`isTotalSizeExact` flags — the
+  backend estimates for large folders and says so.
 - **Creating a share** - `shared` ships the read side plus `revoke`, but not
   sharing an item out: `POST /sharings` (and the invite flow) wraps the item
   key for the recipient's public key, or for a link password, and core has no
   such wrapping yet. Needs the core side first, then `shared create` /
-  `shared invite` here.
+  `shared invite` here. Core already has the other half — `get_user_public_key`
+  (`GET /users/public-key/{email}`), unused until this lands.
 
 ## Beyond-og feature ideas (not in the official CLI)
 
