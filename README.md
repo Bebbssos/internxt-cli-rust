@@ -210,7 +210,7 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | &nbsp;&nbsp;[`accounts switch`](#accounts-switch) | Switch the active account. | — | |
 | [`usage`](#usage) | Plan, used space, upload limit. | `account`, `account-info` | New — no official equivalent. |
 | [`list`](#list) | List a folder's contents. | — | |
-| [`recents`](#recents) | Most recently modified files, account-wide. | `recent` | New — no official equivalent (drive-web has a "Recents" view). |
+| [`recents`](#recents) | Most recently modified files, account-wide, with the folder each lives in. | `recent` | New — no official equivalent (drive-web has a "Recents" view). |
 | [`tree`](#tree) | Print a folder's whole subtree, indented. | — | New — no official equivalent. One request for the whole subtree. |
 | **[`create`](#create-folder)** | Create a folder | | |
 | &nbsp;&nbsp;[`create folder`](#create-folder) | Create a folder. | `create-folder` | |
@@ -484,29 +484,30 @@ the workspace-scoped API client, so an active workspace applies.
 Flags: `-l/--limit <N>` — how many files to list, 1 to 1000, default 50. The
 endpoint's own default is 1000, which is far more than a terminal table is
 useful for; raise `--limit` when you need more. Out-of-range values are a usage
-error rather than a request that the server rejects.
+error rather than a request that the server rejects. `-e/--extended` adds the
+created date and the file's id, like [`list -e`](#list).
 
 ```sh
 ixr recents                # the 50 most recently modified files
 ixr recents --limit 200
+ixr recents --extended
 ixr recents --json
 ```
 
 ```
-Name                Size      Id
-------------------  --------  ------------------------------------
-quarterly.xlsx      1.21 MB   00000000-0000-0000-0000-000000000001
-notes.md            4.02 KB   00000000-0000-0000-0000-000000000002
-diagram.png         318.5 KB  00000000-0000-0000-0000-000000000003
+Name            Folder      Modified                  Size
+--------------  ----------  ------------------------  --------
+quarterly.xlsx  Finance     25 August, 2026 at 17:19  1.21 MB
+notes.md        /           25 August, 2026 at 09:02  4.02 KB
+diagram.png     Designs     24 August, 2026 at 20:08  318.5 KB
 ```
 
-There is deliberately no modified-date or containing-folder column, and no
-`--paths` flag. The endpoint returns both the timestamps and the parent folder
-for every entry, but the engine crate's typed file record
-(`internxt-core`'s `DriveFileData`) keeps only name/size/id, so neither reaches
-the CLI — recovering them here would mean an extra request per row for data the
-one request already fetched. The fix belongs in the engine; until then, use
-`list -e` on a folder for dates and `path-from-id` for a single file's path.
+The `Folder` column is the **name of the containing folder**, not a full path —
+this endpoint inlines the parent folder with each entry (the only file read that
+does), so the name is free, while a whole path would cost a request per
+ancestor. A file sitting in the account root shows `/`. Use
+[`path-from-id`](#path-from-id) when you need a single file's full path, and
+`--json`'s `folderUuid` when a script needs to address the folder.
 
 JSON output:
 
@@ -520,7 +521,16 @@ JSON output:
       "type": "xlsx",
       "size": 1268776,
       "bucket": "0000000000000000000000000",
-      "fileId": "000000000000000000000000"
+      "fileId": "000000000000000000000000",
+      "modificationTime": "2026-08-25T17:19:44.000Z",
+      "creationTime": "2026-08-25T17:19:44.000Z",
+      "createdAt": "2026-08-25T17:19:45.114Z",
+      "updatedAt": "2026-08-25T17:19:45.114Z",
+      "folderUuid": "00000000-0000-0000-0000-0000000000ff",
+      "folder": {
+        "uuid": "00000000-0000-0000-0000-0000000000ff",
+        "plainName": "Finance"
+      }
     }
   ],
   "hasUploadedFiles": true
