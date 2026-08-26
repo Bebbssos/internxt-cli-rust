@@ -241,6 +241,11 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | &nbsp;&nbsp;[`workspaces list`](#workspaces-list) | List your workspaces. | `workspaces-list` | |
 | &nbsp;&nbsp;[`workspaces use`](#workspaces-use) | Set the active workspace. | `workspaces-use` | |
 | &nbsp;&nbsp;[`workspaces unset`](#workspaces-unset) | Unset the active workspace. | `workspaces-unset` | |
+| &nbsp;&nbsp;[`workspaces info`](#workspaces-info) | Show a workspace's details. | — | New — no official equivalent. |
+| &nbsp;&nbsp;[`workspaces members`](#workspaces-members) | List a workspace's members. | — | New — no official equivalent. |
+| &nbsp;&nbsp;[`workspaces teams`](#workspaces-teams) | List a workspace's teams. | — | New — no official equivalent. |
+| &nbsp;&nbsp;[`workspaces usage`](#workspaces-usage) | Show a workspace's space usage. | — | New — no official equivalent. |
+| &nbsp;&nbsp;[`workspaces invitations`](#workspaces-invitations) | List invitations awaiting your response. | — | New — no official equivalent. |
 | **[`sync`](#sync-up--sync-down)** | One-way sync | | New — no official equivalent. |
 | &nbsp;&nbsp;[`sync up`](#sync-up--sync-down) | Push: local → remote. | `sync-up` | |
 | &nbsp;&nbsp;[`sync down`](#sync-up--sync-down) | Pull: remote → local. | `sync-down` | |
@@ -753,12 +758,14 @@ workspace for subsequent commands —
 switches where drive calls and transfers route (its own bucket, network
 credentials and mnemonic).
 
-Flags: `-i/--id <WORKSPACE_ID>` (use `workspaces-list` to find ids),
-`-p/--personal` (switch back to your personal drive space; conflicts with
-`--id`).
+Flags: `-i/--id <WORKSPACE>` (the workspace id, its name, or the number of its
+row in `workspaces list`), `-p/--personal` (switch back to your personal drive
+space; conflicts with `--id`).
 
 ```sh
 ixr workspaces-use -i <workspace-id>
+ixr workspaces-use -i "Acme Design"    # by name
+ixr workspaces-use -i 2                # by row number in `workspaces list`
 ixr workspaces-use --personal
 ```
 
@@ -771,6 +778,134 @@ workspace (equivalent to
 `workspaces-use --personal`). No flags.
 
 JSON output: `{ "success": true, "message": "Personal drive space selected successfully." }`.
+
+### `workspaces info`
+
+New — no official equivalent (the official CLI stops at `list`/`use`/`unset`;
+these views exist only in the web app). Shows one workspace's record, followed
+by any workspace you own that still has to be set up.
+
+Takes an optional positional `WORKSPACE` — its id, its name, or the number of
+its row in `workspaces list`. Omit it to use the active workspace (whatever
+`workspaces use` selected, or `IXR_WORKSPACE_ID` for a single invocation). With
+no argument and no active workspace, the command errors instead of guessing.
+No other flags.
+
+```sh
+ixr workspaces info                 # the active workspace
+ixr workspaces info "Acme Design"   # by name
+ixr workspaces info 2               # by row number in `workspaces list`
+```
+
+```
+Name:             Acme Design
+Workspace ID:     11111111-2222-3333-4444-555555555555
+Description:      Design team space
+Owner ID:         66666666-7777-8888-9999-000000000000
+Setup completed:  yes
+Created at:       3 March, 2026 at 10:15
+```
+
+JSON output: `{ "success": true, "workspaceId": "...", "workspace": {...},
+"pendingSetup": [...] }` — `workspace` and `pendingSetup` are the API responses
+passed straight through.
+
+### `workspaces members`
+
+New — no official equivalent. Lists who belongs to a workspace, split into
+active and deactivated members, with each member's role and space usage. Takes
+the same optional `WORKSPACE` argument as
+[`workspaces info`](#workspaces-info). No other flags.
+
+```sh
+ixr workspaces members
+ixr workspaces members "Acme Design"
+```
+
+```
+Active members:
+Name          Email                 Role     Used space  Space limit  Member ID
+------------  --------------------  -------  ----------  -----------  ------------------------------------
+Ada Chen      ada@example.com       owner    12.4 GB     1 TB         aaaaaaaa-1111-2222-3333-444444444444
+Rob Iyer      rob@example.com       member   3.1 GB      200 GB       bbbbbbbb-1111-2222-3333-444444444444
+```
+
+JSON output: `{ "success": true, "workspaceId": "...", "members": {...} }`.
+
+### `workspaces teams`
+
+New — no official equivalent. Lists the teams defined inside a workspace and
+how many members each has. Takes the same optional `WORKSPACE` argument as
+[`workspaces info`](#workspaces-info). No other flags.
+
+```sh
+ixr workspaces teams
+```
+
+```
+Name       Team ID                               Members  Manager ID                            Created at
+---------  ------------------------------------  -------  ------------------------------------  ---------------------
+Designers  cccccccc-1111-2222-3333-444444444444  4        aaaaaaaa-1111-2222-3333-444444444444  3 March, 2026 at 10:20
+```
+
+JSON output: `{ "success": true, "workspaceId": "...", "teams": [...] }`.
+
+### `workspaces usage`
+
+New — no official equivalent. Shows the workspace's total space, how much of it
+is handed out to members, and how much is actually in use — followed by your own
+share of it. There is no per-member lookup: the API reports usage for whoever is
+asking, and everyone else's quotas show up in
+[`workspaces members`](#workspaces-members). Takes the same optional
+`WORKSPACE` argument as [`workspaces info`](#workspaces-info). No other flags.
+
+```sh
+ixr workspaces usage
+```
+
+```
+Total space:  1 TB
+Assigned:     600 GB (60.0%)
+Used:         84 GB (14.0%)
+
+Your usage in this workspace:
+Drive:        12.1 GB
+Backups:      300 MB
+Space limit:  200 GB
+```
+
+JSON output: `{ "success": true, "workspaceId": "...", "usage": {...},
+"memberUsage": {...} }` — `memberUsage` is `null` when the API doesn't report
+one for you.
+
+### `workspaces invitations`
+
+New — no official equivalent. Lists workspace invitations waiting for you to
+accept or decline. Account-scoped, so it takes no workspace argument. Accepting
+or declining isn't supported yet — do that from the web app.
+
+Flags: `-l/--limit <N>` (default 25; the server rejects anything above 25),
+`-o/--offset <N>` (default 0, for paging).
+
+```sh
+ixr workspaces invitations
+ixr workspaces invitations --limit 10 --offset 10
+```
+
+```
+Workspace    Workspace ID                          Space limit  Invited at              Invitation ID
+-----------  ------------------------------------  -----------  ----------------------  ------------------------------------
+Acme Design  11111111-2222-3333-4444-555555555555  200 GB       4 March, 2026 at 09:00  dddddddd-1111-2222-3333-444444444444
+```
+
+JSON output: `{ "success": true, "invitations": [...] }`.
+
+> The five views above read endpoints the official CLI never touches, and the
+> account they were developed against belongs to no workspace — so only their
+> error and empty-collection paths were exercised against the live API. The
+> human-readable tables follow the field names in Internxt's own SDK types; if a
+> response ever turns out not to match, the command prints it verbatim rather
+> than dropping it, and `--json` always passes the raw response through.
 
 ### `sync up` / `sync down`
 
@@ -1427,7 +1562,10 @@ Known differences:
   official CLI has `delete permanently file|folder` but no plain trash-alias
   `delete file|folder`), `sync-up`, `sync-down`, `id-from-path`, `path-from-id`,
   the `thumbnail` command family, the `backups` command family (backups are a
-  desktop-app-only feature there), `mount`, the `fuse`/`smb`/`nfs`/`sftp`
+  desktop-app-only feature there), the read-only workspace admin views
+  `workspaces info|members|teams|usage|invitations` (the official CLI stops at
+  `workspaces list|use|unset`; these exist only in the web app), `mount`, the
+  `fuse`/`smb`/`nfs`/`sftp`
   `serve` backends (the official CLI only serves WebDAV, and only supports one
   logged-in account), and the `vpn` command family (the VPN otherwise ships
   as a browser extension only). See the [command reference](#command-reference)

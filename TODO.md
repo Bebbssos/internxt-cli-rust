@@ -128,8 +128,6 @@ them. One PR each, all based on `dev`.
 - **`shared`** - list shared-by-me / shared-with-me items, sharing roles and
   invites, and revoke a share. Creating a share stays out for now: it needs the
   key wrapping core doesn't implement yet.
-- **`workspaces` admin** - members, teams, usage and pending invitations for a
-  workspace.
 
 ## Beyond-og feature ideas (not in the official CLI)
 
