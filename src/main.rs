@@ -4,6 +4,7 @@ mod backups;
 mod commands;
 mod compare;
 mod drive_ops;
+mod du;
 #[cfg(feature = "fuse")]
 mod fuse;
 mod net_client;
@@ -206,6 +207,22 @@ enum Commands {
         /// Display additional information (created date, id).
         #[arg(short, long, default_value_t = false)]
         extended: bool,
+    },
+    /// Show a folder's total size and file count, counted server-side.
+    ///
+    /// New — no official equivalent. One request answers for the whole
+    /// subtree, so this never walks or downloads anything.
+    Du {
+        /// Folder to measure: a Drive path (e.g. `/Documents`) or a folder
+        /// uuid. Omit for the account (or workspace) root.
+        folder: Option<String>,
+        /// Break the total down by direct subfolder, largest first. Costs one
+        /// extra request per subfolder.
+        #[arg(short, long, default_value_t = false)]
+        children: bool,
+        /// Print raw byte counts instead of human-readable sizes.
+        #[arg(short, long, default_value_t = false)]
+        bytes: bool,
     },
     /// Print a folder's whole subtree as an indented tree.
     ///
@@ -1938,6 +1955,9 @@ async fn run(cli: Cli) -> Result<()> {
             drive_ops::list(id.as_deref(), path.as_deref(), extended).await?
         }
         Commands::Recents { limit, extended } => recents::recents(limit, extended).await?,
+        Commands::Du { folder, children, bytes } => {
+            du::du(folder.as_deref(), children, bytes).await?
+        }
         Commands::Tree { folder, depth, folders_only, extended, stats } => {
             tree::tree(folder.as_deref(), depth, folders_only, extended, stats).await?
         }

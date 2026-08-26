@@ -609,6 +609,29 @@ pub fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// `true` if `s` has the shape of a Drive uuid (8-4-4-4-12 hex).
+///
+/// Used by the commands that take one positional argument meaning *either* a
+/// uuid or a Drive path, to decide which it is. A path can always be forced by
+/// writing it with a leading `/` — no path with one is uuid-shaped.
+pub fn looks_like_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// Split a positional "uuid or path" argument into the `(id, path)` pair
+/// [`resolve_opt`] takes: a uuid-shaped value is an id, anything else a path.
+pub fn split_id_or_path(arg: Option<&str>) -> (Option<&str>, Option<&str>) {
+    match arg {
+        Some(a) if looks_like_uuid(a.trim()) => (Some(a), None),
+        other => (None, other),
+    }
+}
+
 /// Resolve the mutually-exclusive `--id` / `--path` options to a uuid. `None`
 /// only when both are absent (the caller decides: root default, or required).
 ///
@@ -749,6 +772,35 @@ mod tests {
         assert!(validate_name("/leading").is_err());
         assert!(validate_name("trailing/").is_err());
         assert!(validate_name("mid/dle").is_err());
+    }
+
+    #[test]
+    fn looks_like_uuid_only_matches_the_canonical_shape() {
+        assert!(looks_like_uuid("00000000-0000-0000-0000-000000000000"));
+        assert!(looks_like_uuid("A0B1C2D3-0000-4000-8000-000000000000"));
+        // A leading slash is how a path that would otherwise be uuid-shaped is
+        // forced to stay a path.
+        assert!(!looks_like_uuid("/00000000-0000-0000-0000-000000000000"));
+        assert!(!looks_like_uuid("/Docs/report.pdf"));
+        assert!(!looks_like_uuid("report.pdf"));
+        assert!(!looks_like_uuid("zzzzzzzz-0000-0000-0000-000000000000"));
+        assert!(!looks_like_uuid("00000000-0000-0000-0000-0000000000000"));
+    }
+
+    #[test]
+    fn split_id_or_path_routes_each_form_to_the_right_slot() {
+        assert_eq!(
+            split_id_or_path(Some("00000000-0000-0000-0000-000000000000")),
+            (Some("00000000-0000-0000-0000-000000000000"), None)
+        );
+        assert_eq!(split_id_or_path(Some("/a/b")), (None, Some("/a/b")));
+        assert_eq!(split_id_or_path(None), (None, None));
+        // Surrounding whitespace doesn't change what the value *is*; the
+        // untrimmed original is passed on, since the resolver trims too.
+        assert_eq!(
+            split_id_or_path(Some(" 00000000-0000-0000-0000-000000000000 ")),
+            (Some(" 00000000-0000-0000-0000-000000000000 "), None)
+        );
     }
 
     #[test]
