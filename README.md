@@ -191,6 +191,36 @@ Walk into either like any other folder:
 folder to write to. A real folder reached *through* one, e.g.
 `//backups/<device>/Documents`, is a normal, fully writable Drive folder.
 
+### Naming the target: positional or `--path`/`--id`
+
+Commands that act on **one** Drive item take it either way:
+
+```sh
+ixr list /Documents          ixr list -p /Documents
+ixr trash file /Docs/a.pdf   ixr trash file -p /Docs/a.pdf
+ixr du <folder-uuid>         ixr du -i <folder-uuid>
+```
+
+The positional decides for itself which it is: a value shaped like a uuid
+(8-4-4-4-12 hex) is treated as an id, anything else as a path. A folder
+literally *named* like a uuid is still reachable — write the leading `/`
+(`ixr list /00000000-0000-0000-0000-000000000000`). Passing the positional and
+`--path`/`--id` together is a usage error rather than one silently winning.
+
+Commands taking a positional today: [`list`](#list), [`du`](#du),
+[`tree`](#tree), [`download file`](#download-file) /
+[`download folder`](#download-folder), [`trash file|folder`](#trash-file--trash-folder),
+[`delete file|folder`](#delete-file--delete-folder),
+[`delete permanently file|folder`](#delete-permanently-file--delete-permanently-folder),
+the [`thumbnail`](#thumbnail) subcommands, [`versions`](#versions),
+[`shared info|revoke`](#shared), [`id-from-path`](#id-from-path) and
+[`path-from-id`](#path-from-id). The ones that take **two** targets (`move`,
+`rename`, `create folder`, `trash restore`, the upload commands) still use
+flags only.
+
+`id-from-path` and `path-from-id` each accept only their own form: handing one
+the other's input is an error naming the right command, not a failed lookup.
+
 ## Commands
 
 The **space-separated** form (`ixr upload file`) is the primary syntax. Every
@@ -459,11 +489,15 @@ JSON output:
 
 Lists a folder's contents.
 
+Argument: `[FOLDER]` — a Drive path or a folder uuid, positional alternative to `--id`/`--path` (see [naming the target](#naming-the-target-positional-or---path--id)); omit
+for the root folder.
+
 Flags: `-i/--id <FOLDER_ID>` (default: root), `-p/--path <PATH>` (alternative
 to `--id`), `-e/--extended` (adds created/modified date + size to the
 human-readable view).
 
 ```sh
+ixr list /Documents/Reports            # positional path
 ixr list -e                            # root folder, extended view
 ixr list -i <folder-uuid> --json       # machine-readable output
 ixr list -p /Documents/Reports
@@ -759,6 +793,10 @@ and its reason (`{ "success": false, "message": "..." }` in `--json` mode).
 Also invocable via the flat alias `download-file`. Downloads and decrypts
 a file, streaming to disk (or stdout).
 
+Argument: `[FILE]` — a Drive path or a file uuid, positional alternative to `--id`/`--path` (see [naming the target](#naming-the-target-positional-or---path--id)). The local
+destination stays a flag (`-d/--directory`), so the positional is always the
+Drive side.
+
 Flags: `-i/--id <FILE_ID>`, `-p/--path <PATH>` (alternative to `--id`),
 `-d/--directory <DIR>` (default: current dir), `-o/--overwrite`, `--stdout`
 (write decrypted bytes to stdout instead of a file; status goes to stderr so
@@ -792,6 +830,9 @@ Also invocable via the flat alias `download-folder`. New — the official CLI on
 single files. Recursively downloads and decrypts a folder tree into a
 subfolder named after the Drive folder (it reuses the `sync-down` engine
 under the hood).
+
+Argument: `[FOLDER]` — a Drive path or a folder uuid, positional alternative to `--id`/`--path` (see [naming the target](#naming-the-target-positional-or---path--id)). As with
+`download file`, the local destination stays `-d/--directory`.
 
 Flags: `-i/--id <FOLDER_ID>`, `-p/--path <PATH>` (alternative to `--id`),
 `-d/--directory <DIR>` (default: current dir — a subfolder named after the
@@ -846,7 +887,14 @@ JSON output: `rename-file` → `{ "success": true, "file": { "uuid", "plainName"
 Also invocable via the flat aliases `trash-file`/`trash-folder`.
 Moves a file or folder to the trash.
 
+Argument: `[FILE]` / `[FOLDER]` — a Drive path or a uuid, positional alternative to `--id`/`--path` (see [naming the target](#naming-the-target-positional-or---path--id)).
+
 Flags: `-i/--id <ID>`, `-p/--path <PATH>` (alternative to `--id`).
+
+```sh
+ixr trash file /Documents/old.txt
+ixr trash folder <folder-uuid>
+```
 
 JSON output: `{ "success": true, "file": { "uuid": "..." } }` or
 `{ "success": true, "folder": { "uuid": "..." } }`.
@@ -892,6 +940,11 @@ JSON output: `{ "success": true, "message": "Trash emptied successfully." }`.
 Also invocable via the flat aliases `delete-permanently-file`/`delete-permanently-folder`.
 Permanently deletes a file or folder — **cannot be undone**.
 
+Argument: `[FILE]` / `[FOLDER]` — a Drive path or a uuid, positional
+alternative to `--id` (see [naming the target](#naming-the-target-positional-or---path--id)).
+The official CLI takes a uuid only here; a **path** works through the
+positional (and through [`delete file --permanent`](#delete-file--delete-folder)).
+
 Flags: `-i/--id <ID>`.
 
 JSON output: `{ "success": true, "message": "File permanently deleted successfully" }`
@@ -906,10 +959,13 @@ plain `delete file|folder`. Without `--permanent` this is equivalent to
 [`trash-file`/`trash-folder`](#trash-file--trash-folder); with it, to
 [`delete-permanently-file`/`delete-permanently-folder`](#delete-permanently-file--delete-permanently-folder).
 
+Argument: `[FILE]` / `[FOLDER]` — a Drive path or a uuid, positional alternative to `--id`/`--path` (see [naming the target](#naming-the-target-positional-or---path--id)).
+
 Flags: `-i/--id <ID>`, `-p/--path <PATH>` (alternative to `--id`),
 `--permanent` (hard-delete instead of trashing — **cannot be undone**).
 
 ```sh
+ixr delete file /Documents/old.txt                 # move to trash
 ixr delete-file -p /Documents/old.txt              # move to trash
 ixr delete-folder -i <folder-uuid> --permanent     # hard-delete, no undo
 ```
@@ -1646,11 +1702,16 @@ uuid of the Drive file/folder at a given path. Understands the full
 [path syntax](#path-syntax), including `//backups/<device>/...` (the virtual
 bare `//`/`//backups` groupings excepted — those have no id of their own).
 
-Flags: `-p/--path <PATH>` (required).
+Argument: `[PATH]` — positional alternative to `--path`. Handing it a uuid is
+an error pointing at [`path-from-id`](#path-from-id), rather than a lookup that
+fails for an unobvious reason.
+
+Flags: `-p/--path <PATH>` (required unless the positional is given).
 
 ```sh
+ixr id-from-path /Documents/report.pdf
+ixr id-from-path //backups/My-Laptop/Documents/report.pdf
 ixr id-from-path -p /Documents/report.pdf
-ixr id-from-path -p //backups/My-Laptop/Documents/report.pdf
 ```
 
 JSON output: `{ "success": true, "uuid": "...", "isFolder": false, "type": "file" }`.
@@ -1662,9 +1723,13 @@ full Drive path of a file/folder given its uuid. Prints
 `//backups/<device>/...` (see [path syntax](#path-syntax)) instead of a
 misleading root-relative path for anything living inside a backup device.
 
-Flags: `-i/--id <UUID>` (required).
+Argument: `[ID]` — positional alternative to `--id`. Handing it a path is an
+error pointing at [`id-from-path`](#id-from-path).
+
+Flags: `-i/--id <UUID>` (required unless the positional is given).
 
 ```sh
+ixr path-from-id <uuid>
 ixr path-from-id -i <uuid>
 ```
 
@@ -1677,8 +1742,10 @@ automatically on upload (which `ixr` also does) but has no user-facing
 management commands for it. Only image sources (jpg/png/webp/gif/tiff) are
 supported; PDF thumbnails are not generated (matching the official CLI).
 
-Every subcommand takes `-i/--id <UUID>` or `-p/--path <PATH>` (one or the
-other) to identify the file.
+Every subcommand identifies the file the same way: as a positional `[FILE]`
+(a Drive path or a uuid — see
+[naming the target](#naming-the-target-positional-or---path--id)), or with
+`-i/--id <UUID>` / `-p/--path <PATH>`.
 
 - **`thumbnail generate`** — regenerate a thumbnail from the file's own image
   content. JSON: `{ "success": true, "thumbnail": { "id": "...", "size": N } }`.
@@ -1695,8 +1762,8 @@ other) to identify the file.
   renders to the terminal rather than emitting a result object.
 
 ```sh
-ixr thumbnail generate -p /Photos/cat.jpg
-ixr thumbnail upload -i <file-uuid> -f ./custom-thumb.png
+ixr thumbnail generate /Photos/cat.jpg
+ixr thumbnail upload <file-uuid> -f ./custom-thumb.png
 ixr thumbnail download -i <file-uuid> -d ./out
 ixr thumbnail display -p /Photos/cat.jpg          # needs --features termimage
 ```

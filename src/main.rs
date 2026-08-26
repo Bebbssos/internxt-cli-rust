@@ -180,6 +180,10 @@ enum Commands {
     Usage,
     /// List the contents of a folder.
     List {
+        /// The folder to list: a Drive path (e.g. `/a/b`) or a folder uuid.
+        /// Positional alternative to --id/--path; omit for the root folder.
+        #[arg(value_name = "FOLDER", conflicts_with_all = ["id", "path"])]
+        target: Option<String>,
         /// The folder id to list. Leave empty for the root folder.
         #[arg(short = 'i', long)]
         id: Option<String>,
@@ -606,16 +610,23 @@ enum Commands {
     /// Print the uuid of the Drive file/folder at a given path.
     #[command(alias = "get-id")]
     IdFromPath {
+        /// The Drive path (e.g. `/a/b/file.txt` or `/a/b`). Positional
+        /// alternative to --path.
+        #[arg(value_name = "PATH", conflicts_with = "path")]
+        target: Option<String>,
         /// The Drive path (e.g. `/a/b/file.txt` or `/a/b`).
         #[arg(short, long)]
-        path: String,
+        path: Option<String>,
     },
     /// Print the full Drive path of a file/folder given its uuid.
     #[command(alias = "get-path")]
     PathFromId {
+        /// The uuid of the file or folder. Positional alternative to --id.
+        #[arg(value_name = "ID", conflicts_with = "id")]
+        target: Option<String>,
         /// The uuid of the file or folder.
         #[arg(short, long)]
-        id: String,
+        id: Option<String>,
     },
     /// Manage a file's thumbnail: generate, upload a custom one, or download it.
     #[command(subcommand, alias = "thumbnails")]
@@ -783,6 +794,10 @@ enum UploadCmd {
 
 #[derive(clap::Args)]
 struct DownloadFileArgs {
+    /// The file to download: a Drive path (e.g. `/a/b/report.pdf`) or a uuid.
+    /// Positional alternative to --id/--path.
+    #[arg(value_name = "FILE", conflicts_with_all = ["id", "path"])]
+    target: Option<String>,
     /// The uuid of the file to download.
     #[arg(short, long)]
     id: Option<String>,
@@ -805,6 +820,10 @@ struct DownloadFileArgs {
 
 #[derive(clap::Args)]
 struct DownloadFolderArgs {
+    /// The folder to download: a Drive path (e.g. `/a/b`) or a uuid.
+    /// Positional alternative to --id/--path.
+    #[arg(value_name = "FOLDER", conflicts_with_all = ["id", "path"])]
+    target: Option<String>,
     /// The uuid of the folder to download.
     #[arg(short, long)]
     id: Option<String>,
@@ -1193,6 +1212,10 @@ enum RenameCmd {
 
 #[derive(clap::Args)]
 struct TrashFileArgs {
+    /// The file to trash: a Drive path (e.g. `/a/b/report.pdf`) or a uuid.
+    /// Positional alternative to --id/--path.
+    #[arg(value_name = "FILE", conflicts_with_all = ["id", "path"])]
+    target: Option<String>,
     /// The id of the file to trash.
     #[arg(short = 'i', long)]
     id: Option<String>,
@@ -1203,6 +1226,10 @@ struct TrashFileArgs {
 
 #[derive(clap::Args)]
 struct TrashFolderArgs {
+    /// The folder to trash: a Drive path (e.g. `/a/b`) or a uuid.
+    /// Positional alternative to --id/--path.
+    #[arg(value_name = "FOLDER", conflicts_with_all = ["id", "path"])]
+    target: Option<String>,
     /// The id of the folder to trash.
     #[arg(short = 'i', long)]
     id: Option<String>,
@@ -1276,6 +1303,10 @@ enum TrashCmd {
 
 #[derive(clap::Args)]
 struct DeletePermanentlyFileArgs {
+    /// The file to permanently delete: a Drive path (e.g. `/a/b/report.pdf`) or a uuid.
+    /// Positional alternative to --id.
+    #[arg(value_name = "FILE", conflicts_with_all = ["id"])]
+    target: Option<String>,
     /// The id of the file to permanently delete.
     #[arg(short = 'i', long)]
     id: Option<String>,
@@ -1283,6 +1314,10 @@ struct DeletePermanentlyFileArgs {
 
 #[derive(clap::Args)]
 struct DeletePermanentlyFolderArgs {
+    /// The folder to permanently delete: a Drive path (e.g. `/a/b`) or a uuid.
+    /// Positional alternative to --id.
+    #[arg(value_name = "FOLDER", conflicts_with_all = ["id"])]
+    target: Option<String>,
     /// The id of the folder to permanently delete.
     #[arg(short = 'i', long)]
     id: Option<String>,
@@ -1298,6 +1333,10 @@ enum DeletePermanentlyCmd {
 
 #[derive(clap::Args)]
 struct DeleteFileArgs {
+    /// The file to delete: a Drive path (e.g. `/a/b/report.pdf`) or a uuid.
+    /// Positional alternative to --id/--path.
+    #[arg(value_name = "FILE", conflicts_with_all = ["id", "path"])]
+    target: Option<String>,
     /// The id of the file to delete.
     #[arg(short = 'i', long)]
     id: Option<String>,
@@ -1311,6 +1350,10 @@ struct DeleteFileArgs {
 
 #[derive(clap::Args)]
 struct DeleteFolderArgs {
+    /// The folder to delete: a Drive path (e.g. `/a/b`) or a uuid.
+    /// Positional alternative to --id/--path.
+    #[arg(value_name = "FOLDER", conflicts_with_all = ["id", "path"])]
+    target: Option<String>,
     /// The id of the folder to delete.
     #[arg(short = 'i', long)]
     id: Option<String>,
@@ -1459,6 +1502,10 @@ enum SyncCmd {
 enum ThumbnailCmd {
     /// Generate a thumbnail for a Drive file from its own image content.
     Generate {
+        /// The file: a Drive path (e.g. `/a/b/report.pdf`) or a uuid.
+        /// Positional alternative to --id/--path.
+        #[arg(value_name = "FILE", conflicts_with_all = ["id", "path"])]
+        target: Option<String>,
         /// The uuid of the file.
         #[arg(short, long)]
         id: Option<String>,
@@ -1468,6 +1515,10 @@ enum ThumbnailCmd {
     },
     /// Upload a custom thumbnail image for a Drive file.
     Upload {
+        /// The file: a Drive path (e.g. `/a/b/report.pdf`) or a uuid.
+        /// Positional alternative to --id/--path.
+        #[arg(value_name = "FILE", conflicts_with_all = ["id", "path"])]
+        target: Option<String>,
         /// The uuid of the file.
         #[arg(short, long)]
         id: Option<String>,
@@ -1483,6 +1534,10 @@ enum ThumbnailCmd {
     },
     /// Download a Drive file's current thumbnail.
     Download {
+        /// The file: a Drive path (e.g. `/a/b/report.pdf`) or a uuid.
+        /// Positional alternative to --id/--path.
+        #[arg(value_name = "FILE", conflicts_with_all = ["id", "path"])]
+        target: Option<String>,
         /// The uuid of the file.
         #[arg(short, long)]
         id: Option<String>,
@@ -1504,6 +1559,10 @@ enum ThumbnailCmd {
     #[cfg(feature = "termimage")]
     #[command(alias = "show")]
     Display {
+        /// The file: a Drive path (e.g. `/a/b/report.pdf`) or a uuid.
+        /// Positional alternative to --id/--path.
+        #[arg(value_name = "FILE", conflicts_with_all = ["id", "path"])]
+        target: Option<String>,
         /// The uuid of the file.
         #[arg(short, long)]
         id: Option<String>,
@@ -1564,6 +1623,25 @@ fn prompt(msg: &str) -> Result<String> {
 
 /// Resolve a required flag: use the given value, else prompt interactively
 /// (og's `CLIUtils.getValueFromFlag` fallback), else error in non-interactive mode.
+/// Fold a positional `[TARGET]` — a Drive path or a uuid — into the
+/// `(--id, --path)` pair every resolver takes.
+///
+/// Which one it is comes from [`paths::split_id_or_path`], the same rule the
+/// commands that only take a positional (`tree`, `du`, `versions`, `shared`)
+/// use: a uuid-shaped value is an id, anything else a path, and a leading `/`
+/// forces a path for a folder literally named like a uuid. Clap rejects giving
+/// the positional and the flags together, so this is a straight either/or.
+fn target_or_flags<'a>(
+    target: Option<&'a str>,
+    id: Option<&'a str>,
+    path: Option<&'a str>,
+) -> (Option<&'a str>, Option<&'a str>) {
+    match target {
+        Some(t) => paths::split_id_or_path(Some(t)),
+        None => (id, path),
+    }
+}
+
 fn required_or_prompt(value: Option<String>, flag: &str, prompt_msg: &str) -> Result<String> {
     match value {
         Some(v) => Ok(v),
@@ -1685,9 +1763,10 @@ async fn do_upload_folder(args: UploadFolderArgs) -> Result<()> {
 }
 
 async fn do_download_file(args: DownloadFileArgs) -> Result<()> {
+    let (id, path) = target_or_flags(args.target.as_deref(), args.id.as_deref(), args.path.as_deref());
     commands::download_file(
-        args.id.as_deref(),
-        args.path.as_deref(),
+        id,
+        path,
         args.directory.as_deref(),
         args.overwrite,
         args.stdout,
@@ -1697,9 +1776,10 @@ async fn do_download_file(args: DownloadFileArgs) -> Result<()> {
 }
 
 async fn do_download_folder(args: DownloadFolderArgs) -> Result<()> {
+    let (id, path) = target_or_flags(args.target.as_deref(), args.id.as_deref(), args.path.as_deref());
     sync::download_folder(
-        args.id.as_deref(),
-        args.path.as_deref(),
+        id,
+        path,
         args.directory.as_deref(),
         args.overwrite,
     )
@@ -1808,19 +1888,23 @@ async fn do_rename_folder(args: RenameFolderArgs) -> Result<()> {
 }
 
 async fn do_delete_file(args: DeleteFileArgs) -> Result<()> {
-    drive_ops::delete_file(args.id.as_deref(), args.path.as_deref(), args.permanent).await
+    let (id, path) = target_or_flags(args.target.as_deref(), args.id.as_deref(), args.path.as_deref());
+    drive_ops::delete_file(id, path, args.permanent).await
 }
 
 async fn do_delete_folder(args: DeleteFolderArgs) -> Result<()> {
-    drive_ops::delete_folder(args.id.as_deref(), args.path.as_deref(), args.permanent).await
+    let (id, path) = target_or_flags(args.target.as_deref(), args.id.as_deref(), args.path.as_deref());
+    drive_ops::delete_folder(id, path, args.permanent).await
 }
 
 async fn do_trash_file(args: TrashFileArgs) -> Result<()> {
-    drive_ops::trash_file(args.id.as_deref(), args.path.as_deref()).await
+    let (id, path) = target_or_flags(args.target.as_deref(), args.id.as_deref(), args.path.as_deref());
+    drive_ops::trash_file(id, path).await
 }
 
 async fn do_trash_folder(args: TrashFolderArgs) -> Result<()> {
-    drive_ops::trash_folder(args.id.as_deref(), args.path.as_deref()).await
+    let (id, path) = target_or_flags(args.target.as_deref(), args.id.as_deref(), args.path.as_deref());
+    drive_ops::trash_folder(id, path).await
 }
 
 async fn do_trash_list(args: TrashListArgs) -> Result<()> {
@@ -1842,6 +1926,16 @@ async fn do_trash_clear(args: TrashClearArgs) -> Result<()> {
 }
 
 async fn do_delete_permanently_file(args: DeletePermanentlyFileArgs) -> Result<()> {
+    // A positional path is resolved by the same call `delete file --permanent
+    // --path` makes; only the uuid form goes straight through.
+    let (target_id, target_path) = target_or_flags(args.target.as_deref(), None, None);
+    if let Some(path) = target_path {
+        return drive_ops::delete_file(None, Some(path), true).await;
+    }
+    let args = DeletePermanentlyFileArgs {
+        id: args.id.or(target_id.map(str::to_string)),
+        target: None,
+    };
     let id = required_or_prompt(
         args.id,
         "id",
@@ -1851,6 +1945,14 @@ async fn do_delete_permanently_file(args: DeletePermanentlyFileArgs) -> Result<(
 }
 
 async fn do_delete_permanently_folder(args: DeletePermanentlyFolderArgs) -> Result<()> {
+    let (target_id, target_path) = target_or_flags(args.target.as_deref(), None, None);
+    if let Some(path) = target_path {
+        return drive_ops::delete_folder(None, Some(path), true).await;
+    }
+    let args = DeletePermanentlyFolderArgs {
+        id: args.id.or(target_id.map(str::to_string)),
+        target: None,
+    };
     let id = required_or_prompt(
         args.id,
         "id",
@@ -1951,8 +2053,9 @@ async fn run(cli: Cli) -> Result<()> {
             AccountsCmd::Switch { email } => accounts::switch(email).await?,
         },
         Commands::Usage => drive_ops::usage().await?,
-        Commands::List { id, path, extended } => {
-            drive_ops::list(id.as_deref(), path.as_deref(), extended).await?
+        Commands::List { target, id, path, extended } => {
+            let (id, path) = target_or_flags(target.as_deref(), id.as_deref(), path.as_deref());
+            drive_ops::list(id, path, extended).await?
         }
         Commands::Recents { limit, extended } => recents::recents(limit, extended).await?,
         Commands::Du { folder, children, bytes } => {
@@ -2015,37 +2118,68 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await?
         }
-        Commands::IdFromPath { path } => paths::cmd_id_from_path(&path).await?,
-        Commands::PathFromId { id } => paths::cmd_path_from_id(&id).await?,
+        Commands::IdFromPath { target, path } => {
+            let path = required_or_prompt(
+                target.or(path),
+                "path",
+                "What is the Drive path? ",
+            )?;
+            // A uuid here is the other command's input, and resolving it as a
+            // path would fail with a confusing "no such item" instead.
+            if paths::looks_like_uuid(path.trim()) {
+                return Err(anyhow::anyhow!(
+                    "'{path}' is a uuid, not a path — use `ixr path-from-id {path}` \
+                     (or write a leading `/` if a folder is really named that)"
+                ));
+            }
+            paths::cmd_id_from_path(&path).await?
+        }
+        Commands::PathFromId { target, id } => {
+            let id = required_or_prompt(target.or(id), "id", "What is the uuid? ")?;
+            if !paths::looks_like_uuid(id.trim()) {
+                return Err(anyhow::anyhow!(
+                    "'{id}' is not a uuid — use `ixr id-from-path {id}` to go the other way"
+                ));
+            }
+            paths::cmd_path_from_id(&id).await?
+        }
         Commands::Thumbnail(cmd) => match cmd {
-            ThumbnailCmd::Generate { id, path } => {
-                thumbnail_ops::generate(id.as_deref(), path.as_deref()).await?
+            ThumbnailCmd::Generate { target, id, path } => {
+                let (id, path) = target_or_flags(target.as_deref(), id.as_deref(), path.as_deref());
+                thumbnail_ops::generate(id, path).await?
             }
             ThumbnailCmd::Upload {
+                target,
                 id,
                 path,
                 file,
                 raw,
-            } => thumbnail_ops::upload(id.as_deref(), path.as_deref(), &file, raw).await?,
+            } => {
+                let (id, path) = target_or_flags(target.as_deref(), id.as_deref(), path.as_deref());
+                thumbnail_ops::upload(id, path, &file, raw).await?
+            }
             ThumbnailCmd::Download {
+                target,
                 id,
                 path,
                 directory,
                 overwrite,
                 index,
             } => {
-                thumbnail_ops::download(id.as_deref(), path.as_deref(), directory.as_deref(), overwrite, index)
-                    .await?
+                let (id, path) = target_or_flags(target.as_deref(), id.as_deref(), path.as_deref());
+                thumbnail_ops::download(id, path, directory.as_deref(), overwrite, index).await?
             }
             #[cfg(feature = "termimage")]
             ThumbnailCmd::Display {
+                target,
                 id,
                 path,
                 index,
                 width,
                 height,
             } => {
-                thumbnail_ops::display(id.as_deref(), path.as_deref(), index, width, height).await?
+                let (id, path) = target_or_flags(target.as_deref(), id.as_deref(), path.as_deref());
+                thumbnail_ops::display(id, path, index, width, height).await?
             }
         },
         Commands::Versions(cmd) => match cmd {
@@ -2446,4 +2580,43 @@ async fn run(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::target_or_flags;
+
+    #[test]
+    fn a_positional_uuid_becomes_the_id_and_anything_else_the_path() {
+        let uuid = "00000000-0000-0000-0000-000000000000";
+        assert_eq!(target_or_flags(Some(uuid), None, None), (Some(uuid), None));
+        assert_eq!(
+            target_or_flags(Some("/Docs/report.pdf"), None, None),
+            (None, Some("/Docs/report.pdf"))
+        );
+        // A folder literally named like a uuid is still reachable: the leading
+        // slash makes it a path.
+        let named = "/00000000-0000-0000-0000-000000000000";
+        assert_eq!(target_or_flags(Some(named), None, None), (None, Some(named)));
+    }
+
+    #[test]
+    fn the_flags_are_used_when_there_is_no_positional() {
+        assert_eq!(target_or_flags(None, Some("an-id"), None), (Some("an-id"), None));
+        assert_eq!(target_or_flags(None, None, Some("/a/b")), (None, Some("/a/b")));
+        // Neither given: the caller decides what "absent" means (root, prompt,
+        // or error), exactly as before this argument existed.
+        assert_eq!(target_or_flags(None, None, None), (None, None));
+    }
+
+    #[test]
+    fn the_positional_wins_over_flags_that_clap_would_have_rejected() {
+        // `conflicts_with_all` makes this combination a usage error, so it can
+        // only be reached by constructing the args in code — pin the behaviour
+        // anyway rather than leaving it to chance.
+        assert_eq!(
+            target_or_flags(Some("/a/b"), Some("an-id"), Some("/other")),
+            (None, Some("/a/b"))
+        );
+    }
 }

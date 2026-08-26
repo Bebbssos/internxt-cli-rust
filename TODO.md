@@ -138,6 +138,30 @@ them. One PR each, all based on `dev`.
   `shared invite` here. Core already has the other half — `get_user_public_key`
   (`GET /users/public-key/{email}`), unused until this lands.
 
+## Positional targets on the rest of the commands
+
+Every command that acts on **one** Drive item now takes it positionally as well
+as via `--id`/`--path` (`list`, `du`, `tree`, `download file|folder`, `trash
+file|folder`, `delete [permanently] file|folder`, `thumbnail *`, `versions`,
+`shared info|revoke`, `id-from-path`, `path-from-id`). The commands that name
+**two** targets still take flags only, because each needs a decision rather than
+a mechanical change:
+
+- `move file|folder <ITEM> <DESTINATION>` and
+  `trash restore file|folder <ITEM> <DESTINATION>` — `mv` semantics, the obvious
+  pair to do next.
+- `rename file|folder <ITEM> <NEW_NAME>` — the second positional would replace
+  `-n/--name`, so decide whether the flag stays as an alternative.
+- `create folder <PATH>` — a single path carrying parent *and* new name
+  (`/a/b/new`), replacing the `-n` + `-p` pair. Needs a rule for a bare name
+  (root-relative?) and for a trailing slash.
+- `upload file|folder <LOCAL> [DEST]` — the only case where the first
+  positional is a **local** path and the second a Drive one; `cp`-like, but
+  worth being deliberate about since every other positional in the CLI is a
+  Drive target.
+- `sync up|down` and `compare folder` take a local *and* a remote side at once;
+  a bare positional reads ambiguously there, so they may be better left as-is.
+
 ## Beyond-og feature ideas (not in the official CLI)
 
 - sync-down `--delete=trash` → OS trash (needs a cross-platform trash lib; currently errors).
