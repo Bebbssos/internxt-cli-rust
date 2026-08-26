@@ -123,16 +123,6 @@ public keys, workspace admin, sharings). The engine side is done and the `dev`
 branch tracks core's git `main`; what follows is the CLI-side surface that uses
 them. One PR each, all based on `dev`.
 
-- **Recursive-walk perf, file half** - `sync`, `compare folder` and `download
-  folder` now take the *folder structure* from one `/folders/{uuid}/tree` call,
-  but still list each folder's files one folder at a time. The tree response
-  carries the file records too — verified field-for-field against the listings —
-  yet core's `DriveFileData` exposes no `modificationTime`/`updatedAt`, and
-  change detection runs on exactly that. Add the timestamps (and `status`) to
-  core's model, then take files straight from the tree and the whole inventory
-  becomes a single request. Note the endpoint's ceiling: a subtree of several
-  thousand files fails upstream (HTTP 520/524), which is why the walk stays as
-  the fallback.
 - **`du`** - `/folders/{uuid}/stats` returns a subtree's file count and total
   size server-side (core `get_folder_stats`, already used as the tree fast
   path's size gate and by `tree --stats`). No command exposes it on its own;

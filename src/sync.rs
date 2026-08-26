@@ -31,10 +31,6 @@ use crate::output;
 /// `compare` for its `--check-modified` tolerance.
 pub(crate) const MTIME_TOL_SECS: i64 = 2;
 const MAX_CONCURRENT_TRANSFERS: usize = 10;
-/// How many folder-content listings the tree fast path keeps in flight while
-/// filling in file records. Deliberately below `MAX_CONCURRENT_TRANSFERS`:
-/// these are metadata requests to the drive API, not transfers.
-const MAX_CONCURRENT_LISTINGS: usize = 8;
 
 /// What to do with items that exist only on the destination side.
 #[derive(Clone, Copy, PartialEq)]
@@ -298,13 +294,41 @@ async fn collect_folder_files(
     Ok(files)
 }
 
-/// Flatten a `/folders/{uuid}/tree` response into the rel-path → uuid map, with
-/// `""` = the requested root. Trashed/removed nodes are dropped explicitly:
-/// the live endpoint already omits them (verified against a trashed file, a
-/// trashed empty folder and a trashed folder holding a live file — none of them
-/// appeared), but the walk filters on `status` too, so this keeps the two
-/// paths identical even if the backend ever starts including them.
-fn flatten_tree(node: &FolderTree, rel: &str, dirs: &mut HashMap<String, String>) {
+/// Flatten a `/folders/{uuid}/tree` response into the same two maps the walk
+/// produces: rel-path → file and rel-path → folder uuid, with `""` = the
+/// requested root.
+///
+/// Trashed/removed nodes are dropped explicitly, folders and files alike: the
+/// live endpoint already omits them (verified against a trashed file, a trashed
+/// empty folder and a trashed folder holding a live file — none appeared), but
+/// the walk filters on `status` too, so this keeps the two paths identical even
+/// if the backend ever starts including them.
+fn flatten_tree(
+    node: &FolderTree,
+    rel: &str,
+    files: &mut HashMap<String, RemoteFile>,
+    dirs: &mut HashMap<String, String>,
+) {
+    for f in &node.files {
+        if !f.is_live() || f.uuid.is_empty() {
+            continue;
+        }
+        let Some(name) = f.full_name().filter(|n| !n.is_empty()) else {
+            continue;
+        };
+        files.insert(
+            join_rel(rel, &name),
+            RemoteFile {
+                uuid: f.uuid.clone(),
+                size: f.size.0,
+                // `modified_at` is core's own modificationTime-then-updatedAt
+                // fallback — the same order the listing decode above applies.
+                mtime: f.modified_at().map(rfc3339_secs).unwrap_or(0),
+                file_id: f.file_id.clone().filter(|s| !s.is_empty()),
+                bucket: f.bucket.clone(),
+            },
+        );
+    }
     for child in &node.children {
         let status = child.status.as_deref().unwrap_or("");
         if !(status.is_empty() || status == "EXISTS") {
@@ -315,26 +339,27 @@ fn flatten_tree(node: &FolderTree, rel: &str, dirs: &mut HashMap<String, String>
             continue;
         }
         let crel = join_rel(rel, name);
-        flatten_tree(child, &crel, dirs);
+        flatten_tree(child, &crel, files, dirs);
         dirs.insert(crel, child.uuid.clone());
     }
 }
 
-/// Folder structure in a single request, or `None` to use the walk.
+/// The whole remote inventory in a single request, or `None` to use the walk.
 ///
-/// `GET /folders/{uuid}/tree` returns the whole subtree at once, but the
-/// backend builds it eagerly and gives up on large ones: a subtree of several
-/// thousand files answered HTTP 520/524 (an upstream timeout, not an error
-/// body) on most attempts and took ~100s on the rest, while a few-dozen-file
-/// folder came back in ~2s. So the size is gauged first with the cheap
-/// `/stats` call and the tree is only attempted when the backend reports an
-/// *exact* file count — its own signal that the subtree is small enough to
-/// enumerate. Anything bigger, or any failure, falls back to the walk.
-async fn remote_dirs_from_tree(
+/// `GET /folders/{uuid}/tree` returns the entire subtree at once — every
+/// folder *and* every file record — but the backend builds it eagerly and
+/// gives up on large ones: a subtree of several thousand files answered HTTP
+/// 520/524 (an upstream timeout, not an error body) on most attempts and took
+/// ~100s on the rest, while a few-dozen-file folder came back in ~2s. So the
+/// size is gauged first with the cheap `/stats` call and the tree is only
+/// attempted when the backend reports an *exact* file count — its own signal
+/// that the subtree is small enough to enumerate. Anything bigger, or any
+/// failure, falls back to the walk.
+async fn remote_inventory_from_tree(
     api: &DriveApi,
     token: &str,
     root_uuid: &str,
-) -> Option<HashMap<String, String>> {
+) -> Option<(HashMap<String, RemoteFile>, HashMap<String, String>)> {
     if !folder_tree_enabled() {
         return None;
     }
@@ -344,10 +369,11 @@ async fn remote_dirs_from_tree(
     }
     match api.get_folder_tree(token, root_uuid).await {
         Ok(tree) => {
+            let mut files = HashMap::new();
             let mut dirs = HashMap::new();
             dirs.insert(String::new(), root_uuid.to_string());
-            flatten_tree(&tree, "", &mut dirs);
-            Some(dirs)
+            flatten_tree(&tree, "", &mut files, &mut dirs);
+            Some((files, dirs))
         }
         Err(e) => {
             output::status(&format!("Folder tree lookup failed ({e}); listing folder by folder"));
@@ -359,34 +385,20 @@ async fn remote_dirs_from_tree(
 /// Build the remote inventory rooted at `root_uuid`. Returns a rel-path →
 /// RemoteFile map and a rel-path → folder-uuid map (with `""` = root).
 ///
-/// Two ways to get there, same result: the folder structure comes from one
-/// `/folders/{uuid}/tree` request when that's available (see
-/// [`remote_dirs_from_tree`]), otherwise from the folder-by-folder walk. File
-/// records always come from the folder-content listing either way — the tree
-/// response carries them too, but core's `DriveFileData` doesn't expose their
-/// timestamps, and `modificationTime` is what change detection runs on.
+/// Two ways to get there, same result: one `/folders/{uuid}/tree` request for
+/// the whole subtree when that's available (see [`remote_inventory_from_tree`]),
+/// otherwise the folder-by-folder walk — two paginated listings per folder,
+/// strictly sequential, because a folder is only known once the listing that
+/// discovered it comes back.
 pub(crate) async fn build_remote_tree(
     api: &DriveApi,
     token: &str,
     root_uuid: &str,
 ) -> Result<(HashMap<String, RemoteFile>, HashMap<String, String>)> {
-    let Some(dirs) = remote_dirs_from_tree(api, token, root_uuid).await else {
-        return build_remote_tree_walk(api, token, root_uuid).await;
-    };
-    // Knowing every folder up front is what lets these overlap: the walk can
-    // only ask for a folder's files after the listing that discovered it came
-    // back, so it stays strictly sequential.
-    let mut files: HashMap<String, RemoteFile> = HashMap::new();
-    {
-        let mut listings = futures_util::stream::iter(
-            dirs.iter().map(|(rel, uuid)| collect_folder_files(api, token, rel, uuid)),
-        )
-        .buffer_unordered(MAX_CONCURRENT_LISTINGS);
-        while let Some(batch) = listings.next().await {
-            files.extend(batch?);
-        }
+    match remote_inventory_from_tree(api, token, root_uuid).await {
+        Some(inventory) => Ok(inventory),
+        None => build_remote_tree_walk(api, token, root_uuid).await,
     }
-    Ok((files, dirs))
 }
 
 /// The folder-by-folder walk: one paginated subfolder listing plus one
@@ -1217,12 +1229,21 @@ mod tests {
         assert_eq!(lines, vec!["  upload mystery.bin: unknown error".to_string()]);
     }
 
-    // The tree fast path's structure half. What the live endpoint answers is
-    // covered by the shapes below: nesting, and the trashed nodes the walk
-    // filters out with the same `status` rule.
+    // The tree fast path. What the live endpoint answers is covered by the
+    // shapes below: nesting, the file records the walk otherwise re-fetches
+    // folder by folder, and the trashed nodes both paths filter out with the
+    // same `status` rule.
 
     fn tree_of(v: Value) -> FolderTree {
         serde_json::from_value(v).unwrap()
+    }
+
+    fn flatten(tree: &FolderTree) -> (HashMap<String, RemoteFile>, HashMap<String, String>) {
+        let mut files = HashMap::new();
+        let mut dirs = HashMap::new();
+        dirs.insert(String::new(), tree.uuid.clone());
+        flatten_tree(tree, "", &mut files, &mut dirs);
+        (files, dirs)
     }
 
     #[test]
@@ -1231,10 +1252,12 @@ mod tests {
             "uuid": "root-uuid",
             "plainName": "root",
             "status": "EXISTS",
+            "files": [{ "uuid": "top-file", "plainName": "top", "type": "txt", "size": 1 }],
             "children": [{
                 "uuid": "a-uuid",
                 "plainName": "a",
                 "status": "EXISTS",
+                "files": [{ "uuid": "nested-file", "plainName": "deep", "type": "bin", "size": 2 }],
                 "children": [{
                     "uuid": "b-uuid",
                     "plainName": "b",
@@ -1244,14 +1267,65 @@ mod tests {
                 }]
             }]
         }));
-        let mut dirs = HashMap::new();
-        dirs.insert(String::new(), "root-uuid".to_string());
-        flatten_tree(&tree, "", &mut dirs);
+        let (files, dirs) = flatten(&tree);
 
         assert_eq!(dirs.len(), 3);
         assert_eq!(dirs[""], "root-uuid");
         assert_eq!(dirs["a"], "a-uuid");
         assert_eq!(dirs["a/b"], "b-uuid");
+
+        // Files are keyed by the same rel path the walk would produce, so a
+        // file in the root has no leading separator and a nested one is keyed
+        // under its folder.
+        assert_eq!(files.len(), 2);
+        assert_eq!(files["top.txt"].uuid, "top-file");
+        assert_eq!(files["a/deep.bin"].uuid, "nested-file");
+    }
+
+    #[test]
+    fn flatten_tree_maps_file_records_the_way_the_listing_decode_does() {
+        let tree = tree_of(json!({
+            "uuid": "root-uuid",
+            "status": "EXISTS",
+            "files": [
+                {
+                    "uuid": "full-uuid",
+                    "plainName": "report",
+                    "type": "pdf",
+                    // The API sends size as a string on some reads.
+                    "size": "4096",
+                    "fileId": "network-id",
+                    "bucket": "bucket-id",
+                    "modificationTime": "2026-02-03T04:05:06.000Z",
+                    "updatedAt": "2020-01-01T00:00:00.000Z",
+                    "status": "EXISTS"
+                },
+                {
+                    // No modificationTime: falls back to updatedAt, like the
+                    // listing decode's `.or_else(...)`.
+                    "uuid": "no-mtime-uuid",
+                    "plainName": "notes",
+                    "type": "",
+                    "size": 7,
+                    "updatedAt": "2026-02-03T04:05:06.000Z",
+                    // An empty fileId means "no network object", not "".
+                    "fileId": ""
+                }
+            ],
+            "children": []
+        }));
+        let (files, _) = flatten(&tree);
+
+        let full = &files["report.pdf"];
+        assert_eq!(full.size, 4096);
+        assert_eq!(full.file_id.as_deref(), Some("network-id"));
+        assert_eq!(full.bucket, "bucket-id");
+        assert_eq!(full.mtime, rfc3339_secs("2026-02-03T04:05:06.000Z"));
+
+        // Empty `type` must not produce a trailing dot in the key.
+        let no_mtime = &files["notes"];
+        assert_eq!(no_mtime.mtime, rfc3339_secs("2026-02-03T04:05:06.000Z"));
+        assert_eq!(no_mtime.file_id, None);
     }
 
     #[test]
@@ -1264,6 +1338,13 @@ mod tests {
         let tree = tree_of(json!({
             "uuid": "root-uuid",
             "status": "EXISTS",
+            "files": [{
+                "uuid": "trashed-file-uuid",
+                "plainName": "trashed",
+                "type": "txt",
+                "size": 1,
+                "status": "TRASHED"
+            }],
             "children": [
                 {
                     "uuid": "trashed-uuid",
@@ -1276,19 +1357,28 @@ mod tests {
                         "children": []
                     }]
                 },
-                { "uuid": "live-uuid", "plainName": "live", "status": "EXISTS", "children": [] },
+                {
+                    "uuid": "live-uuid",
+                    "plainName": "live",
+                    "status": "EXISTS",
+                    "files": [{ "uuid": "kept-uuid", "plainName": "kept", "type": "txt", "size": 1 }],
+                    "children": []
+                },
                 // No usable name to key a rel path on.
                 { "uuid": "nameless-uuid", "plainName": "", "status": "EXISTS", "children": [] }
             ]
         }));
-        let mut dirs = HashMap::new();
-        dirs.insert(String::new(), "root-uuid".to_string());
-        flatten_tree(&tree, "", &mut dirs);
+        let (files, dirs) = flatten(&tree);
 
         assert_eq!(dirs.len(), 2);
         assert!(dirs.contains_key("live"));
         assert!(!dirs.contains_key("trashed"));
         assert!(!dirs.contains_key("trashed/still-here"));
+        // A trashed file in a live folder goes too — otherwise `sync down`
+        // would try to download something the API no longer serves.
+        assert!(files.contains_key("live/kept.txt"));
+        assert!(!files.contains_key("trashed.txt"));
+        assert_eq!(files.len(), 1);
     }
 
     #[test]
