@@ -210,6 +210,7 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | &nbsp;&nbsp;[`accounts switch`](#accounts-switch) | Switch the active account. | — | |
 | [`usage`](#usage) | Plan, used space, upload limit. | `account`, `account-info` | New — no official equivalent. |
 | [`list`](#list) | List a folder's contents. | — | |
+| [`recents`](#recents) | Most recently modified files, account-wide. | `recent` | New — no official equivalent (drive-web has a "Recents" view). |
 | **[`create`](#create-folder)** | Create a folder | | |
 | &nbsp;&nbsp;[`create folder`](#create-folder) | Create a folder. | `create-folder` | |
 | **[`upload`](#upload-file)** | Upload a file or folder | | |
@@ -440,6 +441,69 @@ ixr list -p /Documents/Reports
 JSON output: `{ "success": true, "list": { "folders": [...], "files": [...] } }`
 — always the full (non-extended) item objects, regardless of `--extended`
 (that flag only affects the human-readable table).
+
+### `recents`
+
+Alias: `recent`. Not an official CLI command — drive-web has a "Recents" view,
+but the official CLI never exposed it. Lists the account's most recently
+modified files, newest first, across every folder, in a single request
+(`/files/recents`). Trashed and deleted files are filtered out server-side, so
+everything listed still exists. Like the other listing commands it runs through
+the workspace-scoped API client, so an active workspace applies.
+
+Flags: `-l/--limit <N>` — how many files to list, 1 to 1000, default 50. The
+endpoint's own default is 1000, which is far more than a terminal table is
+useful for; raise `--limit` when you need more. Out-of-range values are a usage
+error rather than a request that the server rejects.
+
+```sh
+ixr recents                # the 50 most recently modified files
+ixr recents --limit 200
+ixr recents --json
+```
+
+```
+Name                Size      Id
+------------------  --------  ------------------------------------
+quarterly.xlsx      1.21 MB   00000000-0000-0000-0000-000000000001
+notes.md            4.02 KB   00000000-0000-0000-0000-000000000002
+diagram.png         318.5 KB  00000000-0000-0000-0000-000000000003
+```
+
+There is deliberately no modified-date or containing-folder column, and no
+`--paths` flag. The endpoint returns both the timestamps and the parent folder
+for every entry, but the engine crate's typed file record
+(`internxt-core`'s `DriveFileData`) keeps only name/size/id, so neither reaches
+the CLI — recovering them here would mean an extra request per row for data the
+one request already fetched. The fix belongs in the engine; until then, use
+`list -e` on a folder for dates and `path-from-id` for a single file's path.
+
+JSON output:
+
+```json
+{
+  "success": true,
+  "recents": [
+    {
+      "uuid": "00000000-0000-0000-0000-000000000001",
+      "plainName": "quarterly",
+      "type": "xlsx",
+      "size": 1268776,
+      "bucket": "0000000000000000000000000",
+      "fileId": "000000000000000000000000"
+    }
+  ],
+  "hasUploadedFiles": true
+}
+```
+
+`hasUploadedFiles` separates a genuinely empty account from one that simply has
+nothing recent — the human-readable view says
+`No recent files — this account has never uploaded anything.` in that case. A
+non-empty list answers it for free; only an empty list costs the extra
+`/users/me/upload-status` request. Inside a workspace the field is `null` and
+the plain `No recent files.` wording is used: that endpoint is personal-account
+only, so an empty workspace listing says nothing about it.
 
 ### `create folder`
 
@@ -1359,7 +1423,7 @@ Known differences:
   is, as `serve webdav`.
 - **Not yet ported:** `config`, `logs`, `autocomplete`.
 - **New, with no official equivalent:** `usage`, `login-sso`, `accounts list`,
-  `accounts switch`, `download-folder`, `delete-file`/`delete-folder` (the
+  `accounts switch`, `recents`, `download-folder`, `delete-file`/`delete-folder` (the
   official CLI has `delete permanently file|folder` but no plain trash-alias
   `delete file|folder`), `sync-up`, `sync-down`, `id-from-path`, `path-from-id`,
   the `thumbnail` command family, the `backups` command family (backups are a
