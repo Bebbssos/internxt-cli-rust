@@ -26,6 +26,7 @@ mod sso;
 mod sync;
 mod thumbnail_ops;
 mod upload_limit;
+mod versions;
 #[cfg(feature = "vpn")]
 mod vpn;
 #[cfg(feature = "webdav")]
@@ -569,6 +570,14 @@ enum Commands {
     /// Manage a file's thumbnail: generate, upload a custom one, or download it.
     #[command(subcommand, alias = "thumbnails")]
     Thumbnail(ThumbnailCmd),
+    /// Browse a file's version history (see `versions list|restore|delete`).
+    ///
+    /// New — no official equivalent (the official CLI has no versions command;
+    /// version history is a drive-web feature). Versions are created
+    /// server-side, so an empty history is normal — see `usage` for whether
+    /// your plan keeps versions at all.
+    #[command(subcommand, alias = "version")]
+    Versions(VersionsCmd),
 
     // ---- space-form topic groups ----
     //
@@ -1391,6 +1400,38 @@ enum ThumbnailCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum VersionsCmd {
+    /// List the stored versions of a file, newest first.
+    List {
+        /// The file, as a Drive path (e.g. `/a/b/report.pdf`) or a uuid.
+        #[arg(value_name = "FILE")]
+        file: String,
+    },
+    /// Make a stored version the file's current content.
+    ///
+    /// The file keeps its uuid. Versions newer than the restored one are
+    /// dropped, and this cannot be undone.
+    Restore {
+        /// The file, as a Drive path (e.g. `/a/b/report.pdf`) or a uuid.
+        #[arg(value_name = "FILE")]
+        file: String,
+        /// The version id, from `versions list`.
+        #[arg(value_name = "VERSION_ID")]
+        version_id: String,
+    },
+    /// Permanently delete one stored version. The file's current content is
+    /// untouched. This action cannot be undone.
+    Delete {
+        /// The file, as a Drive path (e.g. `/a/b/report.pdf`) or a uuid.
+        #[arg(value_name = "FILE")]
+        file: String,
+        /// The version id, from `versions list`.
+        #[arg(value_name = "VERSION_ID")]
+        version_id: String,
+    },
+}
+
 fn prompt(msg: &str) -> Result<String> {
     print!("{msg}");
     std::io::stdout().flush()?;
@@ -1877,6 +1918,15 @@ async fn run(cli: Cli) -> Result<()> {
                 height,
             } => {
                 thumbnail_ops::display(id.as_deref(), path.as_deref(), index, width, height).await?
+            }
+        },
+        Commands::Versions(cmd) => match cmd {
+            VersionsCmd::List { file } => versions::list(&file).await?,
+            VersionsCmd::Restore { file, version_id } => {
+                versions::restore(&file, &version_id).await?
+            }
+            VersionsCmd::Delete { file, version_id } => {
+                versions::delete(&file, &version_id).await?
             }
         },
         #[cfg(any(feature = "webdav", feature = "fuse", feature = "smb"))]
