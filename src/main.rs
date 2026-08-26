@@ -19,6 +19,7 @@ pub(crate) mod session_creds;
 mod sftp;
 #[cfg(feature = "self-update")]
 mod self_update_cmd;
+mod sharing;
 #[cfg(feature = "smb")]
 mod smb;
 #[cfg(feature = "sso")]
@@ -659,6 +660,14 @@ enum Commands {
     /// backed up).
     #[command(subcommand)]
     Backups(BackupsCmd),
+    /// Inspect and revoke sharing.
+    ///
+    /// See `shared list|info|invites|roles|domains|revoke`. New — no official
+    /// CLI equivalent (sharing lives in the web app). Read-only apart from
+    /// `revoke`: *creating* a share needs key wrapping the engine doesn't
+    /// implement yet.
+    #[command(subcommand)]
+    Shared(SharedCmd),
     /// Internxt VPN: list available locations, or run a local proxy that
     /// tunnels through it (see `vpn locations`, `vpn proxy`). New — no
     /// official CLI equivalent (the VPN otherwise ships as a browser
@@ -959,6 +968,70 @@ enum BackupsCmd {
     /// Print the uuid of a device (or a file/folder inside it) — for
     /// chaining into other id-based commands, e.g. `mount --folder-uuid`.
     GetId(BackupsGetIdArgs),
+}
+
+#[derive(clap::Args)]
+struct SharedListArgs {
+    /// List only the folders other people shared with you (inbound). Folders
+    /// only — the endpoint behind it has no file equivalent.
+    #[arg(long, default_value_t = false, conflicts_with = "by_me")]
+    with_me: bool,
+    /// List only the folders you shared out (outbound). Folders only, as above.
+    #[arg(long, default_value_t = false)]
+    by_me: bool,
+    /// Page to fetch (0-based).
+    #[arg(long, default_value_t = 0)]
+    page: u32,
+    /// Items per page.
+    #[arg(long, default_value_t = 50)]
+    per_page: u32,
+    /// Sort order, as `field:DIRECTION` (e.g. `createdAt:ASC`, `views:DESC`).
+    /// Ignored with --with-me/--by-me: their endpoints don't take it.
+    #[arg(long, default_value = "createdAt:DESC")]
+    order_by: String,
+    /// Display additional information (uuid).
+    #[arg(short, long, default_value_t = false)]
+    extended: bool,
+}
+
+#[derive(clap::Args)]
+struct SharedItemArgs {
+    /// The file or folder: a Drive path (e.g. `/Docs/report.pdf`) or its
+    /// uuid. A value shaped exactly like a uuid is taken as one; write it as
+    /// a path (`/that-name`) if a Drive item is genuinely named that way.
+    #[arg(value_name = "ITEM")]
+    item: String,
+    /// Whether ITEM is a file or a folder. Only saves the extra lookup that
+    /// works this out when ITEM is a uuid.
+    #[arg(short = 't', long = "type", value_parser = ["file", "folder"])]
+    item_type: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct SharedInvitesArgs {
+    /// Maximum invitations to return. The endpoint only accepts 1-25.
+    #[arg(long, default_value_t = 25)]
+    limit: u32,
+    /// Invitations to skip.
+    #[arg(long, default_value_t = 0)]
+    offset: u32,
+}
+
+#[derive(Subcommand)]
+enum SharedCmd {
+    /// List shared items — everything visible to you by default, or one
+    /// direction with --by-me / --with-me.
+    List(SharedListArgs),
+    /// Show how one file or folder is shared, and who has been invited to it.
+    Info(SharedItemArgs),
+    /// List the sharing invitations waiting for you.
+    Invites(SharedInvitesArgs),
+    /// List the roles a share recipient can be given.
+    Roles,
+    /// List the domains public share links are served from.
+    Domains,
+    /// Stop sharing a file or folder.
+    Revoke(SharedItemArgs),
 }
 
 #[cfg(feature = "vpn")]
@@ -2309,6 +2382,23 @@ async fn run(cli: Cli) -> Result<()> {
                     .await?
             }
             BackupsCmd::GetId(args) => backups::get_id(&args.device, args.path.as_deref()).await?,
+        },
+        Commands::Shared(cmd) => match cmd {
+            SharedCmd::List(args) => {
+                sharing::list(
+                    sharing::Direction::from_flags(args.with_me, args.by_me),
+                    args.page,
+                    args.per_page,
+                    &args.order_by,
+                    args.extended,
+                )
+                .await?
+            }
+            SharedCmd::Info(args) => sharing::info(&args.item, args.item_type.as_deref()).await?,
+            SharedCmd::Invites(args) => sharing::invites(args.limit, args.offset).await?,
+            SharedCmd::Roles => sharing::roles().await?,
+            SharedCmd::Domains => sharing::domains().await?,
+            SharedCmd::Revoke(args) => sharing::revoke(&args.item, args.item_type.as_deref()).await?,
         },
         #[cfg(feature = "vpn")]
         Commands::Vpn(cmd) => match cmd {

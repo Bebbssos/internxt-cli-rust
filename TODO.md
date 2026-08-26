@@ -120,9 +120,11 @@ them. One PR each, all based on `dev`.
 - **Recursive-walk perf** - `sync`, `compare folder` and `download folder`
   paginate subfolders/subfiles folder by folder; the tree endpoint returns the
   whole subtree in one call.
-- **`shared`** - list shared-by-me / shared-with-me items, sharing roles and
-  invites, and revoke a share. Creating a share stays out for now: it needs the
-  key wrapping core doesn't implement yet.
+- **Creating a share** - `shared` ships the read side plus `revoke`, but not
+  sharing an item out: `POST /sharings` (and the invite flow) wraps the item
+  key for the recipient's public key, or for a link password, and core has no
+  such wrapping yet. Needs the core side first, then `shared create` /
+  `shared invite` here.
 
 ## Beyond-og feature ideas (not in the official CLI)
 
