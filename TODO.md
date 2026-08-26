@@ -117,9 +117,16 @@ public keys, workspace admin, sharings). The engine side is done and the `dev`
 branch tracks core's git `main`; what follows is the CLI-side surface that uses
 them. One PR each, all based on `dev`.
 
-- **Recursive-walk perf** - `sync`, `compare folder` and `download folder`
-  paginate subfolders/subfiles folder by folder; the tree endpoint returns the
-  whole subtree in one call.
+- **Recursive-walk perf, file half** - `sync`, `compare folder` and `download
+  folder` now take the *folder structure* from one `/folders/{uuid}/tree` call,
+  but still list each folder's files one folder at a time. The tree response
+  carries the file records too — verified field-for-field against the listings —
+  yet core's `DriveFileData` exposes no `modificationTime`/`updatedAt`, and
+  change detection runs on exactly that. Add the timestamps (and `status`) to
+  core's model, then take files straight from the tree and the whole inventory
+  becomes a single request. Note the endpoint's ceiling: a subtree of several
+  thousand files fails upstream (HTTP 520/524), which is why the walk stays as
+  the fallback.
 - **Creating a share** - `shared` ships the read side plus `revoke`, but not
   sharing an item out: `POST /sharings` (and the invite flow) wraps the item
   key for the recipient's public key, or for a link password, and core has no
