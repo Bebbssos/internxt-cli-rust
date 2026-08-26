@@ -203,6 +203,9 @@ enum Commands {
             value_parser = clap::value_parser!(u32).range(1..=recents::MAX_LIMIT as i64),
         )]
         limit: u32,
+        /// Display additional information (created date, id).
+        #[arg(short, long, default_value_t = false)]
+        extended: bool,
     },
     /// Print a folder's whole subtree as an indented tree.
     ///
@@ -1934,7 +1937,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::List { id, path, extended } => {
             drive_ops::list(id.as_deref(), path.as_deref(), extended).await?
         }
-        Commands::Recents { limit } => recents::recents(limit).await?,
+        Commands::Recents { limit, extended } => recents::recents(limit, extended).await?,
         Commands::Tree { folder, depth, folders_only, extended, stats } => {
             tree::tree(folder.as_deref(), depth, folders_only, extended, stats).await?
         }
