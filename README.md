@@ -1032,15 +1032,15 @@ exits non-zero — check the `actions` list (or the non-JSON status lines) for
 which paths failed and why.
 
 **How the remote side is enumerated.** Before transferring anything, both
-directions build an inventory of the remote folder. The folder structure comes
-from a single subtree request when the server can answer one (the same endpoint
-[`tree`](#tree) uses); the files in each folder are then listed a folder at a
-time, several in parallel. Large subtrees are built server-side and time out
-there, so the size is checked first and anything too big — plus any failure —
-falls back to listing every folder one by one, sequentially, as before. Either
-way the resulting inventory is the same, including trashed items, which both
-paths leave out. Set `IXR_FOLDER_TREE=0` (also `false`/`no`/`off`) to force the
-folder-by-folder listing everywhere it's used: `sync up`, `sync down`,
+directions build an inventory of the remote folder. When the server can answer
+one, that inventory — every folder *and* every file — comes from a **single
+subtree request** (the same endpoint [`tree`](#tree) uses), no matter how deep
+or wide the folder is. Large subtrees are built server-side and time out there,
+so the size is checked first and anything too big — plus any failure — falls
+back to listing every folder one by one, sequentially: two requests per folder.
+Either way the resulting inventory is identical, including trashed items, which
+both paths leave out. Set `IXR_FOLDER_TREE=0` (also `false`/`no`/`off`) to force
+the folder-by-folder listing everywhere it's used: `sync up`, `sync down`,
 [`download folder`](#download-folder) and
 [`compare folder`](#compare-file--compare-folder).
 
