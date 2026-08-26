@@ -123,12 +123,6 @@ public keys, workspace admin, sharings). The engine side is done and the `dev`
 branch tracks core's git `main`; what follows is the CLI-side surface that uses
 them. One PR each, all based on `dev`.
 
-- **`du`** - `/folders/{uuid}/stats` returns a subtree's file count and total
-  size server-side (core `get_folder_stats`, already used as the tree fast
-  path's size gate and by `tree --stats`). No command exposes it on its own;
-  `ixr du <FOLDER>` would be one request where measuring a subtree otherwise
-  means walking it. Mind the `isFileCountExact`/`isTotalSizeExact` flags — the
-  backend estimates for large folders and says so.
 - **Creating a share** - `shared` ships the read side plus `revoke`, but not
   sharing an item out: `POST /sharings` (and the invite flow) wraps the item
   key for the recipient's public key, or for a link password, and core has no

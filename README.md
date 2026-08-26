@@ -212,6 +212,7 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | [`list`](#list) | List a folder's contents. | — | |
 | [`recents`](#recents) | Most recently modified files, account-wide, with the folder each lives in. | `recent` | New — no official equivalent (drive-web has a "Recents" view). |
 | [`tree`](#tree) | Print a folder's whole subtree, indented. | — | New — no official equivalent. One request for the whole subtree. |
+| [`du`](#du) | A folder's recursive size and file count. | — | New — no official equivalent. Counted server-side, one request. |
 | **[`create`](#create-folder)** | Create a folder | | |
 | &nbsp;&nbsp;[`create folder`](#create-folder) | Create a folder. | `create-folder` | |
 | **[`upload`](#upload-file)** | Upload a file or folder | | |
@@ -544,6 +545,87 @@ non-empty list answers it for free; only an empty list costs the extra
 `/users/me/upload-status` request. Inside a workspace the field is `null` and
 the plain `No recent files.` wording is used: that endpoint is personal-account
 only, so an empty workspace listing says nothing about it.
+### `du`
+
+Shows how much a folder holds — total size and file count for the **whole
+subtree**, counted server-side in a single request. Nothing is walked and
+nothing is downloaded, so it costs the same on a folder with three files as on
+one with thirty thousand.
+
+Argument: `[FOLDER]` — a Drive path (`/Documents`) or a folder id (uuid);
+defaults to the account (or workspace) root. A uuid-shaped value is taken as an
+id, so write a leading `/` if a folder is literally named like a uuid. The
+`//drive` and `//backups/<device>` [path escapes](#path-syntax) work here too;
+the bare `//` and `//backups` groupings don't — they aren't folders and have no
+size of their own.
+
+Flags: `-c/--children` (break the total down by direct subfolder, largest
+first), `-b/--bytes` (raw byte counts instead of human-readable sizes).
+
+```sh
+ixr du                       # the whole account
+ixr du /Documents
+ixr du /Documents --children
+ixr du /Documents --bytes --json
+```
+
+```
+$ ixr du /Documents
+1.21 GB  482 files  /Documents
+
+$ ixr du /Documents --children
+Size      Files  Name
+--------  -----  --------
+900 MB    310    Reports
+280 MB    140    Archive
+30.5 MB   28     Scans
+9.5 MB    4      .
+1.21 GB  482 files  /Documents
+```
+
+The `.` row is what sits **directly** in the folder rather than in a subfolder:
+the parent's total minus its children's. It's derived from numbers already
+fetched, not an extra request, and is left out entirely when any of those
+numbers is an estimate — one estimate minus another isn't worth printing.
+
+`--children` costs one request per direct subfolder (run several at a time), so
+it's the one part of this command that scales with folder count. The plain form
+is always a single request.
+
+**Estimates:** the endpoint estimates for large folders and says which number it
+guessed. Those are marked `(estimate)` in the human output and reported as
+`sizeExact` / `filesExact` in `--json` — the account root of a large account
+typically comes back estimated. Numbers without the marker are exact.
+[`tree --stats`](#tree) prints the same endpoint's answer next to a
+tree-derived count, which is a way to see how far off an estimate is.
+
+JSON output:
+
+```json
+{
+  "success": true,
+  "folder": "/Documents",
+  "uuid": "00000000-0000-0000-0000-000000000001",
+  "size": 1298765432,
+  "files": 482,
+  "sizeExact": true,
+  "filesExact": true,
+  "children": [
+    {
+      "name": "Reports",
+      "uuid": "00000000-0000-0000-0000-000000000002",
+      "size": 943718400,
+      "files": 310,
+      "sizeExact": true,
+      "filesExact": true
+    }
+  ]
+}
+```
+
+`children` is `null` without `--children`. Sizes are always raw bytes in JSON;
+`--bytes` only affects the human-readable table.
+
 ### `tree`
 
 Prints a folder's whole subtree as an indented tree. Unlike [`list`](#list),
@@ -1890,7 +1972,7 @@ Known differences:
 - **New, with no official equivalent:** `usage`, `login-sso`, `accounts list`,
   `accounts switch`, `recents`, `download-folder`, `delete-file`/`delete-folder` (the
   official CLI has `delete permanently file|folder` but no plain trash-alias
-  `delete file|folder`), `tree`, `sync-up`, `sync-down`, `id-from-path`, `path-from-id`,
+  `delete file|folder`), `tree`, `du`, `sync-up`, `sync-down`, `id-from-path`, `path-from-id`,
   the `thumbnail` command family, the `versions` command family (file version
   history is a drive-web feature there), the `backups` command family (backups are a
   desktop-app-only feature there), the `shared` command family (sharing is

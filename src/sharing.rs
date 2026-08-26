@@ -137,15 +137,6 @@ impl Target {
 /// Canonical 8-4-4-4-12 hex. A Drive name could in principle be uuid-shaped;
 /// writing it as a path (`/that-name`) is the escape hatch, since the leading
 /// separator alone makes it stop matching.
-fn looks_like_uuid(s: &str) -> bool {
-    let b = s.as_bytes();
-    b.len() == 36
-        && b.iter().enumerate().all(|(i, c)| match i {
-            8 | 13 | 18 | 23 => *c == b'-',
-            _ => c.is_ascii_hexdigit(),
-        })
-}
-
 /// Nothing in a uuid says whether it points at a file or a folder, and the
 /// sharing routes need to know. Probe it the way `path-from-id` does:
 /// `/folders/{uuid}/meta` 404s for a file uuid, so success ⇒ folder.
@@ -175,7 +166,7 @@ async fn resolve_item(
     if item.is_empty() {
         return Err(anyhow!("No file or folder given."));
     }
-    if looks_like_uuid(item) {
+    if paths::looks_like_uuid(item) {
         let item_type = match forced {
             Some(t) => t.to_string(),
             None => type_of_uuid(api, token, item).await?,
@@ -518,16 +509,6 @@ pub async fn revoke(item: &str, item_type: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn uuid_vs_path() {
-        assert!(looks_like_uuid("00000000-0000-0000-0000-000000000000"));
-        assert!(!looks_like_uuid("/00000000-0000-0000-0000-000000000000"));
-        assert!(!looks_like_uuid("/Docs/report.pdf"));
-        assert!(!looks_like_uuid("report.pdf"));
-        // Right shape, non-hex payload.
-        assert!(!looks_like_uuid("zzzzzzzz-0000-0000-0000-000000000000"));
-    }
 
     #[test]
     fn missing_fields_render_as_dashes() {

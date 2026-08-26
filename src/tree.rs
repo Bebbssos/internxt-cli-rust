@@ -21,28 +21,6 @@ use crate::paths::{self, Expect};
 use internxt_core::api::DriveApi;
 use internxt_core::models::{FolderStats, FolderTree};
 
-/// `true` if `s` has the shape of a Drive uuid (8-4-4-4-12 hex). Used to decide
-/// whether the positional argument is an id or a path — a path can always be
-/// forced by writing it with a leading `/`.
-fn looks_like_uuid(s: &str) -> bool {
-    let groups = [8usize, 4, 4, 4, 12];
-    let parts: Vec<&str> = s.split('-').collect();
-    parts.len() == groups.len()
-        && parts
-            .iter()
-            .zip(groups)
-            .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
-}
-
-/// Split the positional folder argument into the `(id, path)` pair the shared
-/// resolver takes: a uuid-shaped value is an id, anything else is a path.
-fn split_target(folder: Option<&str>) -> (Option<&str>, Option<&str>) {
-    match folder {
-        Some(f) if looks_like_uuid(f.trim()) => (Some(f), None),
-        other => (None, other),
-    }
-}
-
 /// Display name of a tree node: the plain name, falling back to the encrypted
 /// one only so an odd record still prints something identifiable.
 fn folder_name(node: &FolderTree) -> String {
@@ -244,7 +222,7 @@ pub async fn tree(
         ));
     }
 
-    let (id, path) = split_target(folder);
+    let (id, path) = paths::split_id_or_path(folder);
     let uuid = paths::resolve_opt(&api, token, creds.root_folder(), id, path, Expect::Folder)
         .await?
         .unwrap_or_else(|| creds.root_folder().to_string());
@@ -368,32 +346,4 @@ pub async fn tree(
     }
     output::emit(human.trim_end(), payload);
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn uuid_shape_is_recognized() {
-        assert!(looks_like_uuid("00000000-0000-0000-0000-000000000000"));
-        assert!(looks_like_uuid("0123abcd-4567-89ef-0123-456789abcdef"));
-        assert!(!looks_like_uuid("/Documents"));
-        assert!(!looks_like_uuid("Documents"));
-        // A folder whose name happens to be uuid-shaped is still reachable as
-        // a path by writing the leading slash.
-        assert!(!looks_like_uuid("/00000000-0000-0000-0000-000000000000"));
-        assert!(!looks_like_uuid("zzzzzzzz-0000-0000-0000-000000000000"));
-        assert!(!looks_like_uuid("0000-0000-0000-0000-000000000000"));
-    }
-
-    #[test]
-    fn split_target_picks_id_only_for_a_uuid() {
-        let (id, path) = split_target(Some("00000000-0000-0000-0000-000000000000"));
-        assert!(id.is_some() && path.is_none());
-        let (id, path) = split_target(Some("/Documents"));
-        assert!(id.is_none() && path.is_some());
-        let (id, path) = split_target(None);
-        assert!(id.is_none() && path.is_none());
-    }
 }

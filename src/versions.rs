@@ -31,21 +31,12 @@ use crate::paths::{self, Expect};
 /// two are unambiguous in practice: a Drive name that happens to be exactly
 /// this shape (36 chars, hyphens in those four positions, hex everywhere else)
 /// would also have to carry no extension to be mistaken for one.
-fn looks_like_uuid(s: &str) -> bool {
-    let b = s.as_bytes();
-    b.len() == 36
-        && b.iter().enumerate().all(|(i, c)| match i {
-            8 | 13 | 18 | 23 => *c == b'-',
-            _ => c.is_ascii_hexdigit(),
-        })
-}
-
 /// Resolve the `<file>` argument — a uuid or a Drive path — to a file uuid.
 /// Both forms go through the same resolver every other file command uses, so
 /// path semantics (including the `//backups/...` / `//drive/...` escapes) are
 /// identical here.
 async fn resolve_file(api: &DriveApi, creds: &Credentials, file: &str) -> Result<String> {
-    let (id, path) = if looks_like_uuid(file.trim()) {
+    let (id, path) = if paths::looks_like_uuid(file.trim()) {
         (Some(file), None)
     } else {
         (None, Some(file))
@@ -177,16 +168,5 @@ pub async fn delete(file: &str, version_id: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::looks_like_uuid;
 
-    #[test]
-    fn uuid_vs_path() {
-        assert!(looks_like_uuid("2f8a1c40-9b7e-4d3a-8f21-0c5b6e7d1a90"));
-        assert!(!looks_like_uuid("/folder/report.pdf"));
-        assert!(!looks_like_uuid("report.pdf"));
-        // Right length and hyphen positions, but not hex.
-        assert!(!looks_like_uuid("zf8a1c40-9b7e-4d3a-8f21-0c5b6e7d1a90"));
-        // Hyphens in the wrong places.
-        assert!(!looks_like_uuid("2f8a1c409b7e-4d3a-8f21-0c5b6e7d1a90-"));
-    }
 }
