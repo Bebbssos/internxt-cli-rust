@@ -164,7 +164,10 @@ targets your root folder (or workspace root, if a workspace is active).
 ## Path syntax
 
 A normal Drive path looks like `/Documents/report.pdf` (the leading `/`
-is optional — `Documents/report.pdf` means the same thing).
+is optional — `Documents/report.pdf` means the same thing). A path like this
+resolves in one request whatever its depth (two when the command accepts either
+a file or a folder there); the `//` forms below are walked one folder at a time
+instead, so they cost one request per component.
 
 A path starting with `//` is a special root with two entries: `drive` (your
 normal Drive root) and `backups` (your [backup devices](#backups-devices-list)).

@@ -1,9 +1,13 @@
 //! Path <-> uuid resolution for Drive items.
 //!
-//! Turns a slash path like `/a/b/file.txt` into a Drive uuid by walking the
-//! folder tree from the account/workspace root (workspace-aware, like
-//! `serve::tree` but cache-free and available without the serve features), and
-//! turns a uuid back into a path via the folders `ancestors` endpoint.
+//! Turns a slash path like `/a/b/file.txt` into a Drive uuid and back: a uuid
+//! becomes a path via the folders `ancestors` endpoint, and a path becomes a
+//! uuid either in one request (`GET /files|folders/meta?path=`, when it's an
+//! ordinary path from the account root) or by walking the folder tree one
+//! listing per component (workspace-aware, like `serve::tree` but cache-free
+//! and available without the serve features). The walk stays the source of
+//! truth: the single-request lookup is a pure optimization that hands back to
+//! it whenever it can't answer — see [`resolve_via_meta`].
 //!
 //! Only *live* (non-trashed) items are reachable by path — the walk uses the
 //! same paginated `subfolders`/`subfiles` listings the rest of the CLI uses.
@@ -230,10 +234,115 @@ async fn resolve_namespaced_path(
     }
 }
 
-/// Resolve `path` (relative to `root`) to a Drive item, walking the folder
-/// tree. A leading `//` escapes into an explicit namespace instead — see the
-/// module doc.
+/// `true` when a core API error is the server's definite "nothing at this
+/// path" answer. Core surfaces failures as `"<ctx> failed: HTTP <status>:
+/// <body>"`, so a 404 is recognizable by string; anything else (a timeout, a
+/// 5xx, a response that no longer deserializes) is *not* an answer about the
+/// path and must never be treated as one.
+fn is_not_found(err: &anyhow::Error) -> bool {
+    err.to_string().contains("HTTP 404")
+}
+
+/// The absolute path spelling the `?path=` endpoints want, rebuilt from the
+/// already-split components: exactly one leading slash, none trailing or
+/// doubled. The leading `/` is not cosmetic — without it the server answers
+/// `400 Invalid path provided`.
+fn meta_path(comps: &[String]) -> String {
+    format!("/{}", comps.join("/"))
+}
+
+/// Resolve a whole path from the account root in one request, via
+/// `GET /folders/meta?path=` / `GET /files/meta?path=`, instead of one listing
+/// per component. `None` means "no answer" and the caller falls back to
+/// [`walk_components`].
+///
+/// Not every path is eligible, and an ineligible one is `None` without any
+/// request: a `//`-namespaced path (`//backups/<device>/...` is rooted at a
+/// device, `//drive/...` deliberately means the walk), the root itself (which
+/// costs no request at all to "resolve"), and anything under an active
+/// workspace — these endpoints have no workspace-scoped variant (og exposes
+/// none), so there they would answer about the personal drive, which is a
+/// wrong item rather than a slow one.
+///
+/// The endpoints want an absolute path, and rebuilding it from [`components`]
+/// normalizes away the leading, trailing and doubled slashes callers may pass.
+/// A file's last component carries its extension (`/dir/notes.txt`), which is
+/// exactly what the walk matches via [`file_display_name`], so the two agree
+/// on the same spelling.
+///
+/// `None` also covers a definite 404, not just an unexpected failure: the walk
+/// names the component that is actually missing (`No such folder 'b' at path:
+/// /a/b/c`) and can tell "missing" from "that's a folder, not a file", neither
+/// of which a whole-path 404 can express — and keeping those messages matters
+/// more than saving requests on a lookup that is about to fail anyway. Handing
+/// back on *every* unhappy answer also means a server-side change to these
+/// endpoints can only ever cost speed, never correctness.
+async fn resolve_via_meta(api: &DriveApi, token: &str, path: &str, expect: Expect) -> Option<Resolved> {
+    if path.starts_with("//") || api.is_workspace() {
+        return None;
+    }
+    let comps = components(path);
+    if comps.is_empty() {
+        return None;
+    }
+    let path = meta_path(&comps);
+    // Folders first when either kind will do: the walk matches a subfolder
+    // before a subfile at every component, so a name that exists as both has
+    // to resolve to the folder — asking about the file first would silently
+    // flip that precedence. It costs nothing either: a hit is one request
+    // whichever kind matches and a miss two, both below the walk's one request
+    // per component for any path deeper than a single name.
+    if expect != Expect::File {
+        match api.get_folder_by_path(token, &path).await {
+            Ok(meta) if !meta.deleted && !meta.removed && !meta.uuid.is_empty() => {
+                return Some(Resolved { uuid: meta.uuid, is_folder: true })
+            }
+            // Only a definite "no such folder" leaves room for the path to be
+            // a file instead. Everything else — a transient failure, or a
+            // `deleted`/`removed` record, which would be a trashed item the
+            // walk (EXISTS entries only) doesn't consider reachable by path —
+            // goes back to the walk.
+            Err(e) if is_not_found(&e) => {}
+            _ => return None,
+        }
+    }
+    if expect == Expect::Folder {
+        return None;
+    }
+    match api.get_file_by_path(token, &path).await {
+        Ok(file) if !file.uuid.is_empty() => Some(Resolved { uuid: file.uuid, is_folder: false }),
+        _ => None,
+    }
+}
+
+/// Resolve `path` from the account/workspace root to a Drive item, in one
+/// request where [`resolve_via_meta`] can and by walking the folder tree
+/// otherwise. A leading `//` escapes into an explicit namespace instead — see
+/// the module doc.
+///
+/// `root` must be the account's (or the active workspace's) root folder, since
+/// that is what the single-request `?path=` lookup resolves against. To
+/// resolve a path inside an arbitrary subtree — a backup device's folder —
+/// use [`resolve_path_in_subtree`], which only ever walks.
 pub async fn resolve_path(
+    api: &DriveApi,
+    token: &str,
+    root: &str,
+    path: &str,
+    expect: Expect,
+) -> Result<Resolved> {
+    if let Some(hit) = resolve_via_meta(api, token, path, expect).await {
+        return Ok(hit);
+    }
+    resolve_path_in_subtree(api, token, root, path, expect).await
+}
+
+/// The always-walk half of [`resolve_path`]: its fallback, and the entry point
+/// for callers whose `root` is *not* the account/workspace root but an
+/// arbitrary subtree (a backup device's folder). Such a root has to walk — the
+/// `?path=` endpoints only understand paths from the account root, and would
+/// happily answer about a same-named path over there instead.
+pub async fn resolve_path_in_subtree(
     api: &DriveApi,
     token: &str,
     root: &str,
@@ -608,6 +717,25 @@ mod tests {
         assert!(!is_blank_but_provided(Some("abc")));
         assert!(!is_blank_but_provided(Some("  x  ")));
         assert!(!is_blank_but_provided(Some("/a/b")));
+    }
+
+    #[test]
+    fn meta_path_normalizes_what_components_tolerates() {
+        // Leading, trailing and doubled slashes are all fine on input; the
+        // endpoint gets one canonical absolute path either way.
+        assert_eq!(meta_path(&components("/a/b")), "/a/b");
+        assert_eq!(meta_path(&components("a/b")), "/a/b");
+        assert_eq!(meta_path(&components("/a//b/")), "/a/b");
+        // A file keeps its extension — the same spelling `file_display_name`
+        // builds for the walk to match on.
+        assert_eq!(meta_path(&components("/dir/notes.txt")), "/dir/notes.txt");
+    }
+
+    #[test]
+    fn is_not_found_only_matches_a_404() {
+        assert!(is_not_found(&anyhow!("getFolderByPath failed: HTTP 404 Not Found: {{}}")));
+        assert!(!is_not_found(&anyhow!("getFolderByPath failed: HTTP 502 Bad Gateway: {{}}")));
+        assert!(!is_not_found(&anyhow!("error decoding response body")));
     }
 
     #[test]
