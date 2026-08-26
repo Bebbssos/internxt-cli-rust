@@ -52,13 +52,21 @@ diff upstream against them to find changes worth pulling in.
   Serve backends (WebDAV/FUSE/SMB/NFS/SFTP) also upload thumbnails on write (og only
   does WebDAV; the rest are our backends). `IXR_THUMBNAILS=0` disables everywhere.
 - Retry with backoff on transient failures (`uploadFileWithRetry`, MAX_RETRIES/DELAYS_MS).
-- Name-collision pre-flight on upload. `upload-file`/`upload-folder` and the serve
-  backends learn about a same-named remote item from the listing they already do (or
-  from `create_folder`'s "already exists" error). Core has
-  `check_duplicate_files`/`check_duplicate_folders` (`POST
-  /folders/content/{uuid}/{files,folders}/existence`) which answers with the colliding
-  records directly — one request, no listing, and it hands back what to replace. Unused
-  by the CLI so far.
+- Name-collision pre-flight on upload. **Deliberately not done** — noted here so the
+  next person doesn't re-derive it. Core wraps `check_duplicate_files` /
+  `check_duplicate_folders` (`POST /folders/content/{uuid}/{files,folders}/existence`),
+  which answers with the colliding records directly: one request, no listing, and it
+  hands back what would be replaced. Strictly better than a listing *where a check
+  already happens*, but the CLI's upload commands don't check at all today — they
+  upload and let the server sort it out — so wiring it in would **add** behaviour
+  rather than speed up existing behaviour, and silently skipping a "duplicate" is a
+  change users would notice. If it's ever wanted, the shape that doesn't surprise
+  anyone is an opt-in flag (`--skip-existing` / `--no-clobber`) on `upload file` /
+  `upload folder`, with the batch checked in one request before the transfers start;
+  `upload folder` benefits most, since it's the one that creates many names at once.
+  The place a pre-flight would pay off without any new flag is core's
+  `transfer::find_existing_folder`, on `create_folder`'s "already exists" error path —
+  a core change, not a CLI one.
 - HMAC on upload (sdk now stores hmac on upload — see sdk commit; node inxt-js
   passes `hmac: undefined`, so we skip it. Revisit if server starts requiring it.)
 
