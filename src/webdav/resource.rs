@@ -97,10 +97,13 @@ pub async fn resolve_item(
     cache: &FolderCache,
 ) -> Result<Option<DriveItem>> {
     if resource.components.is_empty() {
+        // The root is synthesized rather than fetched, so it carries only the
+        // uuid and the `updatedAt` sampled at startup — see `etag` for what
+        // that means for the root collection's ETag.
         return Ok(Some(DriveItem::Folder(FolderItem {
             uuid: root.to_string(),
-            plain_name: String::new(),
             updated_at: root_updated_at.to_string(),
+            ..Default::default()
         })));
     }
 

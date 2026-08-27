@@ -7,6 +7,7 @@
 //! built with the `webdav-tls` feature.
 
 mod cache;
+mod etag;
 mod handlers;
 mod resource;
 mod xml;

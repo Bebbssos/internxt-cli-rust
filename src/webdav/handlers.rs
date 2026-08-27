@@ -16,6 +16,7 @@ use std::path::Path;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
+use super::etag;
 use super::resource::{self, DriveItem, FolderItem, Resource};
 use super::xml;
 use super::{log, now_rfc3339, status_response, AppError, Ctx};
@@ -35,7 +36,8 @@ fn split_name(name: &str) -> (String, String) {
     }
 }
 
-/// A UUID-v4-ish random identifier (hex with dashes). Used for etags / lock tokens.
+/// A UUID-v4-ish random identifier (hex with dashes). Used for lock tokens
+/// (etags are content-derived — see `etag`).
 fn random_uuid() -> String {
     let mut b = [0u8; 16];
     rand::rng().fill(&mut b);
@@ -128,10 +130,15 @@ pub async fn propfind(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
             &content_type_for(&f.display_name()),
             &f.updated_at,
             f.size,
-            &random_uuid(),
+            &etag::file_etag(&f),
         ),
         DriveItem::Folder(folder) => {
-            let mut out = xml::folder_response(&resource.url, &folder.plain_name, &folder.updated_at);
+            let mut out = xml::folder_response(
+                &resource.url,
+                &folder.plain_name,
+                &folder.updated_at,
+                &etag::folder_etag(&folder),
+            );
             if depth != "0" {
                 out.push_str(&folder_children(&api, token, &resource.url, &folder, &ctx.cache).await?);
             }
@@ -167,7 +174,12 @@ async fn folder_children(
     let mut out = String::new();
     for f in folders {
         let href = format!("{base}{}/", f.plain_name);
-        out.push_str(&xml::folder_response(&href, &f.plain_name, &f.updated_at));
+        out.push_str(&xml::folder_response(
+            &href,
+            &f.plain_name,
+            &f.updated_at,
+            &etag::folder_etag(&f),
+        ));
     }
     for f in files {
         let name = f.display_name();
@@ -178,7 +190,7 @@ async fn folder_children(
             &content_type_for(&name),
             &f.updated_at,
             f.size,
-            &random_uuid(),
+            &etag::file_etag(&f),
         ));
     }
     Ok(out)
@@ -209,8 +221,15 @@ pub async fn get(ctx: &Ctx, req: Request, head_only: bool) -> Result<Response, A
 
     let file = match item {
         Some(DriveItem::File(f)) => f,
-        // HEAD on a collection is allowed (200, no body); GET is not.
-        Some(DriveItem::Folder(_)) if head_only => return Ok(status_response(StatusCode::OK)),
+        // HEAD on a collection is allowed (200, no body); GET is not. Upstream
+        // sets the ETag for either kind, so a collection HEAD carries one too.
+        Some(DriveItem::Folder(folder)) if head_only => {
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("ETag", etag::quoted(&etag::folder_etag(&folder)))
+                .body(Body::empty())
+                .unwrap());
+        }
         Some(DriveItem::Folder(_)) => {
             return Err(AppError::not_found(format!(
                 "{} is a collection, use PROPFIND instead.",
@@ -239,7 +258,8 @@ pub async fn get(ctx: &Ctx, req: Request, head_only: bool) -> Result<Response, A
         .status(StatusCode::OK)
         .header("Content-Type", "application/octet-stream")
         .header("Content-Length", content_length.to_string())
-        .header("Accept-Ranges", "bytes");
+        .header("Accept-Ranges", "bytes")
+        .header("ETag", etag::quoted(&etag::file_etag(&file)));
 
     if head_only || size == 0 {
         return Ok(builder.body(Body::empty()).unwrap());
@@ -470,13 +490,13 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
     };
 
     let now = now_rfc3339();
-    let result_uuid = match &replace_uuid {
-        Some(old_uuid) => api
-            .replace_file_or_recreate(
+    let created = match &replace_uuid {
+        Some(old_uuid) => {
+            api.replace_file_or_recreate(
                 token, old_uuid, &file_id, size, &plain, &ftype, &parent.uuid, &bucket, &now, &now,
             )
             .await?
-            .uuid,
+        }
         None => {
             api.create_file_entry(
                 token,
@@ -490,9 +510,26 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
                 &now,
             )
             .await?
-            .uuid
         }
     };
+    let result_uuid = created.uuid.clone();
+
+    // Etag of the file as it now exists, so the client can cache what it just
+    // wrote without an extra PROPFIND (mirrors upstream's PUT `ETag` header).
+    // Built from the create/replace response, which carries the same record the
+    // folder listing will hand a later PROPFIND/GET.
+    let put_etag = etag::file_etag(&tree::FileItem {
+        uuid: created.uuid,
+        plain_name: plain.clone(),
+        file_type: ftype.clone(),
+        size,
+        bucket: bucket.clone(),
+        file_id: if file_id.is_empty() { None } else { Some(file_id.clone()) },
+        updated_at: created.updated_at.unwrap_or_default(),
+        created_at: created.created_at.unwrap_or_default(),
+        creation_time: created.creation_time.unwrap_or_default(),
+        modification_time: created.modification_time.unwrap_or_default(),
+    });
 
     if let Some(tmp) = &retained_tmp {
         crate::serve::thumbnail::upload_thumbnail_best_effort(
@@ -511,7 +548,11 @@ pub async fn put(ctx: &Ctx, req: Request) -> Result<Response, AppError> {
     } else {
         StatusCode::CREATED
     };
-    Ok(status_response(status))
+    Ok(Response::builder()
+        .status(status)
+        .header("ETag", etag::quoted(&put_etag))
+        .body(Body::empty())
+        .unwrap())
 }
 
 /// A temp file that deletes itself on drop. Used to spool an unknown-length PUT.
@@ -814,8 +855,8 @@ async fn create_parents(
     }
     let mut current = FolderItem {
         uuid: ctx.root_folder.clone(),
-        plain_name: String::new(),
         updated_at: ctx.root_updated_at.clone(),
+        ..Default::default()
     };
     for comp in components {
         current = get_or_create_child(ctx, api, token, &current.uuid, comp).await?;
@@ -853,15 +894,17 @@ async fn get_or_create_child(
         match api.create_folder(token, name, parent_uuid).await {
             Ok(v) => {
                 ctx.cache.invalidate(parent_uuid);
-                return Ok(FolderItem {
-                    uuid: v
-                        .get("uuid")
-                        .and_then(|x| x.as_str())
-                        .ok_or_else(|| anyhow!("created folder has no uuid"))?
-                        .to_string(),
-                    plain_name: name.to_string(),
-                    updated_at: now_rfc3339(),
-                });
+                // Take the timestamps from the create response so the new
+                // folder's ETag already matches what a later listing yields.
+                let mut folder = tree::parse_folder(&v);
+                if folder.uuid.is_empty() {
+                    return Err(anyhow!("created folder has no uuid").into());
+                }
+                folder.plain_name = name.to_string();
+                if folder.updated_at.is_empty() {
+                    folder.updated_at = now_rfc3339();
+                }
+                return Ok(folder);
             }
             // Lost the race (already exists) or a transient backend error: loop
             // back, re-list, and adopt the folder the winner created.

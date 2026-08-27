@@ -48,15 +48,18 @@ pub fn webdav_date(iso: &str) -> String {
     dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string()
 }
 
-/// A `<D:response>` node for a folder (collection).
-pub fn folder_response(href: &str, display_name: &str, last_modified_iso: &str) -> String {
+/// A `<D:response>` node for a folder (collection). `etag` is the bare hash
+/// (see `etag::folder_etag`) — the quotes are added here, as for files.
+pub fn folder_response(href: &str, display_name: &str, last_modified_iso: &str, etag: &str) -> String {
     format!(
         "<D:response><D:href>{href}</D:href><D:propstat><D:status>HTTP/1.1 200 OK</D:status>\
 <D:prop><D:displayname>{name}</D:displayname>\
+<D:getetag>\"{etag}\"</D:getetag>\
 <D:getlastmodified>{modified}</D:getlastmodified>\
 <D:getcontentlength>0</D:getcontentlength>\
 <D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>",
         href = encode_href(href),
+        etag = escape(etag),
         name = escape(display_name),
         modified = webdav_date(last_modified_iso),
     )
