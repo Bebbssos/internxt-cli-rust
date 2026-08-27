@@ -2486,6 +2486,7 @@ dependencies = [
  "open",
  "rand 0.10.2",
  "rcgen",
+ "reqwest",
  "rpassword",
  "russh",
  "russh-sftp",

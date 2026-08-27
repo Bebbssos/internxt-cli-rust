@@ -29,6 +29,7 @@ use crate::drive_ops::{format_date, human_file_size, print_table};
 use crate::output;
 use crate::paths::{self, ItemTarget};
 use internxt_core::api::DriveApi;
+use internxt_core::ApiError;
 
 fn str_field(v: &Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
@@ -93,9 +94,11 @@ fn items_of(v: &Value, key: &str) -> Vec<Value> {
 
 /// The per-item sharing endpoints answer `404 Item is not being shared` when
 /// an item has no sharing — the normal "not shared" answer rather than a
-/// failure. Anything else (auth, network, 5xx) stays an error.
+/// failure. Anything else (auth, network, 5xx) stays an error. Read off the
+/// typed [`ApiError`] core raises for every non-success response, not out of
+/// the message text.
 fn not_shared(e: &anyhow::Error) -> bool {
-    e.to_string().contains("HTTP 404")
+    matches!(e.downcast_ref::<ApiError>(), Some(e) if e.status_code() == 404)
 }
 
 /// Which of the three listings `shared list` should make.

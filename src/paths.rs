@@ -27,6 +27,7 @@ use serde_json::{json, Value};
 use crate::auth;
 use crate::output;
 use internxt_core::api::DriveApi;
+use internxt_core::ApiError;
 
 /// What kind of item a path is expected to resolve to.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -235,12 +236,13 @@ async fn resolve_namespaced_path(
 }
 
 /// `true` when a core API error is the server's definite "nothing at this
-/// path" answer. Core surfaces failures as `"<ctx> failed: HTTP <status>:
-/// <body>"`, so a 404 is recognizable by string; anything else (a timeout, a
-/// 5xx, a response that no longer deserializes) is *not* an answer about the
-/// path and must never be treated as one.
+/// path" answer. Core answers every non-success HTTP response with a typed
+/// [`internxt_core::ApiError`], so the status is read off the error rather than
+/// matched in its text; anything else (a timeout, a 5xx, a response that no
+/// longer deserializes) is *not* an answer about the path and must never be
+/// treated as one.
 fn is_not_found(err: &anyhow::Error) -> bool {
-    err.to_string().contains("HTTP 404")
+    matches!(err.downcast_ref::<ApiError>(), Some(e) if e.status_code() == 404)
 }
 
 /// The absolute path spelling the `?path=` endpoints want, rebuilt from the
@@ -820,9 +822,20 @@ mod tests {
 
     #[test]
     fn is_not_found_only_matches_a_404() {
-        assert!(is_not_found(&anyhow!("getFolderByPath failed: HTTP 404 Not Found: {{}}")));
-        assert!(!is_not_found(&anyhow!("getFolderByPath failed: HTTP 502 Bad Gateway: {{}}")));
+        let api = |status: u16| -> anyhow::Error {
+            ApiError::new(
+                "getFolderByPath",
+                reqwest::StatusCode::from_u16(status).unwrap(),
+                r#"{"message":"Folder not found"}"#,
+            )
+            .into()
+        };
+        assert!(is_not_found(&api(404)));
+        assert!(!is_not_found(&api(502)));
+        // An untyped error is never an answer about the path, whatever it says
+        // — including one whose text happens to mention a 404.
         assert!(!is_not_found(&anyhow!("error decoding response body")));
+        assert!(!is_not_found(&anyhow!("getFolderByPath failed: HTTP 404 Not Found: {{}}")));
     }
 
     #[test]

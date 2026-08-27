@@ -169,6 +169,13 @@ winfsp_wrs = { version = "0.4.1", optional = true }
 [target."cfg(windows)".build-dependencies]
 winfsp_wrs_build = { version = "0.4.1", optional = true }
 
+# Tests only: `internxt_core::ApiError::new` takes core's `reqwest::StatusCode`,
+# so building one in a unit test needs the type by name. Same requirement core
+# declares, so cargo unifies it with the copy already in the tree — no extra
+# build. Default features off: the tests only touch `StatusCode`.
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false }
+
 [profile.release]
 opt-level = 3
 lto = true
