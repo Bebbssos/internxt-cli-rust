@@ -243,6 +243,7 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | [`recents`](#recents) | Most recently modified files, account-wide, with the folder each lives in. | `recent` | New — no official equivalent (drive-web has a "Recents" view). |
 | [`tree`](#tree) | Print a folder's whole subtree, indented. | — | New — no official equivalent. One request for the whole subtree. |
 | [`du`](#du) | A folder's recursive size and file count. | — | New — no official equivalent. Counted server-side, one request. |
+| [`search`](#search) | Fuzzy name search across the whole Drive, with type/size/date filters. | `find` | New — no official equivalent (drive-web's search box). |
 | **[`create`](#create-folder)** | Create a folder | | |
 | &nbsp;&nbsp;[`create folder`](#create-folder) | Create a folder. | `create-folder` | |
 | **[`upload`](#upload-file)** | Upload a file or folder | | |
@@ -299,6 +300,10 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | &nbsp;&nbsp;[`shared roles`](#shared-roles--shared-domains) | List the roles a share recipient can be given. | — | |
 | &nbsp;&nbsp;[`shared domains`](#shared-roles--shared-domains) | List the domains public share links are served from. | — | |
 | &nbsp;&nbsp;[`shared revoke`](#shared-revoke) | Stop sharing a file or folder. | — | |
+| **[`favorites`](#favorites-list)** | Mark, unmark and list favorites | `favourites`, `fav` | New — no official equivalent (favorites are a drive-web feature). |
+| &nbsp;&nbsp;[`favorites list`](#favorites-list) | List your favorited files and folders. | — | |
+| &nbsp;&nbsp;[`favorites add`](#favorites-add--favorites-remove) | Mark a file or folder as a favorite. | `mark` | |
+| &nbsp;&nbsp;[`favorites remove`](#favorites-add--favorites-remove) | Drop a file or folder from your favorites. | `rm`, `unmark` | |
 | [`serve`](#serve) | Serve Drive over WebDAV/FUSE/SMB/NFS/SFTP (foreground). | — | Needs ≥1 of `webdav`,`fuse`,`smb`,`nfs`,`sftp`. WebDAV mirrors official; rest new. |
 | [`mount`](#mount) | Mount Drive as a local FS via FUSE/WinFSP. | — | New; needs `fuse` (default on). |
 | **[`vpn`](#vpn-locations)** | Internxt VPN: locations, local proxy | | New — no official equivalent (ships as a browser extension only). Needs `vpn` (off by default in source builds, on in Docker/prebuilt binaries). |
@@ -718,6 +723,77 @@ JSON output: `{ "success": true, "root": "<folder>", "tree": { "uuid", "name",
 `"stats"` with `--stats`. `--depth` and `--folders-only` filter the JSON the
 same way they filter the text, and a folder cut off by `--depth` carries
 `"truncated": true` in place of its children.
+
+### `search`
+
+Alias: `find`. New — no official CLI equivalent; this is the endpoint behind
+drive-web's search box (`POST /fuzzy/{query}`). Fuzzy-matches `QUERY` against
+item names **across the whole Drive** and returns the hits ranked best-first
+(Postgres full-text rank, with trigram similarity as the tiebreaker). Files and
+folders can both match. Like every other command it runs through the
+workspace-scoped API client, so an active workspace searches that workspace's
+drive rather than the personal one.
+
+Argument: `<QUERY>` — what to look for. Flags:
+
+| Flag | Meaning |
+|---|---|
+| `-t/--type <EXT>` | Restrict to these file extensions, comma-separated or repeated (`--type pdf,jpg`). The reserved value `folder` also includes folders. Extensions **OR** together; a leading dot and the case are stripped, so `--type .PDF` works. |
+| `--min-size <SIZE>` / `--max-size <SIZE>` | Size bounds, in the same syntax as [`--max-upload-size`](#upload-size-limit) (`500K`, `5GB`, or raw bytes). Files only — a folder has no size on the search index, so a size filter excludes folders. |
+| `--modified-after <WHEN>` / `--modified-before <WHEN>` | Date bounds: `2026-01-02`, `2026-01-02 15:04`, or a full `2026-01-02T15:04:05Z`. **A value with no timezone is read as UTC** (an offset is accepted and converted); a bare date means that day's midnight. |
+| `--offset <N>` | Hits to skip. The page size is the backend's — the endpoint doesn't take a limit. |
+| `-e/--extended` | Adds the match score (trigram similarity, 0–1) and the item's uuid. |
+
+The filters **AND** together, and the whole set travels as the request body —
+og moved this endpoint off `GET .../fuzzy/{search}?offset=N` in sdk 1.20.x
+precisely to make room for them.
+
+```sh
+ixr search invoice
+ixr search invoice --type pdf,docx
+ixr search photo --type jpg,png --min-size 2MB --modified-after 2026-01-01
+ixr search report --extended
+ixr search report --json
+```
+
+```
+Type    Name         Size    Score  Id
+------  -----------  ------  -----  ------------------------------------
+folder  Invoices     -       1.00   89369be7-a57b-4ce6-b6e5-a14dfbea0e3f
+file    invoice.pdf  1.2 MB  0.72   e90199e0-cd29-4a0e-966c-816b912cdfcf
+```
+
+The search index carries only enough of a record to rank and label a hit, so a
+hit's partial `item` (bucket, fileId, size, type) can be thin or missing
+entirely — folders typically arrive with nothing but an internal id. The `Size`
+column dashes in that case rather than inventing a number, and the extension in
+`Name` comes from `item.type` when the index didn't already include it. Follow a
+hit's uuid with [`path-from-id`](#path-from-id) to see where it lives.
+
+JSON output:
+
+```json
+{
+  "success": true,
+  "query": "invoice",
+  "filters": { "type": ["pdf"], "minSize": 2097152 },
+  "results": [
+    {
+      "id": "00000000-0000-0000-0000-000000000001",
+      "itemId": "00000000-0000-0000-0000-000000000001",
+      "itemType": "file",
+      "name": "invoice",
+      "rank": null,
+      "similarity": 0.72,
+      "item": { "bucket": "...", "fileId": "...", "plainName": "invoice", "size": "1268776", "type": "pdf" }
+    }
+  ]
+}
+```
+
+`filters` is the exact request body that was sent, so a script can see how its
+flags were interpreted (unset filters are simply absent). `rank` is `null` for a
+hit found only by trigram similarity — that is normal, not an error.
 
 ### `create folder`
 
@@ -1494,6 +1570,82 @@ happened rather than implying a share was removed when there was none:
 JSON output: `{ "success": true, "revoked": true|false, "item": { "uuid":
 "...", "type": "file"|"folder", "shared": false }, "message": "..." }`.
 
+### `favorites list`
+
+New — no official CLI equivalent; favorites are a drive-web feature. Lists one
+page of your favorited items (`GET /favorites?type=…`). The endpoint answers for
+**one kind per call**, so with no `--type` this makes two requests — a page of
+folders and a page of files — and prints them in one table.
+
+Flags: `-t/--type file|folder` (narrow to one kind, one request), `-l/--limit
+<N>` (default 50) and `-o/--offset <N>`, both applied **per kind**;
+`-s/--sort <FIELD>` (`name`/`plainName`, `modified`/`updatedAt`, `uuid`) and
+`--order asc|desc`, case-insensitive and left to the backend's default when
+omitted; `-e/--extended` adds the uuid.
+
+```sh
+ixr favorites list
+ixr favorites list --type file --limit 20
+ixr favorites list --sort name --order asc
+ixr favorites list --extended --json
+```
+
+```
+Type    Name            Size    Modified
+------  --------------  ------  -----------------------
+folder  Invoices        -       12 March, 2025 at 13:26
+file    quarterly.xlsx  1.2 MB  25 August, 2026 at 17:19
+```
+
+Folders show `-` for size: their favorite records carry `size: 0`, which means
+"not counted", not "empty" — use [`du`](#du) to actually measure a folder.
+
+JSON output:
+
+```json
+{
+  "success": true,
+  "favorites": {
+    "folders": [ { "uuid": "...", "plainName": "Invoices", "updatedAt": "..." } ],
+    "files": [ { "uuid": "...", "plainName": "quarterly", "type": "xlsx", "size": "1268776" } ]
+  },
+  "limit": 50,
+  "offset": 0
+}
+```
+
+The records are passed through exactly as the server sent them. Both keys are
+always present, with `null` for a kind that wasn't requested — so a consumer can
+tell "not asked for" from "asked for, none there" (`[]`).
+
+### `favorites add` / `favorites remove`
+
+Aliases: `mark` / `rm`, `unmark`. Marks (`PUT /favorites/{type}/{uuid}`) or
+unmarks (`DELETE /favorites/{type}/{uuid}`) one file or folder.
+
+Argument: `<ITEM>` — a Drive path (`/Docs/report.pdf`) or a uuid, exactly like
+[`shared info`](#shared-info): a value shaped like a uuid is taken as one, so
+write a leading `/` if an item is genuinely named that way. `-t/--type
+file|folder` only saves the extra lookup that works out which kind a uuid is.
+
+```sh
+ixr favorites add /Docs/report.pdf
+ixr favorites add 11111111-2222-3333-4444-555555555555 --type file
+ixr favorites remove /Docs/report.pdf
+ixr favorites remove /Docs --json
+```
+
+Both calls are **idempotent server-side**: favoriting something already
+favorited succeeds and changes nothing. The endpoints answer with the state they
+left the item in, and that state — not the request — is what gets reported, so
+`ixr` never claims a change the server didn't confirm. In the rare case the two
+disagree the line starts with `!` and says so
+(`<item> is still not favorited — the server reported no change.`).
+
+JSON output: `{ "success": true, "item": { "uuid": "...", "type":
+"file"|"folder" }, "favorited": true|false, "message": "..." }`, where
+`favorited` is the server's post-call state.
+
 ### `serve`
 
 Runs one or more Drive backends in the **foreground** until Ctrl-C. Pass a
@@ -2046,7 +2198,8 @@ Known differences:
   web-app-only there; `ixr` covers the read side plus revoking, not creating
   a share), the read-only workspace admin views
   `workspaces info|members|teams|usage|invitations` (the official CLI stops at
-  `workspaces list|use|unset`; these exist only in the web app), `mount`, the
+  `workspaces list|use|unset`; these exist only in the web app), `search` and the
+  `favorites` command family (both are drive-web features), `mount`, the
   `fuse`/`smb`/`nfs`/`sftp`
   `serve` backends (the official CLI only serves WebDAV, and only supports one
   logged-in account), and the `vpn` command family (the VPN otherwise ships

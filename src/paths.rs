@@ -632,6 +632,70 @@ pub fn split_id_or_path(arg: Option<&str>) -> (Option<&str>, Option<&str>) {
     }
 }
 
+/// A file *or* folder the caller resolved from one positional argument, for the
+/// endpoints that take the kind in the route (`/sharings/{item_type}/...`,
+/// `/favorites/{item_type}/...`) and therefore have to know which it is.
+pub struct ItemTarget {
+    pub uuid: String,
+    /// `"file"` or `"folder"`.
+    pub item_type: String,
+    /// What the user typed, for messages — a path reads better than a uuid.
+    pub label: String,
+}
+
+/// Nothing in a uuid says whether it points at a file or a folder, and the
+/// routes above need to know. Probe it the way `path-from-id` does:
+/// `/folders/{uuid}/meta` 404s for a file uuid, so success ⇒ folder.
+pub async fn type_of_uuid(api: &DriveApi, token: &str, uuid: &str) -> Result<String> {
+    if let Ok(meta) = api.get_folder_meta(token, uuid).await
+        && !str_field(&meta, "uuid").is_empty()
+    {
+        return Ok("folder".to_string());
+    }
+    api.get_file_meta_value(token, uuid)
+        .await
+        .map(|_| "file".to_string())
+        .map_err(|_| anyhow!("No file or folder found with id: {uuid}"))
+}
+
+/// Resolve a positional `<ITEM>` — a Drive path or a bare uuid — to the
+/// `(uuid, item_type)` pair those routes take. `forced` is the caller's
+/// optional `--type`, which also saves the [`type_of_uuid`] probe.
+pub async fn resolve_item(
+    api: &DriveApi,
+    token: &str,
+    root: &str,
+    item: &str,
+    forced: Option<&str>,
+) -> Result<ItemTarget> {
+    let item = item.trim();
+    if item.is_empty() {
+        return Err(anyhow!("No file or folder given."));
+    }
+    if looks_like_uuid(item) {
+        let item_type = match forced {
+            Some(t) => t.to_string(),
+            None => type_of_uuid(api, token, item).await?,
+        };
+        return Ok(ItemTarget {
+            uuid: item.to_string(),
+            item_type,
+            label: item.to_string(),
+        });
+    }
+    let expect = match forced {
+        Some("file") => Expect::File,
+        Some("folder") => Expect::Folder,
+        _ => Expect::Any,
+    };
+    let resolved = resolve_path(api, token, root, item, expect).await?;
+    Ok(ItemTarget {
+        item_type: if resolved.is_folder { "folder" } else { "file" }.to_string(),
+        uuid: resolved.uuid,
+        label: item.to_string(),
+    })
+}
+
 /// Resolve the mutually-exclusive `--id` / `--path` options to a uuid. `None`
 /// only when both are absent (the caller decides: root default, or required).
 ///
