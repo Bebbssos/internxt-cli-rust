@@ -52,21 +52,24 @@ diff upstream against them to find changes worth pulling in.
   Serve backends (WebDAV/FUSE/SMB/NFS/SFTP) also upload thumbnails on write (og only
   does WebDAV; the rest are our backends). `IXR_THUMBNAILS=0` disables everywhere.
 - Retry with backoff on transient failures (`uploadFileWithRetry`, MAX_RETRIES/DELAYS_MS).
-- Name-collision pre-flight on upload. **Deliberately not done** — noted here so the
-  next person doesn't re-derive it. Core wraps `check_duplicate_files` /
-  `check_duplicate_folders` (`POST /folders/content/{uuid}/{files,folders}/existence`),
-  which answers with the colliding records directly: one request, no listing, and it
-  hands back what would be replaced. Strictly better than a listing *where a check
-  already happens*, but the CLI's upload commands don't check at all today — they
-  upload and let the server sort it out — so wiring it in would **add** behaviour
-  rather than speed up existing behaviour, and silently skipping a "duplicate" is a
-  change users would notice. If it's ever wanted, the shape that doesn't surprise
-  anyone is an opt-in flag (`--skip-existing` / `--no-clobber`) on `upload file` /
-  `upload folder`, with the batch checked in one request before the transfers start;
-  `upload folder` benefits most, since it's the one that creates many names at once.
-  The place a pre-flight would pay off without any new flag is core's
-  `transfer::find_existing_folder`, on `create_folder`'s "already exists" error path —
-  a core change, not a CLI one.
+- Name-collision pre-flight on upload — **the `--overwrite` half is done**; the
+  skip half isn't. `-o/--overwrite` on `upload file` (ported from og) and on
+  `upload folder` (ours; og has no such flag there) runs `check_duplicate_files`
+  before any bytes move and replaces the colliding entry in place instead of
+  letting the server create a second one. `upload folder` batches it — one
+  existence request per destination folder, chunked at 200 names like drive-web
+  does on the same endpoint. What's left:
+  - The *other* opt-in shape: `--skip-existing` / `--no-clobber`, i.e. leave the
+    remote copy alone rather than replacing it. Same pre-flight, opposite branch —
+    `commands::find_existing_files` already returns everything it needs, so this is
+    a flag and a `continue`, not new plumbing. Worth pairing with a count in the
+    summary ("N skipped") the way `filesOverwritten` reports replacements.
+  - Folder-name collisions (`check_duplicate_folders`) are still unused: the folder
+    tree relies on `create_folder_with_retry` reusing an existing folder off the
+    "already exists" error path. Fine, but it's a round trip per collision.
+  - The place a pre-flight would pay off without any new flag is core's
+    `transfer::find_existing_folder`, on `create_folder`'s "already exists" error
+    path — a core change, not a CLI one.
 - HMAC on upload (sdk now stores hmac on upload — see sdk commit; node inxt-js
   passes `hmac: undefined`, so we skip it. Revisit if server starts requiring it.)
 

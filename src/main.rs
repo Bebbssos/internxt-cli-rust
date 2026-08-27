@@ -774,6 +774,11 @@ struct UploadFileArgs {
     /// spooled to a temp file to learn its size.
     #[arg(short = 's', long)]
     size: Option<u64>,
+    /// Replace an existing file of the same name in the destination folder
+    /// instead of creating a second entry alongside it. Without this, Internxt
+    /// keeps both.
+    #[arg(short, long, default_value_t = false)]
+    overwrite: bool,
     #[command(flatten)]
     limit: upload_limit::UploadLimitArgs,
 }
@@ -794,6 +799,11 @@ struct UploadFolderArgs {
     /// failures instead of seeing them reported.
     #[arg(long, default_value_t = false)]
     exclude_empty_files: bool,
+    /// Replace files that already exist at their destination instead of
+    /// creating a second entry alongside each. The collision check is batched:
+    /// one request per destination folder, before any transfer starts.
+    #[arg(short, long, default_value_t = false)]
+    overwrite: bool,
     #[command(flatten)]
     limit: upload_limit::UploadLimitArgs,
 }
@@ -1845,6 +1855,7 @@ async fn do_upload_file(args: UploadFileArgs) -> Result<()> {
         args.stdin,
         args.name.as_deref(),
         args.size,
+        args.overwrite,
         &args.limit,
     )
     .await
@@ -1861,6 +1872,7 @@ async fn do_upload_folder(args: UploadFolderArgs) -> Result<()> {
         args.destination.as_deref(),
         args.dest_path.as_deref(),
         args.exclude_empty_files,
+        args.overwrite,
         &args.limit,
     )
     .await

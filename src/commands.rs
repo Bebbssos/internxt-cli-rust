@@ -1,6 +1,6 @@
 //! upload-file and download-file. Fully streaming — never holds a whole file in RAM.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use rand::RngExt;
@@ -22,6 +22,12 @@ use internxt_core::transfer::{
 };
 
 const MAX_CONCURRENT_FILE_UPLOADS: usize = 10;
+
+/// How many names go into a single `POST /folders/content/{uuid}/files/existence`
+/// request (the `--overwrite` pre-flight). Mirrors drive-web's `getFilesByBatchs`
+/// BATCH_SIZE for the very same endpoint, so a folder holding thousands of files
+/// is checked in a handful of requests instead of one enormous body.
+const DUPLICATE_CHECK_BATCH: usize = 200;
 
 fn to_rfc3339(t: SystemTime) -> String {
     let dt: DateTime<Utc> = t.into();
@@ -54,9 +60,104 @@ fn derive_name_parts(explicit_name: Option<&str>, fallback_path: &Path) -> Resul
     Ok((stem, file_type))
 }
 
+/// The Drive `type` a local path is stored under: its extension without the dot,
+/// or `""` for an extensionless file. Kept in one place because the `--overwrite`
+/// pre-flight has to ask about exactly the `(plainName, type)` pair the upload
+/// itself will send — look it up under a different type and the collision is
+/// missed, leaving a duplicate behind.
+fn drive_file_type(path: &Path) -> String {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// The `(plain name, type)` key a `check_duplicate_files` record answers under.
+/// Mirrors drive-web's matching rule: same plain name *and* same type is the
+/// same file. `None` for a record with no usable name at all.
+fn existing_file_key(record: &DriveFileData) -> Option<(String, String)> {
+    let name = record.plain_name.clone().or_else(|| record.name.clone())?;
+    Some((name, record.file_type.clone().unwrap_or_default()))
+}
+
+/// Group `(destination folder uuid, plain name, type)` triples into the requests
+/// the `--overwrite` pre-flight will actually make: one per destination folder,
+/// split into [`DUPLICATE_CHECK_BATCH`]-sized batches. Folders keep their
+/// first-seen order so the requests follow the scan order.
+///
+/// This is what makes `upload folder` cheap: it creates many names at once, and
+/// the existence endpoint takes a list, so a whole folder costs one request
+/// rather than one per file.
+fn plan_duplicate_checks(files: &[(String, String, String)]) -> Vec<(String, Vec<(String, String)>)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for (folder, name, file_type) in files {
+        groups
+            .entry(folder.clone())
+            .or_insert_with(|| {
+                order.push(folder.clone());
+                Vec::new()
+            })
+            .push((name.clone(), file_type.clone()));
+    }
+    order
+        .into_iter()
+        .flat_map(|folder| {
+            let names = groups.remove(&folder).unwrap_or_default();
+            names
+                .chunks(DUPLICATE_CHECK_BATCH)
+                .map(|batch| (folder.clone(), batch.to_vec()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Look up which of `files` — `(destination folder uuid, plain name, type)` —
+/// already exist in Drive, one batched request per destination folder. The
+/// answer is keyed the same way; each value is the uuid of the entry an
+/// `--overwrite` upload would replace in place.
+///
+/// Runs *before* any bytes go out, so a lookup failure costs nothing.
+async fn find_existing_files(
+    api: &DriveApi,
+    token: &str,
+    files: &[(String, String, String)],
+) -> Result<HashMap<(String, String, String), String>> {
+    let mut found = HashMap::new();
+    for (folder, batch) in plan_duplicate_checks(files) {
+        let pairs: Vec<(&str, &str)> = batch.iter().map(|(n, t)| (n.as_str(), t.as_str())).collect();
+        let existing = api
+            .check_duplicate_files(token, &folder, &pairs)
+            .await
+            .with_context(|| format!("checking for existing files in folder {folder}"))?;
+        for record in &existing {
+            if let Some((name, file_type)) = existing_file_key(record) {
+                found.insert((folder.clone(), name, file_type), record.uuid.clone());
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Single-name flavour of [`find_existing_files`] — the `upload file` case.
+/// Mirrors og `DriveFileService.findExistentFile`.
+async fn find_existing_file(
+    api: &DriveApi,
+    token: &str,
+    folder_uuid: &str,
+    stem: &str,
+    file_type: &str,
+) -> Result<Option<String>> {
+    let key = (folder_uuid.to_string(), stem.to_string(), file_type.to_string());
+    let found = find_existing_files(api, token, std::slice::from_ref(&key)).await?;
+    Ok(found.get(&key).cloned())
+}
+
 /// Upload a local file to Internxt Drive (streaming; single-part or multipart).
 /// With `use_stdin`, the body is read from stdin instead of `file_path`; `name`
 /// supplies the Drive name (required) and `size_hint` the byte length (optional).
+/// With `overwrite`, an existing file of the same name in the destination folder
+/// is replaced in place instead of a second entry being created.
 #[allow(clippy::too_many_arguments)]
 pub async fn upload_file(
     file_path: Option<&str>,
@@ -65,6 +166,7 @@ pub async fn upload_file(
     use_stdin: bool,
     name: Option<&str>,
     size_hint: Option<u64>,
+    overwrite: bool,
     limit_args: &crate::upload_limit::UploadLimitArgs,
 ) -> Result<()> {
     if use_stdin && file_path.is_some() {
@@ -89,7 +191,7 @@ pub async fn upload_file(
     };
 
     if use_stdin {
-        return upload_from_stdin(&creds, name, size_hint, &folder_uuid, limit).await;
+        return upload_from_stdin(&creds, name, size_hint, &folder_uuid, overwrite, limit).await;
     }
 
     let file_path = file_path.ok_or_else(|| anyhow!("Provide --file <PATH> or --stdin"))?;
@@ -102,6 +204,16 @@ pub async fn upload_file(
     limit.check(size)?;
 
     let (stem, file_type) = derive_name_parts(name, path)?;
+
+    // Pre-flight before a single byte is uploaded, like og's upload-file: if the
+    // lookup fails we've wasted nothing, and knowing the target up front means
+    // the bytes can go straight into a replace instead of a second entry.
+    let replace_uuid = if overwrite {
+        let api = DriveApi::for_credentials(&creds);
+        find_existing_file(&api, &creds.token, &folder_uuid, &stem, &file_type).await?
+    } else {
+        None
+    };
 
     let mut file_id = String::new();
 
@@ -133,12 +245,13 @@ pub async fn upload_file(
         &file_id,
         &creation,
         &modification,
+        replace_uuid.as_deref(),
     )
     .await?;
 
     try_upload_thumbnail(&creds, &drive_file.uuid, &file_type, path, size).await;
 
-    emit_upload_success(&creds, &drive_file);
+    emit_upload_success(&creds, &drive_file, replace_uuid.is_some());
     Ok(())
 }
 
@@ -184,10 +297,20 @@ async fn upload_from_stdin(
     name: Option<&str>,
     size_hint: Option<u64>,
     folder_uuid: &str,
+    overwrite: bool,
     limit: crate::upload_limit::UploadLimit,
 ) -> Result<()> {
     let name = name.ok_or_else(|| anyhow!("--name <NAME> is required with --stdin"))?;
     let (stem, file_type) = derive_name_parts(Some(name), Path::new(name))?;
+
+    // Same pre-flight as the --file path: before stdin is touched, so nothing is
+    // consumed if the lookup fails.
+    let replace_uuid = if overwrite {
+        let api = DriveApi::for_credentials(creds);
+        find_existing_file(&api, &creds.token, folder_uuid, &stem, &file_type).await?
+    } else {
+        None
+    };
 
     let net = crate::net_client::network_api(creds.net_user(), creds.net_pass());
 
@@ -244,14 +367,32 @@ async fn upload_from_stdin(
     };
 
     let now = to_rfc3339(SystemTime::now());
-    let drive_file =
-        finish_file_entry(creds, &stem, &file_type, size, folder_uuid, &file_id, &now, &now).await?;
-    emit_upload_success(creds, &drive_file);
+    let drive_file = finish_file_entry(
+        creds,
+        &stem,
+        &file_type,
+        size,
+        folder_uuid,
+        &file_id,
+        &now,
+        &now,
+        replace_uuid.as_deref(),
+    )
+    .await?;
+    emit_upload_success(creds, &drive_file, replace_uuid.is_some());
     Ok(())
 }
 
-/// Create the drive file entry. Shared by both upload paths; the caller handles
-/// any thumbnail and emits the success line.
+/// Create the drive file entry — or, when `replace_uuid` names an entry the
+/// `--overwrite` pre-flight found, swap the freshly uploaded bytes into it
+/// instead of adding a second entry with the same name. Shared by both upload
+/// paths; the caller handles any thumbnail and emits the success line.
+///
+/// `replace_file_or_recreate` (not the bare `replace_file`) because truncating
+/// to zero bytes has no network object to point at and `PUT /files/{uuid}`
+/// rejects an empty `fileId` — the same reason every serve backend calls it.
+/// Note that path does *not* preserve the uuid, so the returned record is the
+/// authority on where the file ended up.
 #[allow(clippy::too_many_arguments)]
 async fn finish_file_entry(
     creds: &internxt_core::models::Credentials,
@@ -262,21 +403,40 @@ async fn finish_file_entry(
     file_id: &str,
     creation: &str,
     modification: &str,
+    replace_uuid: Option<&str>,
 ) -> Result<internxt_core::models::DriveFileData> {
     let api = DriveApi::for_credentials(creds);
-    let drive_file = api
-        .create_file_entry(
-            &creds.token,
-            stem,
-            file_type,
-            size,
-            folder_uuid,
-            file_id,
-            creds.bucket(),
-            creation,
-            modification,
-        )
-        .await?;
+    let drive_file = match replace_uuid {
+        Some(uuid) => {
+            api.replace_file_or_recreate(
+                &creds.token,
+                uuid,
+                file_id,
+                size,
+                stem,
+                file_type,
+                folder_uuid,
+                creds.bucket(),
+                creation,
+                modification,
+            )
+            .await?
+        }
+        None => {
+            api.create_file_entry(
+                &creds.token,
+                stem,
+                file_type,
+                size,
+                folder_uuid,
+                file_id,
+                creds.bucket(),
+                creation,
+                modification,
+            )
+            .await?
+        }
+    };
     Ok(drive_file)
 }
 
@@ -303,18 +463,26 @@ async fn reject_if_more_data<R: tokio::io::AsyncRead + Unpin>(
 fn emit_upload_success(
     creds: &internxt_core::models::Credentials,
     drive_file: &internxt_core::models::DriveFileData,
+    overwritten: bool,
 ) {
     let ws_suffix = creds
         .workspace_id()
         .map(|id| format!("?workspaceid={id}"))
         .unwrap_or_default();
+    // og says "overwritten" rather than "uploaded" when --overwrite replaced an
+    // existing entry; `overwritten` in the JSON is the machine-readable half.
+    let verb = if overwritten { "overwritten" } else { "uploaded" };
     crate::output::emit(
         &format!(
-            "File uploaded successfully, view it at {}/file/{}{ws_suffix}",
+            "File {verb} successfully, view it at {}/file/{}{ws_suffix}",
             config::drive_web_url(),
             drive_file.uuid
         ),
-        serde_json::json!({ "success": true, "file": { "uuid": drive_file.uuid } }),
+        serde_json::json!({
+            "success": true,
+            "overwritten": overwritten,
+            "file": { "uuid": drive_file.uuid },
+        }),
     );
 }
 
@@ -606,7 +774,10 @@ fn scan_dir(
     0
 }
 
-/// Network-upload + create-entry for a single scanned file.
+/// Network-upload + create-entry for a single scanned file. `replace_uuid` is
+/// the entry the batched `--overwrite` pre-flight matched this file to, if any:
+/// present, the bytes replace it in place instead of creating a second entry.
+#[allow(clippy::too_many_arguments)]
 async fn upload_one_file(
     net: &NetworkApi,
     api: &DriveApi,
@@ -615,18 +786,14 @@ async fn upload_one_file(
     mnemonic: &str,
     file: &ScanNode,
     parent_uuid: &str,
+    replace_uuid: Option<&str>,
     pb: &indicatif::ProgressBar,
     limit: crate::upload_limit::UploadLimit,
 ) -> Result<()> {
     let meta = std::fs::metadata(&file.abs)?;
     let size = meta.len();
     limit.check(size)?;
-    let file_type = file
-        .abs
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string();
+    let file_type = drive_file_type(&file.abs);
 
     let mut file_id = String::new();
     if size > 0 {
@@ -643,19 +810,37 @@ async fn upload_one_file(
 
     let creation = to_rfc3339(meta.created().unwrap_or_else(|_| SystemTime::now()));
     let modification = to_rfc3339(meta.modified().unwrap_or_else(|_| SystemTime::now()));
-    let drive_file = api
-        .create_file_entry(
-            token,
-            &file.name,
-            &file_type,
-            size,
-            parent_uuid,
-            &file_id,
-            bucket,
-            &creation,
-            &modification,
-        )
-        .await?;
+    let drive_file = match replace_uuid {
+        Some(uuid) => {
+            api.replace_file_or_recreate(
+                token,
+                uuid,
+                &file_id,
+                size,
+                &file.name,
+                &file_type,
+                parent_uuid,
+                bucket,
+                &creation,
+                &modification,
+            )
+            .await?
+        }
+        None => {
+            api.create_file_entry(
+                token,
+                &file.name,
+                &file_type,
+                size,
+                parent_uuid,
+                &file_id,
+                bucket,
+                &creation,
+                &modification,
+            )
+            .await?
+        }
+    };
 
     // Best-effort thumbnail; never fails the folder upload (silent — the shared
     // progress bar owns the terminal here).
@@ -669,12 +854,16 @@ async fn upload_one_file(
     Ok(())
 }
 
-/// Recursively upload a local folder tree to Internxt Drive.
+/// Recursively upload a local folder tree to Internxt Drive. With `overwrite`,
+/// files that already exist at their destination are replaced in place rather
+/// than added alongside — the collision lookup is batched, one request per
+/// destination folder (see [`find_existing_files`]).
 pub async fn upload_folder(
     local_path: &str,
     destination: Option<&str>,
     dest_path: Option<&str>,
     exclude_empty_files: bool,
+    overwrite: bool,
     limit_args: &crate::upload_limit::UploadLimitArgs,
 ) -> Result<()> {
     let creds = Arc::new(auth::get_auth_details().await?);
@@ -772,15 +961,12 @@ pub async fn upload_folder(
     // Mitigates upstream PB-1446 (folder not immediately consistent after creation).
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // 2. Upload files with bounded concurrency.
-    let uploaded = Arc::new(AtomicU64::new(0));
-    let folder_map = Arc::new(folder_map);
-    let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FILE_UPLOADS));
-    // One shared overall bar across all files (concurrent per-file bars would clash).
-    let pb = crate::output::progress_bar(total_bytes, "Uploading");
-    let mut handles = Vec::new();
+    // 2. Resolve every file's destination folder up front. This used to happen
+    //    inline in the upload loop; it's hoisted because the --overwrite
+    //    pre-flight has to know all the destinations before any transfer starts,
+    //    so it can ask about a whole folder's worth of names in one request.
     let total_files = files.len();
-
+    let mut ready: Vec<(ScanNode, String)> = Vec::with_capacity(total_files);
     for file in files {
         let parent_uuid = match parent_key(&file.rel) {
             None => dest.clone(),
@@ -794,6 +980,38 @@ pub async fn upload_folder(
                 }
             },
         };
+        ready.push((file, parent_uuid));
+    }
+
+    // 3. Collision pre-flight (--overwrite only): one batched existence request
+    //    per destination folder, before any bytes move. A failure here aborts
+    //    rather than falling back to plain creates — quietly leaving duplicates
+    //    behind is exactly what the flag was asked to prevent.
+    let replace_map = if overwrite && !ready.is_empty() {
+        let wanted: Vec<(String, String, String)> = ready
+            .iter()
+            .map(|(f, parent)| (parent.clone(), f.name.clone(), drive_file_type(&f.abs)))
+            .collect();
+        crate::output::status("Checking for existing files...");
+        find_existing_files(&api, &creds.token, &wanted).await?
+    } else {
+        HashMap::new()
+    };
+
+    // 4. Upload files with bounded concurrency.
+    let uploaded = Arc::new(AtomicU64::new(0));
+    let overwritten = Arc::new(AtomicU64::new(0));
+    let folder_map = Arc::new(folder_map);
+    let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FILE_UPLOADS));
+    // One shared overall bar across all files (concurrent per-file bars would clash).
+    let pb = crate::output::progress_bar(total_bytes, "Uploading");
+    let mut handles = Vec::new();
+
+    for (file, parent_uuid) in ready {
+        let replace_uuid = replace_map
+            .get(&(parent_uuid.clone(), file.name.clone(), drive_file_type(&file.abs)))
+            .cloned();
+        let replacing = replace_uuid.is_some();
         let permit = sem.clone().acquire_owned().await.unwrap();
         let net = net.clone();
         let api = DriveApi::for_credentials(&creds);
@@ -801,18 +1019,33 @@ pub async fn upload_folder(
         let bucket = bucket.clone();
         let mnemonic = mnemonic.clone();
         let uploaded = uploaded.clone();
+        let overwritten = overwritten.clone();
         let pb = pb.clone();
         let failed = failed.clone();
         handles.push(tokio::spawn(async move {
             let _permit = permit;
             match upload_one_file(
-                &net, &api, &token, &bucket, &mnemonic, &file, &parent_uuid, &pb, limit,
+                &net,
+                &api,
+                &token,
+                &bucket,
+                &mnemonic,
+                &file,
+                &parent_uuid,
+                replace_uuid.as_deref(),
+                &pb,
+                limit,
             )
             .await
             {
                 Ok(()) => {
                     uploaded.fetch_add(file.size, Ordering::Relaxed);
-                    pb.println(format!("Uploaded {}", file.name));
+                    if replacing {
+                        overwritten.fetch_add(1, Ordering::Relaxed);
+                        pb.println(format!("Overwrote {}", file.name));
+                    } else {
+                        pb.println(format!("Uploaded {}", file.name));
+                    }
                 }
                 Err(e) => {
                     pb.println(format!("Failed to upload {}: {e}", file.name));
@@ -852,15 +1085,25 @@ pub async fn upload_folder(
         ));
     }
 
+    // Only mentioned in the human line when it actually happened, so the default
+    // (no --overwrite) output is unchanged. The JSON field is always present.
+    let total_overwritten = overwritten.load(Ordering::Relaxed);
+    let overwrote = if total_overwritten > 0 {
+        format!(", {total_overwritten} overwritten")
+    } else {
+        String::new()
+    };
     crate::output::emit(
         &format!(
-            "Folder uploaded in {elapsed_ms}ms, view it at {folder_url} ({total_uploaded} bytes)"
+            "Folder uploaded in {elapsed_ms}ms, view it at {folder_url} \
+             ({total_uploaded} bytes{overwrote})"
         ),
         serde_json::json!({
             "success": true,
             "folder": { "uuid": root_folder_id },
             "totalBytes": total_uploaded,
             "uploadTimeMs": elapsed_ms,
+            "filesOverwritten": total_overwritten,
         }),
     );
     Ok(())
@@ -904,6 +1147,7 @@ mod tests {
             true, // use_stdin
             Some("name.txt"),
             None,
+            false, // overwrite
             &limit_args,
         )
         .await
@@ -948,5 +1192,92 @@ mod tests {
         // as `upload_file`'s `--name`, at the same call site the real function uses.
         let err = derive_name_parts(Some("a/b"), Path::new("a/b")).unwrap_err();
         assert!(err.to_string().contains('/'), "unexpected error message: {err}");
+    }
+
+    // --- `--overwrite` pre-flight: batching, grouping, and record matching ---
+
+    fn triples(folder: &str, count: usize) -> Vec<(String, String, String)> {
+        (0..count)
+            .map(|i| (folder.to_string(), format!("file{i}"), "txt".to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn plan_duplicate_checks_is_one_request_per_folder() {
+        // The whole point of the batched pre-flight: a folder's worth of names
+        // costs one existence request, not one per file.
+        let plan = plan_duplicate_checks(&triples("folder-a", 12));
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].0, "folder-a");
+        assert_eq!(plan[0].1.len(), 12);
+        assert_eq!(plan[0].1[0], ("file0".to_string(), "txt".to_string()));
+    }
+
+    #[test]
+    fn plan_duplicate_checks_splits_a_big_folder_into_capped_batches() {
+        // Mirrors drive-web's 200-per-request cap on the same endpoint.
+        let plan = plan_duplicate_checks(&triples("folder-a", 450));
+        let sizes: Vec<usize> = plan.iter().map(|(_, batch)| batch.len()).collect();
+        assert_eq!(sizes, vec![200, 200, 50]);
+        assert!(plan.iter().all(|(folder, _)| folder == "folder-a"));
+    }
+
+    #[test]
+    fn plan_duplicate_checks_groups_interleaved_folders_and_keeps_scan_order() {
+        let files = vec![
+            ("folder-a".to_string(), "one".to_string(), "txt".to_string()),
+            ("folder-b".to_string(), "two".to_string(), "".to_string()),
+            ("folder-a".to_string(), "three".to_string(), "md".to_string()),
+        ];
+        let plan = plan_duplicate_checks(&files);
+        assert_eq!(plan.len(), 2, "one request per folder, not per file");
+        assert_eq!(plan[0].0, "folder-a");
+        assert_eq!(
+            plan[0].1,
+            vec![
+                ("one".to_string(), "txt".to_string()),
+                ("three".to_string(), "md".to_string()),
+            ]
+        );
+        assert_eq!(plan[1].0, "folder-b");
+        // An extensionless file is looked up under the empty type — the same
+        // thing `create_file_entry` sends for it.
+        assert_eq!(plan[1].1, vec![("two".to_string(), String::new())]);
+    }
+
+    #[test]
+    fn plan_duplicate_checks_is_empty_for_no_files() {
+        assert!(plan_duplicate_checks(&[]).is_empty());
+    }
+
+    #[test]
+    fn drive_file_type_matches_what_the_upload_sends() {
+        assert_eq!(drive_file_type(Path::new("/tmp/report.pdf")), "pdf");
+        assert_eq!(drive_file_type(Path::new("/tmp/README")), "");
+        assert_eq!(drive_file_type(Path::new("/tmp/archive.tar.gz")), "gz");
+    }
+
+    fn record(value: serde_json::Value) -> DriveFileData {
+        serde_json::from_value(value).expect("valid DriveFileData")
+    }
+
+    #[test]
+    fn existing_file_key_prefers_plain_name_and_defaults_the_type() {
+        let r = record(serde_json::json!({
+            "uuid": "u1", "plainName": "notes", "name": "encrypted-blob", "type": "txt"
+        }));
+        assert_eq!(existing_file_key(&r), Some(("notes".into(), "txt".into())));
+
+        // No `type` at all -> the extensionless key, matching what we ask for.
+        let r = record(serde_json::json!({ "uuid": "u2", "plainName": "LICENSE" }));
+        assert_eq!(existing_file_key(&r), Some(("LICENSE".into(), String::new())));
+
+        // Pre-plainName responses only carry `name`.
+        let r = record(serde_json::json!({ "uuid": "u3", "name": "legacy", "type": "bin" }));
+        assert_eq!(existing_file_key(&r), Some(("legacy".into(), "bin".into())));
+
+        // Nameless record: skipped rather than keyed under something wrong.
+        let r = record(serde_json::json!({ "uuid": "u4", "type": "txt" }));
+        assert_eq!(existing_file_key(&r), None);
     }
 }

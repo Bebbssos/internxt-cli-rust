@@ -248,7 +248,7 @@ both always work. Parent rows (in **bold**) just print help for their group.
 | &nbsp;&nbsp;[`create folder`](#create-folder) | Create a folder. | `create-folder` | |
 | **[`upload`](#upload-file)** | Upload a file or folder | | |
 | &nbsp;&nbsp;[`upload file`](#upload-file) | Upload a single file (streaming). | `upload-file` | |
-| &nbsp;&nbsp;[`upload folder`](#upload-folder) | Recursively upload a folder tree. | `upload-folder` | |
+| &nbsp;&nbsp;[`upload folder`](#upload-folder) | Recursively upload a folder tree. | `upload-folder` | `--overwrite` is new — official has it on `upload-file` only. |
 | **[`download`](#download-file)** | Download a file or folder | | |
 | &nbsp;&nbsp;[`download file`](#download-file) | Download + decrypt a file. | `download-file` | |
 | &nbsp;&nbsp;[`download folder`](#download-folder) | Recursively download a folder tree. | `download-folder` | New — official downloads single files only. |
@@ -820,20 +820,29 @@ Flags: `-f/--file <PATH>` (omit when using `--stdin`), `-i/--destination
 requires `--name`), `-n/--name <NAME>` (Drive filename; required with
 `--stdin`, otherwise overrides the name/extension from `--file`'s path),
 `-s/--size <BYTES>` (exact stdin length — streams directly if given,
-otherwise stdin is spooled to a temp file to learn its size), plus the
-[upload-limit flags](#upload-size-limit).
+otherwise stdin is spooled to a temp file to learn its size),
+`-o/--overwrite` (replace an existing file of the same name — see below),
+plus the [upload-limit flags](#upload-size-limit).
 
 ```sh
 ixr upload-file -f ./file.bin -i <folder-uuid>
+ixr upload-file -f ./report.csv --dest-path /Reports --overwrite  # replace, don't duplicate
 ixr upload-file -f ./big.iso --max-upload-size 20GB     # override the per-file cap
 ixr upload-file -f ./big.iso --no-upload-limit          # disable the cap
 tar -c ./dir | ixr upload-file --stdin --name dir.tar --dest-path /Backups
 ```
 
+By default Internxt keeps both entries when a file of the same name already
+exists in the destination folder. `-o/--overwrite` looks the name up first
+(one request, before any bytes are sent) and, if it's taken, swaps the new
+content into the existing file instead of creating a second one — the uuid,
+and therefore any share link, stays the same. Works with `--stdin` too.
+
 A thumbnail is generated automatically for image sources (best-effort, never
 fails the upload) — see [`thumbnail`](#thumbnail).
 
-JSON output: `{ "success": true, "file": { "uuid": "..." } }`.
+JSON output: `{ "success": true, "overwritten": false, "file": { "uuid": "..." } }`
+(`overwritten` is `true` when `--overwrite` replaced an existing entry).
 
 ### `upload folder`
 
@@ -843,13 +852,26 @@ folder tree (concurrent file uploads).
 Flags: `-f/--folder <PATH>` (required), `-i/--destination <FOLDER_ID>`
 (default: root), `--dest-path <PATH>` (alternative to `--destination`),
 `--exclude-empty-files` (skip 0-byte files client-side instead of uploading
-them — see below), plus the [upload-limit flags](#upload-size-limit).
+them — see below), `-o/--overwrite` (replace files that already exist at
+their destination — see below), plus the
+[upload-limit flags](#upload-size-limit).
 
 ```sh
 ixr upload-folder -f ./my-folder                # -i for a destination folder
 ixr upload-folder -f ./my-folder --dest-path /Backups
 ixr upload-folder -f ./my-folder --exclude-empty-files   # skip 0-byte files
+ixr upload-folder -f ./my-folder --overwrite    # replace, don't duplicate
 ```
+
+`-o/--overwrite` behaves like `upload file`'s, extended to the whole tree:
+each file that already exists at its destination is replaced in place instead
+of added alongside. The collision lookup is **batched** — one request per
+destination folder (in chunks of 200 names), all of them before any transfer
+starts — so re-uploading a large tree costs a handful of extra requests, not
+one per file. If a lookup fails the command aborts rather than falling back
+to plain uploads, since quietly leaving duplicates behind is what the flag
+exists to prevent. This flag has no upstream equivalent; the official CLI
+only has `--overwrite` on `upload-file`.
 
 Empty (0-byte) files are included by default and uploaded like any other
 file. Internxt's free/legacy plans reject them server-side (`HTTP 402
@@ -859,8 +881,9 @@ reports which file and why, instead of silently omitting it. Pass
 `--exclude-empty-files` to skip 0-byte files up front and avoid that failure
 entirely on plans that don't support them.
 
-JSON output: `{ "success": true, "folder": { "uuid": "..." }, "totalBytes": N, "uploadTimeMs": N }`
-on full success. If one or more files failed to upload, the command instead
+JSON output:
+`{ "success": true, "folder": { "uuid": "..." }, "totalBytes": N, "uploadTimeMs": N, "filesOverwritten": N }`
+on full success (`filesOverwritten` is `0` without `--overwrite`). If one or more files failed to upload, the command instead
 exits with a non-zero status and an error message naming each failed file
 and its reason (`{ "success": false, "message": "..." }` in `--json` mode).
 
