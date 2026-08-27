@@ -25,14 +25,29 @@ pub struct FileItem {
     pub bucket: String,
     pub file_id: Option<String>,
     pub updated_at: String,
+    /// When the *record* was created server-side (`createdAt`). Empty when the
+    /// item was synthesized locally rather than parsed from a listing.
+    pub created_at: String,
+    /// The file's own creation time (`creationTime`, falling back to
+    /// `createdAt`), as opposed to when the record was written.
+    pub creation_time: String,
+    /// The file's own modification time (`modificationTime`, falling back to
+    /// `updatedAt`) — client-supplied and preserved across upload/replace.
+    pub modification_time: String,
 }
 
 /// A resolved Drive folder.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct FolderItem {
     pub uuid: String,
     pub plain_name: String,
     pub updated_at: String,
+    /// See the matching fields on [`FileItem`]. Empty for the synthetic root
+    /// and the virtual (`//`/`//backups`) groupings, which are never fetched
+    /// as real folder records.
+    pub created_at: String,
+    pub creation_time: String,
+    pub modification_time: String,
 }
 
 /// Either kind of Drive item.
@@ -69,6 +84,20 @@ fn str_field(v: &Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
+/// First non-empty string field among `keys` (the listings spell the same
+/// timestamp differently across endpoints — camelCase in the folder-content
+/// response, snake_case in the folder-meta one — and older records omit the
+/// item-owned times entirely, hence the record-level fallback).
+fn first_str_field(v: &Value, keys: &[&str]) -> String {
+    for k in keys {
+        let s = str_field(v, k);
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    String::new()
+}
+
 fn size_field(v: &Value) -> u64 {
     match v.get("size") {
         Some(Value::Number(n)) => n.as_u64().unwrap_or(0),
@@ -82,6 +111,9 @@ pub(crate) fn parse_folder(v: &Value) -> FolderItem {
         uuid: str_field(v, "uuid"),
         plain_name: str_field(v, "plainName"),
         updated_at: str_field(v, "updatedAt"),
+        created_at: str_field(v, "createdAt"),
+        creation_time: first_str_field(v, &["creationTime", "creation_time", "createdAt"]),
+        modification_time: first_str_field(v, &["modificationTime", "modification_time", "updatedAt"]),
     }
 }
 
@@ -97,6 +129,9 @@ pub(crate) fn parse_file(v: &Value) -> FileItem {
             if id.is_empty() { None } else { Some(id) }
         },
         updated_at: str_field(v, "updatedAt"),
+        created_at: str_field(v, "createdAt"),
+        creation_time: first_str_field(v, &["creationTime", "creation_time", "createdAt"]),
+        modification_time: first_str_field(v, &["modificationTime", "modification_time", "updatedAt"]),
     }
 }
 
@@ -134,13 +169,13 @@ async fn virtual_folder_children(api: &DriveApi, token: &str, folder_uuid: &str)
         let mut out = vec![FolderItem {
             uuid: real_root.to_string(),
             plain_name: "drive".to_string(),
-            updated_at: String::new(),
+            ..Default::default()
         }];
         if !api.is_workspace() {
             out.push(FolderItem {
                 uuid: paths::VIRTUAL_BACKUPS_UUID.to_string(),
                 plain_name: "backups".to_string(),
-                updated_at: String::new(),
+                ..Default::default()
             });
         }
         return Some(Ok(out));
@@ -370,8 +405,8 @@ pub async fn resolve_folder(
 ) -> Result<Option<FolderItem>> {
     let mut current = FolderItem {
         uuid: root.to_string(),
-        plain_name: String::new(),
         updated_at: root_updated_at.to_string(),
+        ..Default::default()
     };
     for comp in components {
         match find_folder(api, token, &current.uuid, comp, cache).await? {
@@ -394,8 +429,8 @@ pub async fn resolve_folder_ci(
 ) -> Result<Option<FolderItem>> {
     let mut current = FolderItem {
         uuid: root.to_string(),
-        plain_name: String::new(),
         updated_at: root_updated_at.to_string(),
+        ..Default::default()
     };
     for comp in components {
         match find_folder_ci(api, token, &current.uuid, comp, cache).await? {
