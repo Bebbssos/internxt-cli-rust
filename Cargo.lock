@@ -2505,7 +2505,7 @@ dependencies = [
 [[package]]
 name = "internxt-core"
 version = "0.1.8"
-source = "git+https://github.com/Bebbssos/internxt-core-rust?branch=main#71c1c3d6ee6dfdeefc14185f684b18254d10a016"
+source = "git+https://github.com/Bebbssos/internxt-core-rust?branch=main#af24821fed1d293fb810a080de4344e5b3b1e160"
 dependencies = [
  "aes 0.9.1",
  "aes-gcm 0.11.0",
