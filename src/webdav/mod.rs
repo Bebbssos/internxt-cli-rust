@@ -134,10 +134,61 @@ impl AppError {
     }
 }
 
-/// Any internal error (network, API, IO) becomes a 500.
+/// Map an upstream Drive status onto the status this server answers with.
+///
+/// Mirrors og's `errors.middleware.ts`, which forwards the SDK error's
+/// `statusCode`/`status` and defaults to 500 — with two guards og doesn't need:
+///
+/// * **Only error statuses are forwarded.** A 1xx/2xx/3xx reaching here would
+///   mean an engine call failed *without* an error status (or with one `http`
+///   cannot represent), and answering a WebDAV client "204 No Content" for a
+///   failed PROPFIND is worse than an honest 500.
+/// * **Upstream 401/403 both become 403.** This server has its own auth layer
+///   (see [`check_auth`]), and a bare 401 is that layer's language: clients
+///   answer it by re-prompting for the *WebDAV* password and retrying. A
+///   Drive-side 401 means the stored Drive session is stale — a password the
+///   user types into their WebDAV client cannot fix it, so re-prompting would
+///   just loop. 403 says "authenticated here, refused there", which is exactly
+///   what happened, and it is a status WebDAV clients surface instead of
+///   swallowing. (The fix is `ixr login` on the server side.)
+///
+/// Takes the plain number rather than core's `reqwest::StatusCode`: `reqwest`
+/// is not a direct dependency here, and `axum`'s `http` need not be the same
+/// crate version core resolved.
+fn client_status(upstream: u16) -> StatusCode {
+    match StatusCode::from_u16(upstream) {
+        Ok(StatusCode::UNAUTHORIZED) => StatusCode::FORBIDDEN,
+        Ok(s) if s.is_client_error() || s.is_server_error() => s,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Turn an engine error into a WebDAV response.
+///
+/// A typed [`internxt_core::ApiError`] carries the upstream Drive status and
+/// the server's own explanation, and both reach the client: the status via
+/// [`client_status`], the explanation appended in brackets the way og's
+/// `errors.middleware.ts` does (`"{message} [{detail}]"`). Where og reads the
+/// detail off the SDK error's `data.message` (string, or array joined with
+/// `", "`), core has already done that extraction in `ApiError::detail()`.
+///
+/// Everything else — network, IO, crypto, a body that no longer deserializes —
+/// is untyped and stays a 500 with the full `anyhow` chain, as before.
 impl From<anyhow::Error> for AppError {
     fn from(e: anyhow::Error) -> Self {
-        AppError::internal(format!("{e:#}"))
+        let Some(api) = e.downcast_ref::<internxt_core::ApiError>() else {
+            return AppError::internal(format!("{e:#}"));
+        };
+        let message = match api.detail() {
+            // The server explained itself: show the explanation rather than the
+            // raw JSON body it was extracted from.
+            Some(detail) => format!("{} failed: HTTP {} [{detail}]", api.context(), api.status()),
+            // Nothing quotable in the body (empty, non-JSON, no `message`) —
+            // keep the engine's full message, raw body included. It is all the
+            // diagnostic there is.
+            None => format!("{e:#}"),
+        };
+        AppError::new(client_status(api.status_code()), message)
     }
 }
 
@@ -442,4 +493,99 @@ fn resolve_addr(host: &str, port: u16) -> Result<SocketAddr> {
         .map_err(|e| anyhow!("failed to resolve {host}:{port}: {e}"))?
         .next()
         .ok_or_else(|| anyhow!("no address resolved for {host}:{port}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use internxt_core::ApiError;
+
+    /// An engine error carrying an upstream status and body, as core raises it.
+    fn api_err(status: u16, body: &str) -> anyhow::Error {
+        ApiError::new(
+            "getFolderMeta",
+            reqwest::StatusCode::from_u16(status).unwrap(),
+            body,
+        )
+        .into()
+    }
+
+    fn mapped(status: u16, body: &str) -> AppError {
+        AppError::from(api_err(status, body))
+    }
+
+    #[test]
+    fn upstream_error_status_reaches_the_client() {
+        // og forwards the SDK error's status instead of collapsing to 500.
+        assert_eq!(mapped(404, "{}").status, StatusCode::NOT_FOUND);
+        assert_eq!(mapped(507, "{}").status, StatusCode::INSUFFICIENT_STORAGE);
+        assert_eq!(mapped(402, "{}").status, StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(mapped(429, "{}").status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(mapped(500, "{}").status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn an_untyped_error_is_still_a_500() {
+        let e = AppError::from(anyhow!("connection reset by peer"));
+        assert_eq!(e.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(e.message, "connection reset by peer");
+        // Text that merely looks like an API error is not one.
+        let looks_like = AppError::from(anyhow!("getFolderMeta failed: HTTP 404 Not Found: {{}}"));
+        assert_eq!(looks_like.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn drive_auth_failures_become_403_not_401() {
+        // 401 must not reach the client as 401: that is this server's own auth
+        // layer's language and would make clients re-prompt for the WebDAV
+        // password over a stale *Drive* session. 403 for both.
+        assert_eq!(mapped(401, "{}").status, StatusCode::FORBIDDEN);
+        assert_eq!(mapped(403, "{}").status, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn a_non_error_status_falls_back_to_500() {
+        // Nothing should produce these, but a 2xx/3xx answer rendered as a
+        // failure would be a nonsense response — 500 is the honest one.
+        assert_eq!(mapped(200, "{}").status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(mapped(204, "{}").status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(mapped(302, "{}").status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(mapped(100, "{}").status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn the_server_detail_is_appended_in_brackets() {
+        // og: `message += " [" + detail + "]"`, detail = the body's `message`.
+        let e = mapped(404, r#"{"statusCode":404,"message":"Folder not found"}"#);
+        assert_eq!(e.message, "getFolderMeta failed: HTTP 404 Not Found [Folder not found]");
+        // An array `message` (NestJS validation) is joined by core.
+        let e = mapped(400, r#"{"message":["name must be a string","name is required"]}"#);
+        assert_eq!(
+            e.message,
+            "getFolderMeta failed: HTTP 400 Bad Request [name must be a string, name is required]"
+        );
+    }
+
+    #[test]
+    fn without_a_detail_the_raw_message_is_kept() {
+        // No `message` field, non-JSON, and empty bodies all leave nothing to
+        // quote — the engine's own message (raw body included) stands.
+        let e = mapped(500, r#"{"statusCode":500,"error":"Internal Server Error"}"#);
+        assert_eq!(
+            e.message,
+            r#"getFolderMeta failed: HTTP 500 Internal Server Error: {"statusCode":500,"error":"Internal Server Error"}"#
+        );
+        let e = mapped(403, "<Error><Code>AccessDenied</Code></Error>");
+        assert_eq!(
+            e.message,
+            "getFolderMeta failed: HTTP 403 Forbidden: <Error><Code>AccessDenied</Code></Error>"
+        );
+        assert_eq!(mapped(404, "").message, "getFolderMeta failed: HTTP 404 Not Found");
+    }
+
+    #[test]
+    fn the_mapped_status_is_what_the_response_carries() {
+        let resp = mapped(507, r#"{"message":"Not enough storage"}"#).into_response();
+        assert_eq!(resp.status(), StatusCode::INSUFFICIENT_STORAGE);
+    }
 }
