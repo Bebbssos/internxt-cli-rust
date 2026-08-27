@@ -20,14 +20,14 @@
 //! of them being absent, while `--json` passes the server's response through
 //! untouched.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
 use crate::auth;
 use crate::drive_ops::{format_date, human_file_size, print_table};
 use crate::output;
-use crate::paths::{self, Expect};
+use crate::paths::{self, ItemTarget};
 use internxt_core::api::DriveApi;
 
 fn str_field(v: &Value, key: &str) -> String {
@@ -119,71 +119,11 @@ impl Direction {
     }
 }
 
-/// A file or folder to ask the sharing endpoints about.
-struct Target {
-    uuid: String,
-    /// `"file"` or `"folder"` — what the `/sharings/{item_type}/...` routes take.
-    item_type: String,
-    /// What the user typed, for messages (a path reads better than a uuid).
-    label: String,
-}
-
-impl Target {
-    fn as_json(&self, shared: bool) -> Value {
-        json!({ "uuid": self.uuid, "type": self.item_type, "shared": shared })
-    }
-}
-
-/// Canonical 8-4-4-4-12 hex. A Drive name could in principle be uuid-shaped;
-/// writing it as a path (`/that-name`) is the escape hatch, since the leading
-/// separator alone makes it stop matching.
-/// Nothing in a uuid says whether it points at a file or a folder, and the
-/// sharing routes need to know. Probe it the way `path-from-id` does:
-/// `/folders/{uuid}/meta` 404s for a file uuid, so success ⇒ folder.
-async fn type_of_uuid(api: &DriveApi, token: &str, uuid: &str) -> Result<String> {
-    if let Ok(meta) = api.get_folder_meta(token, uuid).await
-        && !str_field(&meta, "uuid").is_empty()
-    {
-        return Ok("folder".to_string());
-    }
-    api.get_file_meta_value(token, uuid)
-        .await
-        .map(|_| "file".to_string())
-        .map_err(|_| anyhow!("No file or folder found with id: {uuid}"))
-}
-
-/// Resolve the positional `<ITEM>` — a Drive path or a bare uuid — to the
-/// `(uuid, item_type)` pair the sharing endpoints take. `forced` is the
-/// optional `--type`, which also saves the lookup above.
-async fn resolve_item(
-    api: &DriveApi,
-    token: &str,
-    root: &str,
-    item: &str,
-    forced: Option<&str>,
-) -> Result<Target> {
-    let item = item.trim();
-    if item.is_empty() {
-        return Err(anyhow!("No file or folder given."));
-    }
-    if paths::looks_like_uuid(item) {
-        let item_type = match forced {
-            Some(t) => t.to_string(),
-            None => type_of_uuid(api, token, item).await?,
-        };
-        return Ok(Target { uuid: item.to_string(), item_type, label: item.to_string() });
-    }
-    let expect = match forced {
-        Some("file") => Expect::File,
-        Some("folder") => Expect::Folder,
-        _ => Expect::Any,
-    };
-    let resolved = paths::resolve_path(api, token, root, item, expect).await?;
-    Ok(Target {
-        item_type: if resolved.is_folder { "folder" } else { "file" }.to_string(),
-        uuid: resolved.uuid,
-        label: item.to_string(),
-    })
+/// The resolved `<ITEM>` as JSON, plus whether it turned out to be shared.
+/// `paths::resolve_item` does the uuid-or-path resolution — it is shared with
+/// `favorites`, whose routes take the same `{item_type}/{uuid}` pair.
+fn target_json(target: &ItemTarget, shared: bool) -> Value {
+    json!({ "uuid": target.uuid, "type": target.item_type, "shared": shared })
 }
 
 /// `roleId` -> role name, so an invitations table can show `EDITOR` instead of
@@ -301,7 +241,7 @@ pub async fn info(item: &str, item_type: Option<&str>) -> Result<()> {
     let creds = auth::get_auth_details().await?;
     let api = DriveApi::for_credentials(&creds);
     let token = &creds.token;
-    let target = resolve_item(&api, token, creds.root_folder(), item, item_type).await?;
+    let target = paths::resolve_item(&api, token, creds.root_folder(), item, item_type).await?;
 
     let info = match api.get_item_sharing_info(token, &target.item_type, &target.uuid).await {
         Ok(v) => Some(v),
@@ -326,7 +266,7 @@ pub async fn info(item: &str, item_type: Option<&str>) -> Result<()> {
             "",
             json!({
                 "success": true,
-                "item": target.as_json(info.is_some()),
+                "item": target_json(&target, info.is_some()),
                 "info": info,
                 "sharingType": sharing_type,
                 "invites": invites,
@@ -468,7 +408,7 @@ pub async fn revoke(item: &str, item_type: Option<&str>) -> Result<()> {
     let creds = auth::get_auth_details().await?;
     let api = DriveApi::for_credentials(&creds);
     let token = &creds.token;
-    let target = resolve_item(&api, token, creds.root_folder(), item, item_type).await?;
+    let target = paths::resolve_item(&api, token, creds.root_folder(), item, item_type).await?;
 
     // `stop_sharing` is idempotent — revoking an unshared item answers Ok — so
     // ask `/info` first, purely to be able to say which of the two happened
@@ -485,7 +425,7 @@ pub async fn revoke(item: &str, item_type: Option<&str>) -> Result<()> {
             json!({
                 "success": true,
                 "revoked": false,
-                "item": target.as_json(false),
+                "item": target_json(&target, false),
                 "message": message,
             }),
         );
@@ -499,7 +439,7 @@ pub async fn revoke(item: &str, item_type: Option<&str>) -> Result<()> {
         json!({
             "success": true,
             "revoked": true,
-            "item": target.as_json(false),
+            "item": target_json(&target, false),
             "message": message,
         }),
     );

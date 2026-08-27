@@ -5,6 +5,7 @@ mod commands;
 mod compare;
 mod drive_ops;
 mod du;
+mod favorites;
 #[cfg(feature = "fuse")]
 mod fuse;
 mod net_client;
@@ -13,6 +14,7 @@ mod nfs;
 mod output;
 mod paths;
 mod recents;
+mod search;
 #[cfg(any(feature = "webdav", feature = "fuse", feature = "smb", feature = "nfs", feature = "sftp"))]
 mod serve;
 pub(crate) mod session_creds;
@@ -256,6 +258,13 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         stats: bool,
     },
+    /// Fuzzy-search your whole Drive by name, best matches first.
+    ///
+    /// New — no official equivalent (this is the endpoint behind drive-web's
+    /// search box). Workspace-aware: with a workspace active it searches that
+    /// workspace's drive.
+    #[command(alias = "find")]
+    Search(SearchArgs),
     /// Create a folder in your Internxt Drive.
     #[command(hide = true)]
     CreateFolder(CreateFolderArgs),
@@ -699,6 +708,11 @@ enum Commands {
     /// implement yet.
     #[command(subcommand)]
     Shared(SharedCmd),
+    /// Manage favorites (see `favorites list|add|remove`).
+    ///
+    /// New — no official CLI equivalent (favorites are a drive-web feature).
+    #[command(subcommand, aliases = ["favourites", "fav"])]
+    Favorites(FavoritesCmd),
     /// Internxt VPN: list available locations, or run a local proxy that
     /// tunnels through it (see `vpn locations`, `vpn proxy`). New — no
     /// official CLI equivalent (the VPN otherwise ships as a browser
@@ -1071,6 +1085,96 @@ enum SharedCmd {
     Domains,
     /// Stop sharing a file or folder.
     Revoke(SharedItemArgs),
+}
+
+#[derive(clap::Args)]
+struct FavoritesListArgs {
+    /// List only favorited files, or only favorited folders. The endpoint
+    /// answers for one kind per call, so omitting this costs two requests
+    /// (one page of each).
+    #[arg(short = 't', long = "type", value_name = "KIND", value_parser = ["file", "folder"])]
+    item_type: Option<String>,
+    /// Items per page, applied to each kind separately.
+    #[arg(short, long, default_value_t = favorites::DEFAULT_LIMIT)]
+    limit: u32,
+    /// Items to skip, applied to each kind separately.
+    #[arg(short, long, default_value_t = 0)]
+    offset: u32,
+    /// Field to sort by (`name`/`plainName`, `modified`/`updatedAt`, `uuid`).
+    /// Left to the backend's default when omitted.
+    #[arg(
+        short,
+        long,
+        value_name = "FIELD",
+        value_parser = ["name", "plainName", "modified", "updatedAt", "uuid"],
+        ignore_case = true,
+    )]
+    sort: Option<String>,
+    /// Sort direction. Left to the backend's default when omitted.
+    #[arg(long, value_parser = ["asc", "desc"], ignore_case = true)]
+    order: Option<String>,
+    /// Display additional information (uuid).
+    #[arg(short, long, default_value_t = false)]
+    extended: bool,
+}
+
+#[derive(clap::Args)]
+struct FavoritesItemArgs {
+    /// The file or folder: a Drive path (e.g. `/Docs/report.pdf`) or its
+    /// uuid. A value shaped exactly like a uuid is taken as one; write it as
+    /// a path (`/that-name`) if a Drive item is genuinely named that way.
+    #[arg(value_name = "ITEM")]
+    item: String,
+    /// Whether ITEM is a file or a folder. Only saves the extra lookup that
+    /// works this out when ITEM is a uuid.
+    #[arg(short = 't', long = "type", value_parser = ["file", "folder"])]
+    item_type: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum FavoritesCmd {
+    /// List your favorited files and folders.
+    List(FavoritesListArgs),
+    /// Mark a file or folder as a favorite.
+    #[command(alias = "mark")]
+    Add(FavoritesItemArgs),
+    /// Drop a file or folder from your favorites.
+    #[command(aliases = ["rm", "unmark"])]
+    Remove(FavoritesItemArgs),
+}
+
+#[derive(clap::Args)]
+struct SearchArgs {
+    /// What to search for — matched fuzzily against item names.
+    #[arg(value_name = "QUERY")]
+    query: String,
+    /// Restrict to these file extensions (`--type pdf,jpg`, or repeated).
+    /// Extensions OR together; the reserved value `folder` also includes
+    /// folders in the results.
+    #[arg(short = 't', long = "type", value_name = "EXT", value_delimiter = ',')]
+    types: Vec<String>,
+    /// Only files at least this big, e.g. `500K`, `5GB`, or raw bytes.
+    /// Excludes folders, which have no size.
+    #[arg(long, value_name = "SIZE")]
+    min_size: Option<String>,
+    /// Only files at most this big, e.g. `500K`, `5GB`, or raw bytes.
+    /// Excludes folders, which have no size.
+    #[arg(long, value_name = "SIZE")]
+    max_size: Option<String>,
+    /// Only items modified after this point: `2026-01-02`, `2026-01-02 15:04`
+    /// or a full `2026-01-02T15:04:05Z`. A value with no timezone is UTC.
+    #[arg(long, value_name = "WHEN")]
+    modified_after: Option<String>,
+    /// Only items modified before this point (same formats as
+    /// --modified-after).
+    #[arg(long, value_name = "WHEN")]
+    modified_before: Option<String>,
+    /// Hits to skip. The page size is the backend's, not ours to set.
+    #[arg(long, value_name = "N")]
+    offset: Option<u32>,
+    /// Display additional information (match score and uuid).
+    #[arg(short, long, default_value_t = false)]
+    extended: bool,
 }
 
 #[cfg(feature = "vpn")]
@@ -2064,6 +2168,19 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Tree { folder, depth, folders_only, extended, stats } => {
             tree::tree(folder.as_deref(), depth, folders_only, extended, stats).await?
         }
+        Commands::Search(args) => {
+            search::search(
+                &args.query,
+                &args.types,
+                args.min_size.as_deref(),
+                args.max_size.as_deref(),
+                args.modified_after.as_deref(),
+                args.modified_before.as_deref(),
+                args.offset,
+                args.extended,
+            )
+            .await?
+        }
         Commands::CreateFolder(args) => do_create_folder(args).await?,
         Commands::MoveFile(args) => do_move_file(args).await?,
         Commands::MoveFolder(args) => do_move_folder(args).await?,
@@ -2556,6 +2673,25 @@ async fn run(cli: Cli) -> Result<()> {
             SharedCmd::Roles => sharing::roles().await?,
             SharedCmd::Domains => sharing::domains().await?,
             SharedCmd::Revoke(args) => sharing::revoke(&args.item, args.item_type.as_deref()).await?,
+        },
+        Commands::Favorites(cmd) => match cmd {
+            FavoritesCmd::List(args) => {
+                favorites::list(
+                    args.item_type.as_deref(),
+                    args.limit,
+                    args.offset,
+                    args.sort.as_deref(),
+                    args.order.as_deref(),
+                    args.extended,
+                )
+                .await?
+            }
+            FavoritesCmd::Add(args) => {
+                favorites::set(&args.item, args.item_type.as_deref(), true).await?
+            }
+            FavoritesCmd::Remove(args) => {
+                favorites::set(&args.item, args.item_type.as_deref(), false).await?
+            }
         },
         #[cfg(feature = "vpn")]
         Commands::Vpn(cmd) => match cmd {
